@@ -1,0 +1,401 @@
+--- PAGE 1 ---
+1. IntegrationGuidance
+IntegrateURLs
+RESTAPITrading:https://api1.btloginc.com:9081
+HeartbeatAPIcalls,sentonceevery20seconds,arerequiredtomaintaintheconnectionfortradingandmarketcharts.
+GenerateAPIKey
+YoucangenerateAPIKeyhere.
+APIKeyincludesthesetwoparts:● SecretKey:Keyusedforsignatureauthenticationencryption(onlyvisibleduringapplication)● APIKey:Hasaccesstoallfeatures,includingtradingandmarketquotes.
+Thesetwokeysarerelatedtoaccountsecurityandshouldnotbedisclosedtoanyoneelseatanytime.
+SignatureSteps
+1.SortparameternamesinASCIIorder.Forexample,thefollowingistheoriginalorderoftherequestparameters,afterencodingaccountid=142&token=00000011391572680255209&sign=1243
+UTF-8encodingandURIencodingareused.Hexadecimalcharactersmustbecapitalised,e.g.":"isencodedas"%3A"andspacesareencodedas"%20".
+2.Aftersorting,thefinalstringforsignaturecalculationiscomposedasfollows:
+accountid=142&secret_key=e8d24af2-1274-4fa1-a666-5a4ca7740afd&token=00000011391572680255209
+Secretkeyistheauthenticationkey,whichisassignedwhentheAPIiscreatedintheAPImanagementinterface.
+3.Usingthe"requeststring"generatedinthepreviousstep,includingyourSecretKey,callthemd5hashfunctiontoobtainthehashvalue.
+4.Addthegenerateddigitalsignaturetotherequest'spathparameters.Ultimately,theAPIrequestsenttotheservershouldbe:
+accountid=142&token=00000011391572680255209&sign=ba776fe2074bf6a8cf79500f72e6804e
+AddthedigitalsignaturetothepathparameterafterURLencoding,withtheparametername"sign".
+--- PAGE 2 ---
+RequestFormat
+AllAPIrequestsaresentasGETorPOSTrequests.ForGETrequests,allparametersareinthepathparameters;forPOSTrequests,allparametersareinthepathparameters.
+ReturnFormat
+AllAPIreturnsareinJSONformat.AtthetopleveloftheJSONformat,thereareseveralfieldsindicatingthestatusandattributesoftherequest:"code"and"msg".Theotherfieldsarethereturnedcontent.Whenthecodeequals0itindicatessuccess;codenotequalto0meansfailure.Msgisthespecificerrormessage.
+2. TradingAPI
+Login
+POST/v1/user/loginParameters:
+Name Type Required Description
+user_name String Yes Emailaddressormobilenumber
+password String Yes Password
+company_id Uint32 Yes CompanyID(Default:1)
+api_key String Yes APIaccesskey
+sign String Yes Authenticationkey
+Response:
+{"token":"00000013411571637727917","account":{ //Accountdetails
+--- PAGE 3 ---
+"id":320, //AccountID"userid":1341, //UserID"account_groupid":13, //AccountgroupID"balance":0, //Accountbalance"equity":0, //Accountnetvalue"margin":0, //Margin"free_margin":0, //Freemargin"margin_level":0, //Accountmarginlevel"margin_stopout":0, //Accountmarginliquidationlevel"account_no":"86000402", //Accountnumber"positions":0, //Numberofpositions"bonus":0.0, //Coupon"status":0 //Status(0:Normal,1:Delete)},"server_time":1571637727, //Servertime"code":0, //0:success!0:failed"msg":"LoginSuccess" //Detailsdescription}
+Heartbeat
+GET/v1/user/keepaliveParameters:
+Name Type Required Description
+token String 　Yes Thetokenreturnedafterloggingin
+accountid Uint64 　No AccountID
+sign String Yes Authenticationkey
+Response:
+{"accountid":320, //AccountID"server_time":0, //Servertime"code":0, //0:success !0:failed"msg":""}
+Accesslistofproducts
+GET/v1/config/symbollistParameters:
+--- PAGE 4 ---
+Name Type Required Description
+token String 　Yes Thetokenreturnedafterloggingin
+account_group_id Uint64 　No AccountgroupID
+sign String Yes Authenticationkey
+Response:
+{"symbols":[{"id":364, //ProductID"uuid":1148, //uuid,getthelatestproductattributesbasedonthisuuid
+"name":"GWFX/USDT/GTS/MM/MIN/0/A/BTCUSDT5x",//Productname"enable":false, //Istheproductdelisted"digits":2, //Numberofdecimalplaces"volumes_min":0.01, //Minimumorderquantity"volumes_step":0.01, //Stepsize"volumes_max":10, //Maximumorderquantity"base_currency":"BTC", //Basecurrency"profit_currency":"USDT",//Profitcurrency"margin_currency":"USDT",//Margincurrency"tradable":1, //Istheproducttradable(0:No,1:Yes,2:Onlybuy,3:Onlysell)"start_time":1567995643, //Productstarttime"expiry_time":1567996380,//Productendtime"create_time":1567996380,//Productcreationtime"status":0, //Productstatus(0:Normal,1:Delete)"contract_size":1, //Contractsize"symbol_margin_level":[{"symbol_id":599,"range_min":0,"range_max":20,"margin_initial":32000.12,"margin_maintenance":32000,"margin_stopout":9600,"margin_hedged":100,"special_margin_initial":0,"special_margin_maintenance":0,"special_margin_stopout":0,"special_margin_hedged":0,"holiday_margin_initial":1600,"holiday_margin_maintenance":1600,"holiday_margin_stopout":480,"holiday_margin_hedged":25,"create_time":1571658525,"create_user_id":2,"modi_time":1665455763,
+--- PAGE 5 ---
+"modi_user_id":2,"status":0}],"commissions":[{"symbol_id":599,"commission_rebate":0,"trigger_mode":2,"type":1,"method":1,"range_min":0.001,"range_max":999999,"value":0.18,"currency_type":0,"currency":"USDT","comment":"","status":0}],"long_swap":1.0, //Longorderinterest"short_swap":1.0, //Shortorderinterest"stop_level":1, //Minimumrangefortakeprofitandstoploss"maxstop_level":1, //Maximumrangefortakeprofitandstoploss"three_days_swap":1 //Holidayinterest"pips_ratio":1,"spread":0,"spread_balance":0,"range_init":0,"code_id":1430475842,"position_volumes_max":40,"margin_initial":0,"calc_margin_type":2,"default_first":0,"volumes_list":"0.1;0.5;1;20","max_pos_value":0,"gap_value":0}],"code":0, //0:success !0:failed"msg":""}
+Accessaccountgroupinformation
+GET/v1/config/accountgroupParameters:
+--- PAGE 6 ---
+Name Type Required Description
+token String Yes Thetokenreturnedafterloggingin
+account_groupid Uint64 Yes AccountgroupID
+sign String Yes Authenticationkey
+Responses:
+{"account_group":{ //Accountgroupdetails
+"companyid":0, //CompanyID"currency":"string", //Accountgroupcurrency"enable":true, //Isaccountgroupenabled"id":0, //AccountgroupID"margin_call_level":0, //Margincalllevel"name":"string", //Accountgroupname"platform":"string", //Platform"status":0, //Accountgroupstatus(0:Normal,1:Delete)"stop_out_level":0 //Liquidationlevel"digits":2 //Numberofdecimalplaces
+},"code":0,"msg":"string"}
+Accesspositionlist
+GET/v1/account/positionlistParameters:
+Name Type Required Description
+token String Yes Thetokenreturnedafterloggingin
+accountid Uint64 Yes AccountID
+symbol String No Productname
+id Sint64 No PositionID
+--- PAGE 7 ---
+pageNo Int Yes Currentpagenumber
+pageSize Int Yes Numberofitemsperpage
+sign String Yes Authenticationkey
+Responses:
+{"code":0,"msg":"string","positions":[{"accountid":0, //AccountID"close_price":0, //Closingprice"close_time":0, //Closingtime"commission":0, //Tradingfeerequired"direction":0, //Orderdirection(1:Buy,2:Sell)"exec_commission":0, //Actualtradingfee"exec_price":0, //Fillprice"exec_profit":0, //Fillprofit/loss"exec_swap":0, //Fundingfee"exec_time":0, //Filltime"exec_volume":0, //Fillamount"groupid":0, //AccountgroupID"id":0, //PositionID"init_volume":0, // Initialpositionsizerequested"msg":"string","open_price":0, //Openingprice"open_time":0, //Openingtime"order_refid":0, //Reservedforclientusage."profit":0, //Positionprofitandloss"rate":0, //Theexchangeratewhenthepositionswerelastopened/closed/modified"ref_accid":0, //Reservedforclientusage."status":0, //Status(0:Initial,1:Openedposition,2:Closed)"stop_loss":0, //Stoploss"swap":0, //Positioninterest"symbol":"string", //Productname"take_profit":0, //Takeprofit"volume":0 //Amount"deal_id":0 //FillorderID"open_margin":0.0 //Marginratio"multiple":0 //Leverage
+}],"total":1 //Totalnumberofrecords}
+--- PAGE 8 ---
+Accessaccountinformation
+GET/v1/account/accountParameters:
+Name Type Required Description
+token String Yes Thetokenreturnedafterloggingin
+accountid Uint64 Yes AccountID
+sign String Yes Authenticationkey
+Responses:
+{"account":{ //Accountdetails"account_groupid":0, //AccountgroupID"account_no":"string", //Accountnumber"balance":0, //Accountbalance"equity":0, //Accountnetvalue"free_margin":0, //Accountfreemargin"id":0, //AccountID"margin":0, //Accountmargin"margin_level":0, //Accountmarginlevel"margin_stopout":0, //Marginliquidationlevel"positions":0, //Numberofpositions"bonus":0, //Coupon"status":0, //Status(0:Normal,1:Delete)"userid":0},"code":0,"msg":"string"}
+Openposition
+POST/v1/account/openpositionParameters:
+Name Type Required Description
+--- PAGE 9 ---
+token string Yes Thetokenreturnedafterloggingin
+accountid uint64 Yes AccountID
+direction uint32 Yes Orderdirection(1:Buy,2:Sell)
+symbol string Yes Productname
+request_volume double Yes Requestedquantity
+request_price double Yes Requestprice
+refid uint64 No Reservedforclientusage
+ref_accid uint64 No Reservedforclientusage
+stop_loss double No Stoploss
+take_profit double No Takeprofit
+multiple uint16 Yes Leverage
+sign string Yes Authenticationkey
+Responses:
+{"code":0,"msg":"string","position":{ //Positiondetailsreturnedafterplacinganorder"accountid":0, //AccountID"close_price":0, //Closingprice"close_time":0, //Closingtime"commission":0, //Tradingfee"direction":0, //Orderdirection(1:Buy,2:Sell)"exec_commission":0, //Actualtradingfee"exec_price":0, //Fillprice"exec_profit":0, //Fillprofit/loss"exec_swap":0, //Fundingfee"exec_time":0, //Filltime"exec_volume":0, //Fillamount"groupid":0, //AccountgroupID"id":0, //PositionID
+--- PAGE 10 ---
+"init_volume":0, //Initialpositionsizerequested"msg":"string","open_price":0, //Openingprice"open_time":0, //Openingtime"order_refid":0, //reservedforclientusage."profit":0, //Positionprofitandloss"rate":0, //Theexchangeratewhenthepositionswerelastopened/closed/modified"ref_accid":0, //reservedforclientusage."status":0, //Status(0:initial,1:holdingposition,2:closed)"stop_loss":0, //Stoploss"swap":0, //Positioninterest"symbol":"string", //Productname"symbolid":0, //ProductID"take_profit":0, //Takeprofit"volume":0, //Amount"open_margin":0.0, //Openingmargin"multiple":2, //Leverage"pos_type":1 //1.Openposition 2.Openpositionforleadtrading 3.Openpositionfromcopytrading}}
+Closepositionatmarketprice
+POST/v1/account/closepositionParameters:
+Name Type Required Description
+token string Yes Thetokenreturnedafterloggingin
+accountid uint64 Yes AccountID
+positionid uint64 Yes PositionIDwhenclosingaposition.Notrequiredwhenopeningaposition.
+direction uint32 Yes Orderdirection(1:Buy,2:Sell)
+symbol string Yes Productname
+request_volume double Yes Requestvolume
+--- PAGE 11 ---
+request_price double Yes Requestprice
+refid uint64 No reservedforclientusage.
+sign string Yes Authenticationkey
+Responses:
+{"code":0,"msg":"string","position":{ //Positiondetailsreturned"accountid":0, //AccountID"close_price":0, //Closingprice"close_time":0, //Closingtime"commission":0, //Tradingfee"direction":0, //Orderdirection(1:Buy,2:Sell)"exec_commission":0, //Actualtradingfee"exec_price":0, //Fillprice"exec_profit":0, //Fillprofit/loss"exec_swap":0, //Fundingfee"exec_time":0, //Filltime"exec_volume":0, //Fillamount"groupid":0, //AccountgroupID"id":0, //PositionID"init_volume":0, //Initialpositionsizerequested"msg":"string","open_price":0, //Openingprice"open_time":0, //Openingtime"order_refid":0, //reservedforclientusage."profit":0, //Positionprofitandloss"rate":0, //Theexchangeratewhenthepositionswerelastopened/closed/modified"ref_accid":0, //reservedforclientusage."status":0, //Status(0:initial,1:holdingposition,2:closed)"stop_loss":0, //Stoploss"swap":0, //Positioninterest"symbol":"string", //Productname"symbolid":0, //ProductID"take_profit":0, //Takeprofit"volume":0, //Amount"open_margin":0.0, //Openingmargin"multiple":2, //Leverage"pos_type":1 //1.Openposition 2.Openpositionforleadtrading 3.Openpositionfromcopytrading}}
+--- PAGE 12 ---
+Modifypositions
+POST/v1/account/updatepositionParameters:
+Name Type Required Description
+token string Yes Thetokenreturnedafterloggingin
+accountid uint64 Yes AccountID
+id uint64 Yes PositionID
+stop_loss double Yes Stoploss
+take_profit double Yes Takeprofit
+symbol string Yes Productname
+sign string Yes Authenticationkey
+Responses:
+{"code":0,"msg":"string","position":{ //Positiondetailsreturned"accountid":0, //AccountID"close_price":0, //Closingprice"close_time":0, //Closingtime"commission":0, //Tradingfee"direction":0, //Orderdirection(1:Buy,2:Sell)"exec_commission":0, //Actualtradingfee"exec_price":0, //Fillprice"exec_profit":0, //Fillprofit/loss"exec_swap":0, //Fundingfee"exec_time":0, //Filltime"exec_volume":0, //Fillamount"groupid":0, //AccountgroupID"id":0, //PositionID"init_volume":0, //Initialpositionsizerequested"msg":"string","open_price":0, //Openingprice"open_time":0, //Openingtime"order_refid":0, //reservedforclientusage.
+--- PAGE 13 ---
+"profit":0, //Positionprofitandloss"rate":0, //Theexchangeratewhenthepositionswerelastopened/closed/modified"ref_accid":0, //reservedforclientusage."status":0, //Status(0:initial,1:holdingposition,2:closed)"stop_loss":0, //Stoploss"swap":0, //Positioninterest"symbol":"string", //Productname"symbolid":0, //ProductID"take_profit":0, //Takeprofit"volume":0, //Amount"open_margin":0.0, //Openingmargin"multiple":2, //Leverage"pos_type":1 //1.Openposition 2.Openpositionforleadtrading 3.Openpositionfromcopytrading}}
+Pendingorders
+POST/v1/account/openpendingParameters
+Name Type Required Description
+token string Yes Thetokenreturnedafterloggingin
+accountid uint64 Yes AccountID
+direction uint32 Yes Orderdirection(1:Buy,2:Sell)
+type uint32 Yes 1.Limitopenorder
+2.Stopopenorder
+3.Limitcloseorder
+4.MarketSLOrder
+5.MarketTPOrder
+symbol string Yes Productname
+request_volume double Yes Requestvolume
+request_price double Yes Requestprice
+--- PAGE 14 ---
+stop_loss double No Stop-lossprice
+Whentypeis4or5andisnot0,marketSLorderwillbeopened.
+take_profit double No Take-profitprice
+Whentypeis4or5andisnot0,marketTPorderwillbeopened.
+multiple Uint16 Yes Leverage
+positionid Uint32 No Whentypeis3,4,or5,positionidcannotbe0.
+sign string Yes Authenticationkey
+Responses:
+{"code":0,"msg":"string","order":{ //Orderdetailsreturned"accountid":0, //AccountID"direction":0, //Orderdirection(1:Buy,2:Sell)"execute_price":0, //Fillprice"execute_time":0, //Filltime"execute_volume":0, //Fillamount"expire_time":0, //Settlementtime"expire_type":0, //Settlementtype:Initial:0;Perpetual:3"groupid":0, //AccountgroupID"id":0, //OrderID"init_volume":0, //Initialpositionsizerequested"request_price":0, //Requestedprice"request_time":0, //Requestedtime"request_volume":0, //Requestedquantity"status":0, //Status(0:initial,1:pendingorderplaced,2:Orderexecutiontriggered,4:Partialorderexecutiontriggered,5:cancelled,6:declined)"stop_loss":0, //Stoplossprice"symbol":"string", //Productname"take_profit":0, //Takeprofitprice"type": 1 //1: Limit openorder, 2: Stopopenorder, 3: Limit closeorder, 4: Market SLOrder,5:MarketTPOrder"multiple":2 //Leverage
+--- PAGE 15 ---
+}}
+Modifypendingorders
+POST/v1/account/updatependingParameters:
+Name Type Required Description
+token string Yes Thetokenreturnedafterloggingin
+accountid uint64 Yes AccountID
+id uint64 Yes OrderID
+direction uint32 Yes Orderdirection(1:Buy,2:Sell)
+type uint32 Yes 0:Limitpendingorder
+1:Stoppendingorder
+symbol string No Productname
+request_volume double Yes Requestedquantity
+request_price double Yes Requestedprice
+stop_loss double No Stoploss
+take_profit double No Takeprofit
+sign string Yes Authenticationkey
+Response:
+{"code":0,"msg":"string","order":{ //Orderdetailsreturned
+--- PAGE 16 ---
+"accountid":0, //AccountID"direction":0, //Orderdirection(1:Buy,2:Sell)"execute_price":0, //Fillprice"execute_time":0, //Filltime"execute_volume":0, //Fillamount"expire_time":0, //Settlementtime"expire_type":0, //Settlementtype:Initial:0;Perpetual:3"groupid":0, //AccountgroupID"id":0, //OrderID"init_volume":0, //Initialpositionsizerequested"request_price":0, //Requestedprice"request_time":0, //Requestedtime"request_volume":0, //Requestedquantity"status":0, //Status(0:initial,1:pendingorderplaced,2:Orderexecutiontriggered,4:Partialorderexecutiontriggered,5:cancelled,6:declined)"stop_loss":0, //Stoploss"symbol":"string", //Productname"take_profit":0, //Takeprofit"type": 1 //1: Limit openorder, 2: Stopopenorder, 3: Limit closeorder, 4: Market SLOrder,5:MarketTPOrder"multiple":2 //Leverage}}
+Cancelpendingorders
+POST/v1/account/cancelpendingParameters:
+Name Type Required Description
+token string Yes Thetokenreturnedafterloggingin
+accountid uint64 Yes AccountID
+id uint64 Yes OrderID
+sign string Yes Authenticationkey
+Responses:
+{"code":0,
+--- PAGE 17 ---
+"msg":"string","order":{ //Orderdetailsreturned"accountid":0, //AccountID"direction":0, //Orderdirection(1:Buy,2:Sell)"execute_price":0, //Fillprice"execute_time":0, //Filltime"execute_volume":0, //Fillamount"expire_time":0, //Settlementtime"expire_type":0, //Settlementtype:Initial:0;Perpetual:3"groupid":0, //AccountgroupID"id":0, //OrderID"init_volume":0, //Initialpositionsizerequested"request_price":0, //Requestedprice"request_time":0, //Requestedtime"request_volume":0, //Requestedquantity"status":0, //Status(0:initial,1:pendingorderplaced,2:Orderexecutiontriggered,4:Partialorderexecutiontriggered,5:cancelled,6:declined)"stop_loss":0, //Stoploss"symbol":"string", //Productname"take_profit":0, //Takeprofit"type": 1 //1: Limit openorder, 2: Stopopenorder, 3: Limit closeorder, 4: Market SLOrder,5:MarketTPOrder"multiple":2 //Leverage}}
+Accessthelistofexecutedordersoftheday
+GET/v1/account/dealTodayListParameters:
+Name Type Required Description
+token string Yes Thetokenreturnedafterloggingin
+accountid uint64 Yes AccountID
+id uint64 No FillorderID
+sign string Yes Authenticationkey
+Response:
+--- PAGE 18 ---
+{{"code":0,"msg":"string","settlement_time":0,"orders":[{ "accountid":0,//AccountID"groupid":0, //AccountgroupID"direction":1,// Direction:1=Buy;2=Sell"exec_price":0, //Fillprice"exec_time":0, //Filltime"exec_volume":0, //Fillamount"id":0, //AccountID"positionid":0, //PositionID"profit":0, //Positionprofitandloss"reason":0, //1-Openposition2-Closeposition"src_price":0, //Openingprice"src_time":0, //Openingtime"src_volume":0, //Openpositionamount"status":0, //Status"swap":0, //Positioninterest"symbol":"string",//Productname"order_type":0",//(1:Openpositionatmarketprice;2：Openpositionatlimitprice; 3:Openpositionatstoplimitprice;4,5,6,8,9:Closeposition;7:Forcedliquidation;12:Modifyposition)"commission":0.0,//Tradingfee"multiple":0//Leverage
+}]}
+AccessP/Llistoftheday
+GET/v1/account/profitTodayListParameters:
+Name Type Required Description
+token string Yes Thetokenreturnedafterloggingin
+accountid uint64 Yes AccountID
+id uint64 No FillorderID
+sign string Yes Authenticationkey
+Response:
+--- PAGE 19 ---
+{{"code":0,"msg":"string","settlement_time":0,"orders":[{ "accountid":0,//AccountID"groupid":0, //AccountgroupID"direction":1,// Direction:1=BUY;2=SELL"exec_price":0, //Fillprice"exec_time":0, //Filltime"exec_volume":0, //Fillamount"id":0, //AccountID"positionid":0, //PositionID"profit":0, //Positionprofitandloss"reason":0, //1-Openposition;2-Closeposition"src_price":0, //Openingprice"src_time":0, //Openingtime"src_volume":0, //Openpositionamount"status":0, //Status"swap":0, //Positioninterest"symbol":"string",//Productname"order_type":0",//(1:Openpositionatmarketprice;2：Openpositionatlimitprice; 3:Openpositionatstoplimitprice;4,5,6,8,9:Closeposition;7:Forcedliquidation;12:Modifyposition)"commission":0.0,//Tradingfee"multiple":0//Leverage
+}]}
+Accesslistofpendingorders
+GET/v1/account/orderListParameters:
+Name Type Required Description
+token string Yes Thetokenreturnedafterloggingin
+accountid uint64 Yes AccountID
+id uint64 No PendingorderID
+sign string Yes Authenticationkey
+Response:
+--- PAGE 20 ---
+{"code":0,"msg":"string","orders":[{"accountid":0, //AccountID"direction":0, //Orderdirection(1:Buy,2:Sell)"execute_price":0, //Fillprice"execute_time":0, //Filltime"execute_volume":0, //Fillamount"expire_time":0, //Settlementtime"expire_type":0, //Settlementtype:Initial:0;Perpetual:3"groupid":0, //AccountgroupID"id":0, //OrderID"init_volume":0, //Initialpositionsizerequested"request_price":0, //Requestedprice"request_time":0, //Requestedtime"request_volume":0, //Requestedquantity"status":0, //Status(0:initial,1:pendingorderplaced,2:Orderexecutiontriggered,4:Partialorderexecutiontriggered,5:cancelled,6:declined)"stop_loss":0, //Stoploss"symbol":"string", //Productname"take_profit":0, //Takeprofit"type": 0 //1: Limit openorder, 2: Stopopenorder, 3: Limit closeorder, 4: Market SLOrder,5:MarketTPOrder"multiple":2 //Leverage}]}
+--- PAGE 21 ---
+3.Checktransactionhistory
+RequestP/Lhistory
+GET/v1/user/getProfitReportParameters:
+Name Type Required Description
+token String Yes token
+beginTime uint64 No Starttime
+endTime uint64 No Endtime
+pageNo Int Yes Pagenumber
+pageSize int Yes Numberofitemsperpage
+orderId string No OrderIDofaparticularorder
+symbol string No Product
+orderType Int32 No Ordertype
+openDirection Int32 No Orderdirection
+1:Buy
+2:Sell
+contractType Int32 No Contracttype
+1ornoreturnvalue:USDT-margined
+2:Coin-margined
+sign string Yes Authenticationkey
+--- PAGE 22 ---
+Responses:{"list":[{"dealId":"10000033", //TransactionID"symbol":"GWFX/USD/GTS/MM/STD/0/A/BCHUSD",//Product"orderType":1, //Ordertype"openDirection":"BUY", //Openorderdirection"openPrice":132.1, //Openorderprice"tradeVolume":0.1, //Closeordersize"tradePrice":132.1, //Closeorderprice"digits":2, //Numberofdecimalplaces"swap":0, //Interest"commission":0, //Tradingfee"profit":0, //Profitandloss"openNo":"10000013" //Positionnumber"openTime":0 //Openordertime"tradeTime":0 //Closeordertime"remark":"" //Remarks"multiple":10 //Leverage"productName":"btc" //Productname"currency":"usdt" //Currency
+},{"dealId":"10006593","symbol":"GWFX/USDT/GTS/MM/STD/0/A/ETHUSDT5x","orderType":1,"openDirection":"BUY","openPrice":162.87,"tradeVolume":0.1,"tradePrice":196.69,"digits":2, //Numberofdecimalplaces"swap":0,"commission":0,"profit":3.38,"openNo":"10002849""openTime":0 //Openordertime"tradeTime":0 //Closeordertime"remark":"" //Remarks"multiple":10 //Leverage"productName":"btc" //Productname"currency":"usdt" //Currency}],
+"pageNo":1, //Pagenumber"pageSize":2, //Numberofitemsperpage"totalSize":10, //Totalnumberofrecords"totalPage":0, //Totalnumberofpages"subTradeVolume":0, //Closeordersize-Subtotal"subSwap":0, //Interest-Subtotal"subProfit":0, //Profitandloss-Subtotal"subCommission":0, //Tradingfee-Subtotal"totalTradeVolume":0, //Closeordersize-Total"totalSwap":0, //Interest-Total"totalProfit":0, //Profitandloss-Total
+--- PAGE 23 ---
+"totalCommission":0, //Tradingfee-Total"code":0, //Returncode"msg":"SUCC" //Returndescription}
+Requesttransactionhistory
+GET/v1/user/getTradeReportParameters:
+Name Type Required Description
+token String Yes token
+beginTime uint64 No Starttime
+endTime uint64 No Endtime
+pageNo Int Yes Pagenumber
+pageSize int Yes Numberofitemsperpage
+orderId string No OrderIDofaparticularorder
+symbol string No Product
+orderType Int32 No Ordertype
+1,2,4,16,32=Market,limit,stop,stop-loss,takeprofit
+direction Int32 No Orderdirection
+1:Buy
+2:Sell
+contractType Int32 No Contracttype
+1ornoreturnvalue:USDT-margined
+--- PAGE 24 ---
+2:Coin-margined
+reportType string No Transactiontype
+OPEN:Openposition
+CLOSE:Closeposition
+sign string Yes Authenticationkey
+Responses:{"list":[{"execTime":1551258517000, //Tradingtime"dealId":"10000030", //TransactionID"symbol":"GWFX/USD/GTS/MM/STD/0/A/BTCUSD", //Product"orderType":1, //Ordertype"reportType":"OPEN", //Contracttype"direction":"BUY", //Direction"execPrice":3810.4, //Fillprice"execVolume":1, //Fillamount"positionId":"10000012", //PositionID"commission":0, //Commission"remark":"" //Remarks"digits":2 //Numberofdecimalplaces
+"multiple":10 //Leverage"productName":"" //Productname"currency":"" //Currency"stoploss":"" //Stoploss"takeprofit":"" //Takeprofit"profit":"" //Profitandloss"stoptime":0 //SetTP/SLtime"openmargin":"" //Marginforopeningposition"openPrice":"" //Openorderprice"closePrice":"" //Closingprice"swap":"" //Interest},{"execTime":1551258517000, //Tradingtime"dealId":"10000030", //TransactionID"symbol":"GWFX/USD/GTS/MM/STD/0/A/BTCUSD", //Product"orderType":1, //Ordertype"reportType":"OPEN", //Contracttype"direction":"BUY", //Direction"execPrice":3810.4, //Fillprice"execVolume":1, //Fillamount"positionId":"10000012", //PositionID"commission":0, //Commission"remark":"" //Remarks
+--- PAGE 25 ---
+"digits":2 //Numberofdecimalplaces
+"multiple":10 //Leverage"productName":"" //Productname"currency":"" //Currency"stoploss":"" //Stoploss"takeprofit":"" //Takeprofit"profit":"" //Profitandloss"stoptime":0 //SetTP/SLtime"openmargin":"" //Marginforopeningposition"openPrice":"" //Openorderprice"closePrice":"" //Closingprice"swap":"" //Interest
+}],"subtotalVolume":1, //Subtotal"totalVolume":5, //Total"pageNo":1, //Pagenumber"pageSize":2, //Numberofitemsperpage"totalPage":1, //Totalnumberofpages"totalSize":10, //Totalnumberofrecords"code":0, //Returncode"msg":"SUCC" //Returndescription}
+Requestpendingorderhistory
+GET/v1/user/getHisOrderParameters:
+Name Type Required Description
+token String Yes token
+accountNo String Yes Account
+beginTime uint64 No Starttime
+endTime uint64 No Endtime
+pageNo Int Yes Pagenumber
+pageSize int Yes Numberofitemsperpage
+direction Int32 No Orderdirection
+1:Buy
+2:Sell
+--- PAGE 26 ---
+orderId string No OrderIDofaparticularorder
+symbol string No Product
+status Int32 No Status
+contractType string No Contracttype
+1ornoreturnvalue:USDT-margined
+2:Coin-margined
+sign string Yes Authenticationkey
+Responses:{"list":[{ "expireType":1, //Settlementtype:Initial:0;Perpetual:3"requestTime":1551258517000, //Pendingordertime"orderId":10000030, //Pendingordernumber"symbol":"GWFX/USD/GTS/MM/STD/0/A/BTCUSD", //Product"kind":1, //Ordertype"type":"OPEN", //Contracttype"direction":"BUY", //Direction"requestVolume":“3810.4”, //Ordersize"execPrice":“0.00”, //Fillprice"digits":2, //Numberofdecimalplaces"requestPrice":“0.00”, //Pendingorderprice"status":"", //Status"stoploss":“0.00” //Stoploss"dealid":“0.00” //TransactionID"exectime":0 //Tradingtime"multiple":10 //Leverage"productName":“” //Productname"currency":“usdt” //Currency"commission":“0.00” //Tradingfee}],"totalPage":2, //Totalnumberofpages"pageNo":1, //Pagenumber"pageSize":2, //Numberofitemsperpage"totalSize":10, //Totalnumberofrecords"code":0, //Returncode"msg":"SUCC" //Returndescription}
+Requesttransactiondetails
+--- PAGE 27 ---
+GET/v1/user/getReportDealParameters:
+Name Type Required Description
+token String Yes token
+accountNo String Yes Account
+beginTime uint64 No Starttime
+endTime uint64 No Endtime
+pageNo Int Yes Pagenumber
+pageSize int Yes Numberofitemsperpage
+amountType string No Assettype:
+Money=Accountbalance
+Bonus=Coupon
+currency string No Currency
+sign string Yes Authenticationkey
+Responses:{"list":[{"joinTime":1551258494000, //Time"reportType":102, //Item"amountSrc":0, //Amountbeforechange"amountDst":146900, //Amountafterchange"income":146900, //Amountofdepositmade"expenditure":146900, //Amountofwithdrawalmade"proposalno":"TD190227A00638", //Transactionnumber"remark":"N/A" //Remarks"adjustSubType":"" //Subtype"coinType":"" //Notinuse"dealType":"" //Notinuse"currency":"" //Notinuse},{"joinTime":1551258494000, //Time"reportType":102, //Item
+--- PAGE 28 ---
+"amountSrc":0, //Amountbeforechange"amountDst":146900, //Amountafterchange"income":146900, //Amountofdepositmade"expenditure":146900, //Amountofwithdrawalmade"proposalno":"TD190227A00638", //Transactionnumber"remark":"N/A" //Remarks"adjustSubType":"" //Subtype"coinType":"" //Notinuse"dealType":"" //Notinuse"currency":"" //Notinuse}],"totalIncome":“”, //Totalamountofdepositmade"totalExpenditure":“”, //Totalamountofwithdrawalmade"subIncome":“0”, //Subtotalamountofdepositmade"subExpenditure":“0”, //Subtotalamountofwithdrawalmade"pageNo":1, //Pagenumber"pageSize":2, //Numberofitemsperpage"totalPage":1, //Totalnumberofpages"totalSize":10, //Totalnumberofrecords"code":0, //Returncode"msg":"SUCC" //Returndescription}
+Requestproductintroduction
+GET/v1/user/getSymbolDetail
+Parameters:
+Name Type Required Description
+token String Yes token
+symbolName String Yes Productname
+Responses:{"blockQuery":"string", //Blockexplorer"content":"string", //Introduction"currentCount":"string", //Circulatingsupply"fundingPrice":"string", //Crowdfundingprice"issueCount":"string", //Totalissuance"issueDate":"string", //Issuedate"officialWebsite":"string", //Officialwebsite"symbolName":"string", //Productname"whiteBook":"string" //Whitepaper
+--- PAGE 29 ---
+"code":0, //Returncode"msg":"string", //Returndescription}
+4.Checkdepositandwithdrawal history
+Checkdepositaddress
+GET v1/mobi/QueryCoinAddress
+Parameters:
+Name Type Required Description
+GTSCodeId string Yes Mobilenumber
+CurrencyCodestring Yes Currency
+token string Yes Thetokenreturnedafterloggingin
+sign string Yes Authenticationkey
+Response:
+   {"result":0,"Data":{"address":"2ND4D2mttFDYkVAv2232bS9qidb8oTSGBTr", //Depositaddress"currency":"btc" //Currency},"comment":""}
+Accesswithdrawaladdress
+--- PAGE 30 ---
+GET v1/mobi/QueryCurrenyAddressParameters:
+Name Type Required Description
+gts2customerid
+int Yes AccountID(4digits)
+token string Yes Thetokenreturnedafterloggingin
+sign string Yes Authenticationkey
+Responses:
+{"result":0,"Data":{"Result":"ok", //Result"address":"" //Withdrawaladdress},"comment":""}
+Checkdeposithistory(includingsubtotalandtotaldata)
+GET v1/mobi/QueryWithdrawalSaveRecord
+Parameters
+Name Type Required Description
+accountid string Yes AccountID(4digits)
+token string Yes Thetokenreturnedafterloggingin
+pageNo int Yes Pagenumber
+--- PAGE 31 ---
+pageSize int Yes Numberofitemsperpage
+begintime int Yes Starttime
+endtime int Yes Endtime
+Reporttype int Yes 101:Deposit
+201:Withdrawal
+sign string Yes Authenticationkey
+Responses:{"result":0,"Data":[{"OrderID":"TD190319A00656", //Transactionnumber"Time":1552965530000, //Time"AmountSrc":81278.8, //Amountbeforetrading"Income":391.3, //Income"AmountDst":81670.1 //Amountaftertrading}],"comment":""}
+Checkdepositandwithdrawalhistory
+GET v1/mobi/QueryInOutCoinRecordParameters:
+Name Type Required Description
+accountNo string Yes Accountnumber
+Example:86000365
+token string Yes Thetokenreturnedafterloggingin
+pageNo int Yes Currentpagenumber
+pageSize int Yes Numberofitemsperpage
+--- PAGE 32 ---
+CoinType int Yes 0=Deposit
+1=Withdrawal
+sign string Yes Authenticationkey
+Response:
+{"result":0,"Data":[{"Currency":"USDT", //Currency"OrderID":"P190719A00109", //Ordernumber"Volume":100, //Amount"Time":1563504912477, //Time"Status":"2", //Depositandwithdrawalstatus(2-Arrived;1-Processing;0-Confiscated)"TradeID":""， //TransactionID"commission":1.234， //Withdrawalfees"ProposalStatus":"" //Requeststatus(0:Tobeconfirmed;1:Tobeapproved;2:Approved;-1:Reviewfailed;-2:Expired)}],"comment":""}
+Checkifdepositandwithdrawalaresupported
+GET v1/mobi/QueryInOutCoin
+Parameters:
+Name Type Required Description
+currencyCodestring Yes Currency
+token string Yes Thetokenreturnedafterloggingin
+sign string Yes Authenticationkey
+--- PAGE 33 ---
+Responses:
+{"result":0,"Data":{"EnableAddCoin":true, //Iscryptodepositsupported"EnableOutCoin":true //Iscryptowithdrawalsupported},"comment":""}
+Checkdepositandwithdrawalfees
+v1/mobi/QueryInOutCoinFee
+Parameters:
+Name Type Required Description
+currencyCodestring Yes Currency
+token string Yes Thetokenreturnedafterloggingin
+sign string Yes Authenticationkey
+Responses:
+{"result":0,"Data":{"FeeIn":1, //Cryptodepositfeerate"FeeOut":1.2 //Cryptowithdrawalfeerate},"comment":""}

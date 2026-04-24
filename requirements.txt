@@ -1,0 +1,4 @@
+requests>=2.32
+numpy>=1.26
+PyYAML>=6.0
+python-dotenv>=1.0

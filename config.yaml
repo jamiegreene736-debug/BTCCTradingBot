@@ -1,0 +1,48 @@
+# Bitunix TraderBot configuration.
+# 100% technical. No news / sentiment inputs are used.
+
+mode: paper              # paper | live  (paper never sends orders)
+
+trading:
+  symbol: BTCUSDT        # Bitunix perpetual symbol
+  timeframe: 5m          # 1m | 5m | 15m | 30m | 1h | 2h | 4h
+  leverage: 100          # Bitunix advertises up to 125x on BTCUSDT
+  margin_coin: USDT
+  margin_mode: ISOLATION # ISOLATION | CROSS
+  risk_per_trade_pct: 1.0
+
+risk:
+  # EXTREMELY CONSERVATIVE stop loss — tight, in % of entry price.
+  stop_loss_pct: 0.25    # 0.25% price move = full SL at leverage
+  # FAIRLY AGGRESSIVE take profit — multiple of SL distance (R-multiple).
+  take_profit_r: 5.0     # TP at 5x SL distance = 1.25% price move
+  # Optional ATR-based override: SL = atr_multiplier_sl * ATR(14), etc.
+  use_atr: false
+  atr_multiplier_sl: 0.8
+  atr_multiplier_tp: 4.0
+
+strategy:
+  # Confluence rules (min_confluence of 5 must agree to open):
+  ema_fast: 9
+  ema_mid:  21
+  ema_slow: 50
+  rsi_period: 14
+  rsi_long_min: 45
+  rsi_long_max: 70
+  rsi_short_min: 30
+  rsi_short_max: 55
+  macd_fast: 12
+  macd_slow: 26
+  macd_signal: 9
+  bb_period: 20
+  bb_std: 2.0
+  atr_period: 14
+  min_confluence: 4
+
+loop:
+  tick_seconds: 15
+  kline_lookback: 200
+
+logging:
+  level: INFO
+  file: logs/bot.log
