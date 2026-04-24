@@ -23,8 +23,6 @@ import logging
 import secrets
 import time
 from typing import Any
-from urllib.parse import urlencode
-
 import requests
 
 log = logging.getLogger(__name__)
@@ -87,9 +85,15 @@ class BitunixClient:
 
     # ------------------------------------------------------------------ request
 
+    @staticmethod
+    def _query_signing_string(params: dict[str, Any]) -> str:
+        # Bitunix sign spec: sort by key ASCII, then concatenate key+value pairs
+        # with NO separators. Example: {"id":1,"uid":200} -> "id1uid200".
+        return "".join(f"{k}{v}" for k, v in sorted(params.items()))
+
     def _get(self, path: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         params = {k: v for k, v in (params or {}).items() if v is not None}
-        qs = urlencode(sorted(params.items())) if params else ""
+        qs = self._query_signing_string(params) if params else ""
         headers = self._headers(qs, "", is_post=False)
         url = f"{self.base_url}{path}"
         log.debug("GET %s params=%s", path, params)

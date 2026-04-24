@@ -67,14 +67,22 @@ class BitunixBot:
             return
         s = self.cfg.trading.symbol
         for row in pairs:
-            if str(row.get("symbol", "")).upper() == s.upper():
-                base_prec = float(row.get("basePrecision") or row.get("minTradeVolume") or 0.001)
-                price_prec = int(row.get("quotePrecision") or row.get("pricePrecision") or 1)
-                min_qty = float(row.get("minTradeVolume") or base_prec)
-                self.meta = SymbolMeta(base_prec, price_prec, min_qty)
-                log.info("Symbol meta: step=%s priceDigits=%s minQty=%s",
-                         base_prec, price_prec, min_qty)
-                return
+            if str(row.get("symbol", "")).upper() != s.upper():
+                continue
+            # Bitunix reports `basePrecision` and `quotePrecision` as decimal
+            # COUNTS (e.g. 4 means 4 decimals = step 0.0001), not step sizes.
+            # Treat small ints as decimal counts; pass through values already < 1.
+            raw_base = row.get("basePrecision")
+            if isinstance(raw_base, (int, float)) and raw_base >= 1:
+                base_step = 10 ** (-int(raw_base))
+            else:
+                base_step = float(raw_base) if raw_base else 0.001
+            price_prec = int(row.get("quotePrecision") or row.get("pricePrecision") or 1)
+            min_qty = float(row.get("minTradeVolume") or base_step)
+            self.meta = SymbolMeta(base_step, price_prec, min_qty)
+            log.info("Symbol meta: step=%s priceDigits=%s minQty=%s (raw=%s)",
+                     base_step, price_prec, min_qty, row)
+            return
         log.warning("Symbol %s not found in trading_pairs; using defaults", s)
 
     def _configure_account(self) -> None:
