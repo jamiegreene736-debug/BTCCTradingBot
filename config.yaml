@@ -86,9 +86,14 @@ risk:
   # Adaptive TP ladder still tightens over time (5/10/20/40-min tiers) so
   # flat trades settle at the 0.7R fee-aware floor rather than time-exiting.
   take_profit_r: 2.5
-  use_atr: false
-  atr_multiplier_sl: 0.8
-  atr_multiplier_tp: 4.0
+  # ATR-aware SL hybrid. When use_atr=true, SL distance is the MAX of the
+  # fixed `stop_loss_pct` floor and `atr_multiplier_sl × ATR%`. In calm
+  # markets the floor binds (tight SL); in vol expansion ATR binds and
+  # widens the stop so we don't get wicked out by the regime that just
+  # changed. Risk-per-trade stays constant; notional auto-adjusts.
+  use_atr: true
+  atr_multiplier_sl: 1.2    # k × ATR% = SL pct in vol regimes
+  atr_multiplier_tp: 4.0    # legacy; TP now derives from effective SL × take_profit_r
   # Dynamic SL — once price moves in your favor, ratchet the SL forward to
   # lock in profit. The "give-back" killer for high-leverage scalping.
   #

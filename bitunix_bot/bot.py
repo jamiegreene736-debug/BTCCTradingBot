@@ -87,6 +87,12 @@ class BitunixBot:
         self.session_start_equity: float | None = None
         self.session_start_day: int = 0       # UTC day-of-year, resets daily
         self.daily_dd_breached: bool = False
+        # Liquidation-cascade circuit breaker. When BTC moves >X% in 3 min,
+        # halt new entries for 5 min — every alt is in cascade and indicators
+        # all read "BIG TREND" exactly when the move is exhausting.
+        self._cascade_active: bool = False
+        self._cascade_clear_at: float = 0.0
+        self._cascade_check_at: float = 0.0
         # Partial-TP tracking: positionId set of those that already had
         # the +1R partial close fired. Prevents double-firing.
         self.partial_tp_done: set[str] = set()
@@ -328,6 +334,66 @@ class BitunixBot:
             self.last_seen_closed_mtime = max(self.last_seen_closed_mtime,
                                                int(p.get("mtime") or 0))
 
+    # Cascade detector tunables. Threshold and halt duration are conservative:
+    # 2% in 3 min on BTC is a severe move (1m ATR is typically 0.05–0.15%, so
+    # a 3-min cumulative >2% means we're in the upper tail of the distribution).
+    _CASCADE_PCT_3MIN = 2.0       # absolute % move on BTC over 3 min
+    _CASCADE_HALT_SECS = 300      # halt new entries for 5 min after detection
+    _CASCADE_CHECK_INTERVAL = 5   # re-evaluate at most every 5 sec
+
+    def _check_liquidation_cascade(self) -> bool:
+        """Detect rapid BTC moves indicative of a liquidation cascade.
+
+        When BTC moves >_CASCADE_PCT_3MIN over the last 3 1m bars in either
+        direction, halt all NEW entries for _CASCADE_HALT_SECS. Existing
+        positions stay managed (SL ratchet, partial TP, time exit) — we
+        only block new entries because indicators all read "BIG TREND"
+        exactly when the move is exhausting and the next 1m bar is a
+        violent reversal. Pro desks have these everywhere.
+
+        Returns True if the cascade is active (block new entries).
+        Cached: only re-evaluates every _CASCADE_CHECK_INTERVAL seconds
+        and only when there's no active cascade timer running.
+        """
+        now = time.time()
+        # Active cascade — let it expire on the timer; no need to recheck.
+        if self._cascade_active:
+            if now >= self._cascade_clear_at:
+                self._cascade_active = False
+                log.info("Cascade cleared, resuming entries")
+            return self._cascade_active
+        # Throttle the check itself.
+        if now - self._cascade_check_at < self._CASCADE_CHECK_INTERVAL:
+            return False
+        self._cascade_check_at = now
+
+        try:
+            rows = self.client.klines("BTCUSDT", "1m", limit=5)
+        except Exception as e:
+            log.debug("Cascade check klines fetch failed: %s", e)
+            return False
+        if len(rows) < 4:
+            return False
+        rows = sorted(rows, key=lambda r: int(r.get("time") or 0))
+        try:
+            close_now = float(rows[-1]["close"])
+            close_3m_ago = float(rows[-4]["close"])
+        except (KeyError, ValueError, TypeError):
+            return False
+        if close_3m_ago <= 0:
+            return False
+
+        pct_3m = (close_now - close_3m_ago) / close_3m_ago * 100.0
+        if abs(pct_3m) >= self._CASCADE_PCT_3MIN:
+            self._cascade_active = True
+            self._cascade_clear_at = now + self._CASCADE_HALT_SECS
+            msg = (f"CASCADE DETECTED: BTC {pct_3m:+.2f}% in 3min "
+                   f"(threshold {self._CASCADE_PCT_3MIN}%) — halt new entries "
+                   f"for {self._CASCADE_HALT_SECS // 60}m")
+            log.warning(msg)
+            self.state.record_error(msg)
+        return self._cascade_active
+
     def _check_daily_drawdown(self) -> bool:
         """Return True if the daily-DD circuit breaker is tripped.
 
@@ -395,6 +461,11 @@ class BitunixBot:
         # 0b. Daily drawdown check — halt new entries if equity has dropped
         # too far since session start. Existing positions still managed.
         dd_halted = self._check_daily_drawdown()
+
+        # 0c. Liquidation-cascade check — halt new entries when BTC moves
+        # rapidly enough that indicators are about to give a false "huge
+        # trend" reading at the worst possible moment.
+        cascade_halted = self._check_liquidation_cascade()
 
         # 1. Snapshot global state once per tick.
         all_open = [p for p in self.client.pending_positions() if float(p.get("qty") or 0) != 0]
@@ -472,8 +543,9 @@ class BitunixBot:
             log.debug("Global cap reached (%d/%d open); waiting", n_open, self.cfg.trading.max_open_positions)
             return
 
-        # If daily drawdown is breached, no new entries.
-        if dd_halted:
+        # If daily drawdown OR liquidation cascade is active, no new entries.
+        # Existing positions keep being managed (SL ratchet, partial TP, etc).
+        if dd_halted or cascade_halted:
             return
 
         # Account fetched lazily — only when we're about to size an order.
@@ -621,6 +693,7 @@ class BitunixBot:
                 volume_step=meta.base_precision,
                 digits=meta.price_precision,
                 effective_leverage=eff_lev,
+                symbol=sym,
             )
             if plan is None:
                 self.state.record_skip(f"{sym}: risk manager rejected (volume below min)")
@@ -715,6 +788,38 @@ class BitunixBot:
                     r_favor = (current_price - entry) / sl_distance
                 else:
                     r_favor = (entry - current_price) / sl_distance
+
+                # Tape-driven exit — pre-BE positions get flattened when the
+                # tape flips strongly against us. Pro-desk rule: if the regime
+                # that birthed the entry has shifted, flip with it. Don't wait
+                # for SL to catch the move.
+                #
+                # Conditions:
+                #   - r_favor < 1.0 (haven't reached break-even ratchet yet)
+                #   - tape aggression (10s) is strongly contrary
+                # We don't apply this AFTER +1R because by then the SL is at
+                # break-even or trailing — the trade already paid for itself
+                # and we let it run. This is purely "cut losers fast" alpha.
+                if r_favor < 1.0 and self.tape_feed is not None:
+                    agg = self.tape_feed.get_aggression_ratio(symbol, window_secs=10)
+                    if agg is not None:
+                        flipped = ((is_long and agg <= -0.50)
+                                   or (not is_long and agg >= 0.50))
+                        if flipped:
+                            try:
+                                self.client.flash_close_position(pid)
+                                log.info("TAPE EXIT %s %s: flow flipped (agg=%+.2f, r=%.2f)",
+                                         symbol, "LONG" if is_long else "SHORT",
+                                         agg, r_favor)
+                                self.state.record_order(
+                                    f"{symbol} TAPE_EXIT positionId={pid} "
+                                    f"agg={agg:+.2f} r={r_favor:.2f}"
+                                )
+                                continue   # skip SL/TP management for closed pos
+                            except BitunixError as e:
+                                log.warning("Tape exit failed for %s: %s",
+                                            symbol, e)
+                                # Fall through to normal SL management.
 
                 # Partial TP at +1R favorable — close partial_tp_close_pct% of the
                 # position at market when r_favor first reaches partial_tp_at_r.
@@ -1013,25 +1118,26 @@ class BitunixBot:
                 self.state.record_order(f"{sym_u} MAKER FILLED orderId={info['order_id']}")
                 del self.pending_limits[sym_u]
                 continue
-            # Timed out → cancel + market fallback.
+            # Timed out → cancel and SKIP. Do NOT market-fallback.
+            #
+            # Pro-desk rule: if your maker bid wasn't hit in the timeout window,
+            # the price moved AWAY from your bid. For a long, that means price
+            # went UP — marketing in now means CHASING, paying the worst possible
+            # price on a setup that already invalidated. Trust the next signal.
+            #
+            # The cooldown gets refreshed so the per-symbol loop later in this
+            # tick doesn't immediately re-fire the same trade.
             age = now - info["place_ts"]
             if age >= timeout:
                 try:
                     self.client.cancel_order(symbol=info["symbol"], order_id=info["order_id"])
                 except Exception as e:
                     log.warning("Cancel pending limit for %s failed: %s", sym_u, e)
-                log.info("MAKER timeout %s after %ds; falling back to MARKET", sym_u, age)
+                log.info("MAKER timeout %s after %ds — signal failed, skip "
+                         "(no market fallback)", sym_u, age)
                 self.state.record_skip(
-                    f"{sym_u}: post-only didn't fill in {age}s, market fallback"
+                    f"{sym_u}: post-only didn't fill in {age}s — signal invalidated"
                 )
-                # Remove BEFORE placing market so we don't double-track.
-                plan = info["plan"]
-                order_text = info["order_text"]
                 del self.pending_limits[sym_u]
-                placed = self._place_market(info["symbol"], plan, order_text)
-                # Refresh cooldown so the per-symbol loop later in this tick
-                # doesn't immediately try another entry on the same symbol.
-                # Without this, the symbol would re-fire (the original pending
-                # limit was just cleared from cap-tracking).
-                if placed:
-                    self.last_action_at[sym_u] = now
+                # Refresh cooldown so we don't re-fire on the same bar.
+                self.last_action_at[sym_u] = now

@@ -1459,10 +1459,12 @@ def test_post_only_falls_back_to_market_when_ob_feed_disconnected():
     assert "BTCUSDT" not in bot.pending_limits, "no pending limit when going straight to market"
 
 
-def test_post_only_timeout_cancels_and_falls_back_to_market():
+def test_post_only_timeout_cancels_and_skips():
     """A pending post-only limit older than post_only_timeout_secs without
-    a corresponding open position must be cancelled, with a MARKET fallback
-    placed in its stead."""
+    a corresponding open position must be cancelled and SKIPPED — no market
+    fallback. Pro-desk rule: 'don't chase a move that already invalidated.'
+    If the maker bid wasn't hit in 8s, price moved away — marketing in
+    pays the worst possible price on a setup that already failed."""
     reset_state()
     cfg = fresh_cfg()
     cfg.mode = "live"
@@ -1493,25 +1495,27 @@ def test_post_only_timeout_cancels_and_falls_back_to_market():
     # Limit was cancelled by id.
     bot.client.cancel_order.assert_called_once()
     cancel_kw = bot.client.cancel_order.call_args.kwargs
-    assert cancel_kw["order_id"] == "OLD_LIMIT", \
-        f"cancel must target the stale limit; got {cancel_kw}"
+    assert cancel_kw["order_id"] == "OLD_LIMIT"
 
-    # And a MARKET fallback was placed (the bot's market-entry path uses
-    # order_type=MARKET).
+    # NO MARKET fallback was placed — that's the new behavior.
     market_calls = [c for c in bot.client.place_order.call_args_list
                     if c.kwargs.get("order_type") == "MARKET"]
-    assert market_calls, (
-        f"expected MARKET fallback after timeout; calls: "
-        f"{[c.kwargs for c in bot.client.place_order.call_args_list]}"
+    assert not market_calls, (
+        f"market fallback should NOT fire on post-only timeout; "
+        f"calls: {[c.kwargs for c in bot.client.place_order.call_args_list]}"
     )
 
-    # Pending tracking cleared after the fallback.
+    # Pending tracking cleared.
     assert "BTCUSDT" not in bot.pending_limits
+
+    # Skip event recorded with "invalidated" reason (the new wording).
+    skips = [e for e in bot.state.snapshot()["events"] if e["kind"] == "skip"]
+    assert any("invalidated" in s["text"] for s in skips), \
+        f"expected 'invalidated' skip; got {[s['text'] for s in skips]}"
 
     # Cooldown set so the per-symbol loop later in this tick doesn't try yet
     # another entry on the same symbol.
-    assert bot.last_action_at.get("BTCUSDT", 0) > 0, \
-        "cooldown should be set on market fallback to block immediate re-entry"
+    assert bot.last_action_at.get("BTCUSDT", 0) > 0
 
 
 def test_post_only_fill_clears_pending_tracking():
@@ -2067,6 +2071,283 @@ def test_tape_veto_skipped_when_no_data():
         "no-tape-data should not block trades — graceful degrade"
 
 
+# ----------------------------------------------------------------- ATR-aware SL
+
+
+def test_atr_hybrid_floor_wins_in_calm_markets():
+    """Calm market (low ATR): the fixed stop_loss_pct floor binds, ATR
+    derived value is below floor → SL distance = floor."""
+    from bitunix_bot.config import RiskCfg, TradingCfg
+    from bitunix_bot.risk import build_order
+    from bitunix_bot.strategy import Signal
+
+    tc = TradingCfg(symbols=["BTCUSDT"], timeframe="1m", leverage=25,
+                    margin_coin="USDT", margin_mode="ISOLATION",
+                    risk_per_trade_pct=1.0)
+    rc = RiskCfg(stop_loss_pct=0.40, take_profit_r=2.5, use_atr=True,
+                 atr_multiplier_sl=1.2, atr_multiplier_tp=4.0)
+    # ATR = 0.05% of 60000 = 30. Hybrid: 1.2 * 0.05 = 0.06% < floor 0.40%.
+    sig = Signal(direction="long", score=0.7, indicator_score=12,
+                 pattern_score=2.0, reasons=["x"], price=60_000.0, atr=30.0)
+    plan = build_order(sig, free_margin=46.0, trading=tc, risk=rc,
+                       min_volume=0.0001, volume_step=0.0001, digits=1)
+    assert plan is not None
+    sl_pct = (plan.price - plan.stop_loss) / plan.price * 100.0
+    assert abs(sl_pct - 0.40) < 0.01, \
+        f"calm market should use floor 0.40%, got {sl_pct:.3f}%"
+
+
+def test_atr_hybrid_widens_in_vol_regime():
+    """High ATR (vol expansion): ATR-derived SL widens beyond fixed floor."""
+    from bitunix_bot.config import RiskCfg, TradingCfg
+    from bitunix_bot.risk import build_order
+    from bitunix_bot.strategy import Signal
+
+    tc = TradingCfg(symbols=["BTCUSDT"], timeframe="1m", leverage=25,
+                    margin_coin="USDT", margin_mode="ISOLATION",
+                    risk_per_trade_pct=1.0)
+    rc = RiskCfg(stop_loss_pct=0.40, take_profit_r=2.5, use_atr=True,
+                 atr_multiplier_sl=1.2, atr_multiplier_tp=4.0)
+    # ATR = 0.50% of 60000 = 300. Hybrid: 1.2 * 0.50 = 0.60% > floor 0.40%.
+    sig = Signal(direction="long", score=0.7, indicator_score=12,
+                 pattern_score=2.0, reasons=["x"], price=60_000.0, atr=300.0)
+    plan = build_order(sig, free_margin=46.0, trading=tc, risk=rc,
+                       min_volume=0.0001, volume_step=0.0001, digits=1)
+    assert plan is not None
+    sl_pct = (plan.price - plan.stop_loss) / plan.price * 100.0
+    assert abs(sl_pct - 0.60) < 0.01, \
+        f"vol regime should use ATR-derived 0.60%, got {sl_pct:.3f}%"
+    # Risk per trade is preserved — notional auto-adjusts.
+    notional = plan.volume * plan.price
+    risk_dollars = notional * (sl_pct / 100.0)
+    assert abs(risk_dollars - 0.46) < 0.05, \
+        f"risk should stay near $0.46 across regimes, got ${risk_dollars:.3f}"
+
+
+def test_atr_hybrid_disabled_uses_fixed_pct():
+    """use_atr=False should bypass the hybrid entirely (regression check
+    so the legacy fixed-pct path keeps working)."""
+    from bitunix_bot.config import RiskCfg, TradingCfg
+    from bitunix_bot.risk import build_order
+    from bitunix_bot.strategy import Signal
+
+    tc = TradingCfg(symbols=["BTCUSDT"], timeframe="1m", leverage=25,
+                    margin_coin="USDT", margin_mode="ISOLATION",
+                    risk_per_trade_pct=1.0)
+    rc = RiskCfg(stop_loss_pct=0.40, take_profit_r=2.5, use_atr=False,
+                 atr_multiplier_sl=1.2, atr_multiplier_tp=4.0)
+    # Even with massive ATR, use_atr=False forces fixed pct path.
+    sig = Signal(direction="long", score=0.7, indicator_score=12,
+                 pattern_score=2.0, reasons=["x"], price=60_000.0, atr=600.0)
+    plan = build_order(sig, free_margin=46.0, trading=tc, risk=rc,
+                       min_volume=0.0001, volume_step=0.0001, digits=1)
+    sl_pct = (plan.price - plan.stop_loss) / plan.price * 100.0
+    assert abs(sl_pct - 0.40) < 0.01, \
+        f"use_atr=False should give fixed 0.40%, got {sl_pct:.3f}%"
+
+
+# ----------------------------------------------------------------- cascade detector
+
+
+def test_cascade_detector_fires_on_big_btc_move():
+    """When BTC drops >2% over 3 1m bars, cascade flag must trip and halt
+    new entries for the configured halt window."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    # Synthesize 5 BTC bars with a -2.5% drop across the last 3.
+    # Bar -3 close = 60000, bar -1 close = 58500 → -2.5%.
+    now_ms = int(time.time() * 1000)
+    btc_bars = [
+        {"close": "60000", "time": now_ms - 240_000},
+        {"close": "60000", "time": now_ms - 180_000},
+        {"close": "60000", "time": now_ms - 120_000},   # bar -3 (3 min ago)
+        {"close": "59250", "time": now_ms - 60_000},    # bar -2
+        {"close": "58500", "time": now_ms},              # bar -1 (now)
+    ]
+    bot.client.klines.return_value = btc_bars
+
+    halted = bot._check_liquidation_cascade()
+    assert halted is True, "expected cascade flag to trip on -2.5% move"
+    assert bot._cascade_active is True
+    # Error event recorded for visibility on the dashboard.
+    errors = [e for e in bot.state.snapshot()["events"] if e["kind"] == "error"]
+    assert any("CASCADE" in e["text"] for e in errors), \
+        f"expected CASCADE error event, got {[e['text'] for e in errors]}"
+
+
+def test_cascade_detector_quiet_market_does_not_fire():
+    """Calm BTC (no big move) should NOT fire the cascade flag."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    now_ms = int(time.time() * 1000)
+    btc_bars = [{"close": str(60000 + i), "time": now_ms - (5 - i) * 60_000}
+                for i in range(5)]
+    bot.client.klines.return_value = btc_bars
+
+    halted = bot._check_liquidation_cascade()
+    assert halted is False
+    assert bot._cascade_active is False
+
+
+def test_cascade_blocks_new_entries_during_active_halt():
+    """When cascade flag is active, _tick must not place new orders even
+    if the signal stack would otherwise fire."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+    bot._resolve_symbol_meta()
+    # Force cascade active.
+    bot._cascade_active = True
+    bot._cascade_clear_at = time.time() + 300  # well in the future
+    bot._tick()
+
+    # No new orders placed.
+    bot.client.place_order.assert_not_called()
+
+
+# ----------------------------------------------------------------- correlation sizing
+
+
+def test_correlation_sizing_alts_get_smaller_notional():
+    """ETH/SOL/XRP at the same risk-per-trade should get smaller notional
+    than BTC because they're heavily BTC-correlated."""
+    from bitunix_bot.config import RiskCfg, TradingCfg
+    from bitunix_bot.risk import build_order
+    from bitunix_bot.strategy import Signal
+
+    tc = TradingCfg(symbols=["BTCUSDT"], timeframe="1m", leverage=25,
+                    margin_coin="USDT", margin_mode="ISOLATION",
+                    risk_per_trade_pct=1.0)
+    rc = RiskCfg(stop_loss_pct=0.40, take_profit_r=2.5, use_atr=False,
+                 atr_multiplier_sl=1.2, atr_multiplier_tp=4.0)
+    # Same price/atr/score across symbols — only the symbol mult changes.
+    sig = Signal(direction="long", score=0.7, indicator_score=12,
+                 pattern_score=2.0, reasons=["x"], price=60_000.0, atr=120.0)
+    btc_plan = build_order(sig, free_margin=46.0, trading=tc, risk=rc,
+                            min_volume=0.0001, volume_step=0.0001, digits=1,
+                            symbol="BTCUSDT")
+    eth_plan = build_order(sig, free_margin=46.0, trading=tc, risk=rc,
+                            min_volume=0.0001, volume_step=0.0001, digits=1,
+                            symbol="ETHUSDT")
+    sol_plan = build_order(sig, free_margin=46.0, trading=tc, risk=rc,
+                            min_volume=0.0001, volume_step=0.0001, digits=1,
+                            symbol="SOLUSDT")
+
+    btc_notional = btc_plan.volume * btc_plan.price
+    eth_notional = eth_plan.volume * eth_plan.price
+    sol_notional = sol_plan.volume * sol_plan.price
+    # BTC gets full size (mult 1.0); ETH ~85%; SOL ~70%.
+    assert eth_notional < btc_notional, \
+        f"ETH notional ({eth_notional}) should be < BTC ({btc_notional})"
+    assert sol_notional < eth_notional, \
+        f"SOL notional ({sol_notional}) should be < ETH ({eth_notional})"
+    # Ratios within ~5% of expected multipliers.
+    assert abs(eth_notional / btc_notional - 0.85) < 0.05
+    assert abs(sol_notional / btc_notional - 0.70) < 0.05
+
+
+def test_correlation_sizing_unknown_symbol_defaults_to_full():
+    """Symbol not in the multiplier map should size at 1.0 (no penalty)."""
+    from bitunix_bot.config import RiskCfg, TradingCfg
+    from bitunix_bot.risk import build_order
+    from bitunix_bot.strategy import Signal
+
+    tc = TradingCfg(symbols=["BTCUSDT"], timeframe="1m", leverage=25,
+                    margin_coin="USDT", margin_mode="ISOLATION",
+                    risk_per_trade_pct=1.0)
+    rc = RiskCfg(stop_loss_pct=0.40, take_profit_r=2.5, use_atr=False,
+                 atr_multiplier_sl=1.2, atr_multiplier_tp=4.0)
+    sig = Signal(direction="long", score=0.7, indicator_score=12,
+                 pattern_score=2.0, reasons=["x"], price=60_000.0, atr=120.0)
+    btc_plan = build_order(sig, free_margin=46.0, trading=tc, risk=rc,
+                            min_volume=0.0001, volume_step=0.0001, digits=1,
+                            symbol="BTCUSDT")
+    # An asset not in the multiplier map.
+    misc_plan = build_order(sig, free_margin=46.0, trading=tc, risk=rc,
+                             min_volume=0.0001, volume_step=0.0001, digits=1,
+                             symbol="DOGEUSDT")
+    # Same notional (both mult=1.0).
+    assert abs(misc_plan.volume - btc_plan.volume) < 1e-9
+
+
+# ----------------------------------------------------------------- tape-driven exit
+
+
+def test_tape_exit_flattens_pre_BE_long_on_strong_sell_flow():
+    """If a long position hasn't reached +1R yet AND tape flips to ≥75/25
+    sell-side, flash_close_position must fire — don't wait for SL."""
+    bot, orig_sl, orig_tp = _setup_bot_with_open_position(
+        side="BUY", entry=100_000.0, current_price=100_100.0,  # +0.4R, pre-BE
+    )
+
+    class FakeTape:
+        def get_aggression_ratio(self, sym, window_secs=10, min_count=5):
+            return -0.65   # 82/18 sell-aggression
+        def get_cvd(self, sym, window_secs=60, min_count=5):
+            return None
+        def get_activity_multiplier(self, sym, **kw):
+            return None
+    bot.tape_feed = FakeTape()
+    bot._tick()
+
+    # Tape exit should have flash-closed the position.
+    bot.client.flash_close_position.assert_called_once_with("POS1")
+    # And recorded a TAPE_EXIT event in state.
+    orders = [e for e in bot.state.snapshot()["events"] if e["kind"] == "order"]
+    assert any("TAPE_EXIT" in e["text"] for e in orders), \
+        f"expected TAPE_EXIT order event; got {[e['text'] for e in orders]}"
+
+
+def test_tape_exit_skipped_for_post_BE_position():
+    """Once a position is past +1R (break-even ratchet has fired), the
+    tape exit should NOT fire — the trade has already paid for itself
+    and is protected by the SL ratchet. Let it run."""
+    bot, _, _ = _setup_bot_with_open_position(
+        side="BUY", entry=100_000.0, current_price=100_500.0,  # +2R, well past BE
+    )
+
+    class FakeTape:
+        def get_aggression_ratio(self, sym, window_secs=10, min_count=5):
+            return -0.65
+        def get_cvd(self, sym, window_secs=60, min_count=5):
+            return None
+        def get_activity_multiplier(self, sym, **kw):
+            return None
+    bot.tape_feed = FakeTape()
+    bot._tick()
+
+    # Position should NOT be flash-closed despite hostile tape — it's past BE.
+    bot.client.flash_close_position.assert_not_called()
+
+
+def test_tape_exit_skipped_when_tape_neutral():
+    """Pre-BE position with neutral tape should NOT be flattened."""
+    bot, _, _ = _setup_bot_with_open_position(
+        side="BUY", entry=100_000.0, current_price=100_100.0,  # +0.4R
+    )
+
+    class FakeTape:
+        def get_aggression_ratio(self, sym, window_secs=10, min_count=5):
+            return 0.10   # neutral-ish
+        def get_cvd(self, sym, window_secs=60, min_count=5):
+            return None
+        def get_activity_multiplier(self, sym, **kw):
+            return None
+    bot.tape_feed = FakeTape()
+    bot._tick()
+
+    bot.client.flash_close_position.assert_not_called()
+
+
 def test_tradetape_lifecycle_in_bot():
     """Bot.run_forever should start tape_feed alongside ob_feed (smoke test)."""
     reset_state()
@@ -2140,7 +2421,7 @@ def main() -> int:
         test_sl_and_tp_always_on_correct_side,
         test_post_only_entry_places_limit_at_top_of_book,
         test_post_only_falls_back_to_market_when_ob_feed_disconnected,
-        test_post_only_timeout_cancels_and_falls_back_to_market,
+        test_post_only_timeout_cancels_and_skips,
         test_post_only_fill_clears_pending_tracking,
         test_pending_limits_count_toward_global_cap,
         test_pending_limits_count_toward_same_direction_cap,
@@ -2163,6 +2444,17 @@ def main() -> int:
         test_tape_veto_blocks_short_against_strong_buy_flow,
         test_tape_veto_respects_neutral_flow,
         test_tape_veto_skipped_when_no_data,
+        test_atr_hybrid_floor_wins_in_calm_markets,
+        test_atr_hybrid_widens_in_vol_regime,
+        test_atr_hybrid_disabled_uses_fixed_pct,
+        test_cascade_detector_fires_on_big_btc_move,
+        test_cascade_detector_quiet_market_does_not_fire,
+        test_cascade_blocks_new_entries_during_active_halt,
+        test_correlation_sizing_alts_get_smaller_notional,
+        test_correlation_sizing_unknown_symbol_defaults_to_full,
+        test_tape_exit_flattens_pre_BE_long_on_strong_sell_flow,
+        test_tape_exit_skipped_for_post_BE_position,
+        test_tape_exit_skipped_when_tape_neutral,
         test_tradetape_lifecycle_in_bot,
     ]
     passed = failed = 0

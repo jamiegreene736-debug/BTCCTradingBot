@@ -86,6 +86,7 @@ def build_order(
     volume_step: float = 0.01,
     digits: int = 2,
     effective_leverage: int | None = None,
+    symbol: str | None = None,
 ) -> OrderPlan | None:
     """Compute volume + SL/TP for an order plan.
 
@@ -93,6 +94,11 @@ def build_order(
     caps (Bitunix tops out leverage differently per symbol — e.g. BTCUSDT
     200x but SOLUSDT 75x). If the symbol cap is lower than config, sizing
     must use the cap or we'll silently oversize.
+
+    `symbol` enables correlation-adjusted sizing via
+    `trading.symbol_risk_mult` (default 1.0 if symbol not in the map). Used
+    to down-weight high-beta alts that are heavily BTC-correlated, keeping
+    effective portfolio risk closer to nominal across multi-symbol books.
     """
     price = signal.price
     if price <= 0 or free_margin <= 0:
@@ -100,19 +106,43 @@ def build_order(
 
     leverage = effective_leverage if effective_leverage is not None else trading.leverage
 
-    # Stop distance in price units.
+    # Per-symbol risk multiplier (correlation/beta adjustment).
+    sym_mult = 1.0
+    if symbol is not None:
+        sym_mult = trading.symbol_risk_mult.get(symbol.upper(), 1.0)
+        if sym_mult <= 0:
+            sym_mult = 1.0  # guard against pathological config
+
+    # Stop distance in price units. Hybrid: fixed-pct FLOOR + ATR-derived
+    # widening in vol regimes. The floor (`stop_loss_pct`) protects calm-market
+    # entries from being stopped out on bar-internal noise; the ATR multiplier
+    # widens the stop when realized volatility expands (FOMC, news, cascades)
+    # so we don't get wicked out by the same setup that would normally work.
+    # Risk per trade stays constant — notional auto-adjusts to whichever
+    # SL distance ends up binding.
+    #
+    # Calm BTC (ATR ~0.05% × 1.2 = 0.06%): floor wins → SL at 0.40%.
+    # Vol expansion (ATR ~0.5% × 1.2 = 0.60%): ATR wins → SL widens to 0.60%.
     if risk.use_atr and signal.atr > 0:
-        stop_dist = signal.atr * risk.atr_multiplier_sl
-        tp_dist = signal.atr * risk.atr_multiplier_tp
+        atr_pct = (signal.atr / price) * 100.0
+        atr_derived_pct = risk.atr_multiplier_sl * atr_pct
+        stop_dist_pct = max(risk.stop_loss_pct, atr_derived_pct)
+        stop_dist = price * (stop_dist_pct / 100.0)
     else:
         stop_dist = price * (risk.stop_loss_pct / 100.0)
-        tp_dist = stop_dist * risk.take_profit_r
+
+    # TP is always an R-multiple of effective SL distance — keeps geometry
+    # consistent regardless of which SL formula bound. The legacy
+    # atr_multiplier_tp config is retained for backwards-compat but unused
+    # in the hybrid path; remove from config to fully decommission.
+    tp_dist = stop_dist * risk.take_profit_r
 
     if stop_dist <= 0:
         return None
 
-    # Risk-budgeted volume (base currency units).
-    risk_usdt = free_margin * (trading.risk_per_trade_pct / 100.0)
+    # Risk-budgeted volume (base currency units), down-weighted by the
+    # symbol's correlation-adjusted multiplier (1.0 for BTC, ~0.70-0.85 for alts).
+    risk_usdt = free_margin * (trading.risk_per_trade_pct / 100.0) * sym_mult
     volume = risk_usdt / stop_dist
 
     # Cap by available margin at the EFFECTIVE leverage.

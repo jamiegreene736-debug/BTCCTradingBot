@@ -52,6 +52,22 @@ class TradingCfg:
     # and fall back to a market order. Saves ~0.04% per round-trip.
     use_post_only_entries: bool = True
     post_only_timeout_secs: int = 8
+    # Correlation / beta-adjusted sizing per symbol. Crypto alts are heavily
+    # correlated to BTC (typically 0.7+ on 1m), so a portfolio of "1 long BTC
+    # + 3 long alts" carries effective BTC exposure of ~3.5x, not 4x of
+    # independent risk. Down-weight high-beta alts to keep portfolio risk
+    # closer to nominal. BTC = 1.0 baseline; alts are scaled by inverse-beta
+    # estimates from realized 1m correlations:
+    #   ETHUSDT — high cap, ~0.85 to BTC, slightly lower beta → 0.85
+    #   SOLUSDT — mid cap, ~0.75 corr, higher beta → 0.70
+    #   XRPUSDT — mid cap, ~0.70 corr, higher idiosyncratic vol → 0.70
+    # Symbols not listed default to 1.0 (no adjustment).
+    symbol_risk_mult: dict[str, float] = field(default_factory=lambda: {
+        "BTCUSDT": 1.0,
+        "ETHUSDT": 0.85,
+        "SOLUSDT": 0.70,
+        "XRPUSDT": 0.70,
+    })
 
 
 @dataclass
