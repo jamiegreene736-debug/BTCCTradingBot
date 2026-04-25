@@ -1,7 +1,7 @@
 # Bitunix TraderBot — aggressive multi-symbol futures.
 # 100% technical. No news / sentiment inputs are used.
 
-mode: paper              # paper | live  (paper never sends orders)
+mode: live               # paper | live  (paper never sends orders)
 
 trading:
   symbols:               # universe — bot evaluates and trades each independently
@@ -50,7 +50,8 @@ strategy:
   # Supertrend regime filter (direction-aware)
   supertrend_period: 10
   supertrend_mult: 3.0
-  min_confluence: 4      # 4-of-7 = aggressive; 5-of-7 = selective
+  min_confluence: 3      # of 6 confluence rules; ADX is a hard gate (not counted).
+                         # 3-of-6 = aggressive; 4-of-6 = selective; 5+ = rare
 
 loop:
   tick_seconds: 10

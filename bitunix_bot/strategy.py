@@ -3,17 +3,24 @@
 Inputs: rolling candles.
 Output: a Signal(direction, confluence_score, atr) or None.
 
-Rules (long side — short is mirror):
-  1. EMA trend:    ema_fast > ema_mid > ema_slow             (trend stack)
-  2. Close cross:  close crossed above ema_fast              (entry trigger)
-  3. RSI:          rsi in [rsi_long_min, rsi_long_max]       (momentum window)
-  4. MACD:         macd line > signal AND hist > prev hist   (rising momentum)
-  5. Bollinger:    close > bb_mid                            (above basis)
-  6. ADX:          adx > adx_min                             (trend strength filter)
-  7. Supertrend:   supertrend direction = +1 (or -1 short)   (regime filter)
+Architecture: hard gates first, then confluence count.
 
-Require `min_confluence` of these 7 rules to fire. ADX + Supertrend are the
-biggest whipsaw killers; recommended floor is 4-of-7 for live trading.
+HARD GATE:
+  ADX > adx_min  — if false, NO signal regardless of anything else.
+                   This is how freqtrade strategies actually wire ADX
+                   (see Strategy005, FSupertrendStrategy). Without it,
+                   pure noise can still hit confluence on lagging
+                   indicators alone.
+
+CONFLUENCE RULES (require min_confluence to agree):
+  1. EMA trend:    ema_fast > ema_mid > ema_slow            (trend stack)
+  2. Close cross:  close crossed above ema_fast             (entry trigger)
+  3. RSI:          rsi in [rsi_long_min, rsi_long_max]      (momentum window)
+  4. MACD:         macd line > signal AND hist > prev hist  (rising momentum)
+  5. Bollinger:    close > bb_mid                           (above basis)
+  6. Supertrend:   direction = +1 (or -1 short)             (regime filter)
+
+Recommended min_confluence is 3-of-6 for aggressive, 4-of-6 for selective.
 """
 from __future__ import annotations
 
@@ -74,7 +81,12 @@ def evaluate(
     i = len(c) - 1
     p = c[i]
 
-    long_reasons, short_reasons = [], []
+    # HARD GATE: no trades in chop.
+    a_now = adx_v[i] if i < len(adx_v) else np.nan
+    if np.isnan(a_now) or a_now < cfg.adx_min:
+        return None
+
+    long_reasons, short_reasons = [f"adx({a_now:.0f})"], [f"adx({a_now:.0f})"]
 
     # 1. EMA trend.
     if ema_f[i] > ema_m[i] > ema_s[i]:
@@ -111,22 +123,16 @@ def evaluate(
         if p < bb_mid[i]:
             short_reasons.append("below_bb_mid")
 
-    # 6. ADX — trend strength filter (single-sided: counts for whichever side
-    # is otherwise winning, since ADX is direction-agnostic).
-    a = adx_v[i] if i < len(adx_v) else np.nan
-    if not np.isnan(a) and a >= cfg.adx_min:
-        long_reasons.append(f"adx_strong({a:.0f})")
-        short_reasons.append(f"adx_strong({a:.0f})")
-
-    # 7. Supertrend regime.
+    # 6. Supertrend regime.
     if i < len(st_dir) and not np.isnan(st_dir[i]):
         if st_dir[i] == 1:
             long_reasons.append("supertrend_up")
         elif st_dir[i] == -1:
             short_reasons.append("supertrend_down")
 
-    long_score = len(long_reasons)
-    short_score = len(short_reasons)
+    # ADX is a hard gate (see top), not counted in confluence.
+    long_score = len(long_reasons) - 1   # subtract the adx prefix
+    short_score = len(short_reasons) - 1
 
     if long_score >= cfg.min_confluence and long_score > short_score:
         return Signal("long", long_score, long_reasons, p, float(atr_v[i]) if not np.isnan(atr_v[i]) else 0.0)

@@ -50,9 +50,10 @@ class SymbolMeta:
     base_precision: float     # qty step (e.g. 0.001)
     price_precision: int      # digits for price (e.g. 1 for BTCUSDT)
     min_qty: float
+    max_leverage: int = 100   # Bitunix caps differ per symbol
 
 
-_DEFAULT_META = SymbolMeta(base_precision=0.001, price_precision=2, min_qty=0.001)
+_DEFAULT_META = SymbolMeta(base_precision=0.001, price_precision=2, min_qty=0.001, max_leverage=100)
 
 
 class BitunixBot:
@@ -95,9 +96,10 @@ class BitunixBot:
                 base_step = float(raw_base) if raw_base else 0.001
             price_prec = int(row.get("quotePrecision") or row.get("pricePrecision") or 2)
             min_qty = float(row.get("minTradeVolume") or base_step)
-            self.metas[sym] = SymbolMeta(base_step, price_prec, min_qty)
+            max_lev = int(row.get("maxLeverage") or 100)
+            self.metas[sym] = SymbolMeta(base_step, price_prec, min_qty, max_lev)
             log.info("Meta %s: step=%s priceDigits=%s minQty=%s maxLev=%s",
-                     sym, base_step, price_prec, min_qty, row.get("maxLeverage"))
+                     sym, base_step, price_prec, min_qty, max_lev)
 
     def _configure_account(self) -> None:
         # Position mode is global; set once.
@@ -107,13 +109,17 @@ class BitunixBot:
         except BitunixError as e:
             log.info("Skip position_mode: %s", e.msg or e.code)
 
-        # Margin mode + leverage are per symbol.
+        # Margin mode + leverage are per symbol. Cap leverage at the symbol's
+        # max so Bitunix doesn't reject the call and silently leave us with
+        # whatever was already set.
         for sym in self.cfg.trading.symbols:
+            meta = self.metas.get(sym, _DEFAULT_META)
+            eff_lev = min(self.cfg.trading.leverage, meta.max_leverage)
             for fn, desc in [
                 (lambda s=sym: self.client.set_margin_mode(s, self.cfg.trading.margin_mode),
                  f"{sym} margin_mode={self.cfg.trading.margin_mode}"),
-                (lambda s=sym: self.client.set_leverage(s, self.cfg.trading.leverage),
-                 f"{sym} leverage={self.cfg.trading.leverage}x"),
+                (lambda s=sym, lev=eff_lev: self.client.set_leverage(s, lev),
+                 f"{sym} leverage={eff_lev}x (cap {meta.max_leverage}x)"),
             ]:
                 try:
                     fn()
@@ -265,6 +271,8 @@ class BitunixBot:
                     return  # no point checking other symbols in live mode
 
             meta = self.metas.get(sym, _DEFAULT_META)
+            # Per-symbol effective leverage: cap config at the symbol's max.
+            eff_lev = min(self.cfg.trading.leverage, meta.max_leverage)
             plan = build_order(
                 sig,
                 free_margin=free_margin,
@@ -273,6 +281,7 @@ class BitunixBot:
                 min_volume=meta.min_qty,
                 volume_step=meta.base_precision,
                 digits=meta.price_precision,
+                effective_leverage=eff_lev,
             )
             if plan is None:
                 self.state.record_skip(f"{sym}: risk manager rejected (volume below min)")

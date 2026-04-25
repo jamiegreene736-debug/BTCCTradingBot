@@ -44,10 +44,20 @@ def build_order(
     min_volume: float = 0.01,
     volume_step: float = 0.01,
     digits: int = 2,
+    effective_leverage: int | None = None,
 ) -> OrderPlan | None:
+    """Compute volume + SL/TP for an order plan.
+
+    `effective_leverage` overrides `trading.leverage` to handle per-symbol
+    caps (Bitunix tops out leverage differently per symbol — e.g. BTCUSDT
+    200x but SOLUSDT 75x). If the symbol cap is lower than config, sizing
+    must use the cap or we'll silently oversize.
+    """
     price = signal.price
     if price <= 0 or free_margin <= 0:
         return None
+
+    leverage = effective_leverage if effective_leverage is not None else trading.leverage
 
     # Stop distance in price units.
     if risk.use_atr and signal.atr > 0:
@@ -64,8 +74,8 @@ def build_order(
     risk_usdt = free_margin * (trading.risk_per_trade_pct / 100.0)
     volume = risk_usdt / stop_dist
 
-    # Cap by available margin at leverage.
-    max_vol_by_margin = (free_margin * trading.leverage) / price
+    # Cap by available margin at the EFFECTIVE leverage.
+    max_vol_by_margin = (free_margin * leverage) / price
     volume = min(volume, max_vol_by_margin * 0.98)  # 2% safety buffer
 
     # Round DOWN to volume step and clamp to min.
@@ -90,6 +100,6 @@ def build_order(
         price=round(price, digits),
         stop_loss=sl,
         take_profit=tp,
-        leverage=trading.leverage,
+        leverage=leverage,
         notes=f"conf={signal.score} reasons={','.join(signal.reasons)}",
     )
