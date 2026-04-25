@@ -173,6 +173,24 @@ class BitunixClient:
         data = self._get("/api/v1/futures/position/get_pending_positions", {"symbol": symbol})
         return data.get("data") or []
 
+    def history_positions(
+        self, symbol: str | None = None, limit: int = 50, skip: int = 0
+    ) -> dict[str, Any]:
+        data = self._get(
+            "/api/v1/futures/position/get_history_positions",
+            {"symbol": symbol, "limit": limit, "skip": skip},
+        )
+        return data.get("data") or {"positionList": [], "total": 0}
+
+    def history_orders(
+        self, symbol: str | None = None, limit: int = 50, skip: int = 0
+    ) -> dict[str, Any]:
+        data = self._get(
+            "/api/v1/futures/trade/get_history_orders",
+            {"symbol": symbol, "limit": limit, "skip": skip},
+        )
+        return data.get("data") or {"orderList": [], "total": 0}
+
     # ------------------------------------------------------------------ trading
 
     def place_order(

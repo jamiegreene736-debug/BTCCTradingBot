@@ -18,6 +18,7 @@ from typing import Any
 from .client import BitunixClient, BitunixError
 from .config import Config
 from .risk import OrderPlan, build_order
+from .state import get as get_state
 from .strategy import evaluate
 
 log = logging.getLogger(__name__)
@@ -56,6 +57,7 @@ class BitunixBot:
         )
         self.meta = SymbolMeta(base_precision=0.001, price_precision=1, min_qty=0.001)
         self.stop_flag = False
+        self.state = get_state()
 
     # ------------------------------------------------------------------ setup
 
@@ -116,13 +118,19 @@ class BitunixBot:
         with contextlib.suppress(AttributeError):
             signal.signal(signal.SIGTERM, self._on_sig)
 
+        self.run_forever()
+
+    def run_forever(self) -> None:
+        """Loop without installing signal handlers (safe in a worker thread)."""
         while not self.stop_flag:
             try:
                 self._tick()
             except BitunixError as e:
                 log.error("Bitunix API error: %s", e)
-            except Exception:
+                self.state.record_error(f"{e.code}: {e.msg}")
+            except Exception as e:
                 log.exception("Tick failed")
+                self.state.record_error(str(e))
             for _ in range(self.cfg.loop.tick_seconds):
                 if self.stop_flag:
                     break
@@ -144,6 +152,7 @@ class BitunixBot:
         ]
         if open_positions:
             log.debug("Holding %d open position(s); waiting for TP/SL", len(open_positions))
+            self.state.record_tick(None, 0)
             return
 
         # 2. Candles.
@@ -152,11 +161,13 @@ class BitunixBot:
         )
         if len(rows) < 30:
             log.debug("Not enough klines yet (%d)", len(rows))
+            self.state.record_tick(None, len(rows))
             return
         rows = sorted(rows, key=lambda r: int(r.get("time") or 0))
         highs = [float(r["high"]) for r in rows]
         lows = [float(r["low"]) for r in rows]
         closes = [float(r["close"]) for r in rows]
+        self.state.record_tick(closes[-1], len(rows))
 
         # 3. Signal.
         sig = evaluate(highs, lows, closes, self.cfg.strategy)
@@ -165,12 +176,15 @@ class BitunixBot:
             return
         log.info("Signal: %s score=%d reasons=%s @ %s",
                  sig.direction, sig.score, sig.reasons, sig.price)
+        sig_text = f"{sig.direction.upper()} score={sig.score} @ {sig.price:.2f} ({', '.join(sig.reasons)})"
+        self.state.record_signal(sig_text)
 
         # 4. Risk plan.
         acct = self.client.account()
         free_margin = float(acct.get("available") or 0)
         if free_margin <= 0:
-            log.warning("No available margin — skipping (account=%s)", acct)
+            log.warning("No available margin — skipping")
+            self.state.record_skip(f"no available margin (have {acct.get('available')!r})")
             return
 
         plan = build_order(
@@ -184,19 +198,20 @@ class BitunixBot:
         )
         if plan is None:
             log.info("Risk manager rejected the trade")
+            self.state.record_skip("risk manager rejected (volume below min)")
             return
 
         # 5. Execute.
         self._execute(sym, plan)
 
     def _execute(self, symbol: str, plan: OrderPlan) -> None:
-        log.info(
-            "ORDER %s %s qty=%s entry~%s SL=%s TP=%s lev=%sx  [%s]",
-            "LIVE" if self.cfg.is_live else "PAPER",
-            plan.side, plan.volume, plan.price, plan.stop_loss, plan.take_profit,
-            plan.leverage, plan.notes,
-        )
+        prefix = "LIVE" if self.cfg.is_live else "PAPER"
+        order_text = (f"{prefix} {plan.side} qty={plan.volume} "
+                      f"entry~{plan.price} SL={plan.stop_loss} TP={plan.take_profit} "
+                      f"lev={plan.leverage}x")
+        log.info("ORDER %s [%s]", order_text, plan.notes)
         if not self.cfg.is_live:
+            self.state.record_order(order_text + " (paper)")
             return
         try:
             resp = self.client.place_order(
@@ -209,5 +224,7 @@ class BitunixBot:
                 sl_price=str(plan.stop_loss),
             )
             log.info("Placed orderId=%s clientId=%s", resp.get("orderId"), resp.get("clientId"))
+            self.state.record_order(f"{order_text} → orderId={resp.get('orderId')}")
         except BitunixError as e:
             log.error("Order rejected: %s (payload=%s)", e, e.payload)
+            self.state.record_error(f"order rejected: {e.code} {e.msg}")

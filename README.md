@@ -23,6 +23,10 @@ fundamentals — only price action and indicators.
   configurable, and an ATR-based alternative is available.
 * One position at a time per symbol. Waits for a TP/SL exit before evaluating
   again.
+* **Web dashboard** at `/` with live balance, open positions, closed-position
+  history, order history, and a stream of recent bot decisions (signals,
+  skips, orders, errors). Auto-refreshes every 10s. Protected by HTTP Basic
+  auth — set `DASHBOARD_PASSWORD`.
 
 ## Why this architecture
 
@@ -82,15 +86,31 @@ logged and ignored.
 ## Architecture
 
 ```
-run.py
+run.py                    # Spawns the trading worker thread + Flask app on $PORT
  └── bitunix_bot/
-      ├── config.py      # YAML + .env loader
-      ├── client.py      # REST client (place_order, account, klines, signing)
-      ├── indicators.py  # EMA / RSI / MACD / Bollinger / ATR (pure numpy)
-      ├── strategy.py    # 5-rule confluence signal
-      ├── risk.py        # Conservative SL, aggressive TP, leverage-aware sizing
-      └── bot.py         # Main loop + signal handlers
+      ├── config.py       # YAML + .env loader
+      ├── client.py       # REST client (place_order, account, klines, history, signing)
+      ├── indicators.py   # EMA / RSI / MACD / Bollinger / ATR (pure numpy)
+      ├── strategy.py     # 5-rule confluence signal
+      ├── risk.py         # Conservative SL, aggressive TP, leverage-aware sizing
+      ├── state.py        # Thread-safe shared state for the dashboard
+      ├── dashboard.py    # Flask app + HTML — basic auth on every route
+      └── bot.py          # Main trading loop
 ```
+
+## Dashboard
+
+The bot serves a dashboard on Railway's auto-assigned `*.up.railway.app` URL.
+Routes:
+
+| Path          | What it returns                                         |
+|---------------|----------------------------------------------------------|
+| `/`           | HTML dashboard (auth required)                          |
+| `/api/state`  | JSON snapshot — account, positions, history, events     |
+| `/healthz`    | Plain `ok`, no auth — for uptime checks                 |
+
+Set `DASHBOARD_PASSWORD` in Railway → Variables. The username is `admin`.
+If the env var is unset, every route except `/healthz` returns 503.
 
 ## Safety notes
 
