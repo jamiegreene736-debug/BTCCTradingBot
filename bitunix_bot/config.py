@@ -70,8 +70,8 @@ class StrategyCfg:
     # they're the primary technical-trading signal a human chartist uses.
     # combined_score = pattern_weight * pattern + (1 - pattern_weight) * indicator
     pattern_weight: float = 0.55          # 55% pattern, 45% indicator
-    pattern_norm: float = 2.5             # divide raw pattern strength by this for 0-1 normalization
-    fire_threshold: float = 0.45          # combined score must be ≥ this to fire
+    pattern_norm: float = 2.0             # divide raw pattern strength by this for 0-1 normalization
+    fire_threshold: float = 0.30          # combined score must be ≥ this to fire
 
 
 @dataclass

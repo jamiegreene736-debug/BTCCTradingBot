@@ -1,30 +1,31 @@
-"""Signal generation — pattern-weighted technical confluence.
+"""Signal generation — pure technicals: candlestick patterns + indicators.
 
-The user's view: "trading using technicals" means primarily candlestick chart
-reading. So pattern recognition gets the dominant weight (default 0.55), and
-indicators are confirmation.
+Per user direction: candlestick patterns AND other technicals (RSI, MACD,
+EMA, BB, ADX, Supertrend) ARE the decision. No other factors matter.
+
+NO HARD GATES — every signal comes purely from technical agreement.
 
 Architecture:
 
-  HARD GATES (no signal at all if either fails):
-    1. ADX > adx_min          (no trades in chop)
-    2. ATR/price > min_atr_pct (no trades in dead markets)
-
   SCORING (combined directional score):
 
-    indicator_score = (count of indicator rules agreeing) / 6           # 0-1
-    pattern_score   = min(1, sum(pattern strengths) / pattern_norm)     # 0-1
-    combined        = pattern_weight * pattern + (1-pw) * indicator     # 0-1
+    indicator_score = (count of rules agreeing) / 7              # 0-1
+    pattern_score   = min(1, sum(pattern strengths) / norm)      # 0-1
+    combined        = pattern_weight * pattern + (1-pw) * ind    # 0-1
 
   Fire if combined >= fire_threshold for one direction AND that side wins.
 
-CONFLUENCE INDICATOR RULES (the non-pattern half):
+INDICATOR RULES (counted, non-pattern half):
   1. EMA stack (fast > mid > slow for long; reverse for short)
   2. Close cross of EMA fast (bar-to-bar)
   3. RSI in long/short window
   4. MACD line vs signal AND histogram rising
   5. Bollinger basis (close above/below mid)
   6. Supertrend direction
+  7. ADX trend strength (counts for whichever side wins on other rules)
+
+PATTERNS: 23 classical candlestick patterns from bitunix_bot.patterns,
+weighted 0.4–1.5 by historical reliability. See patterns.py.
 """
 from __future__ import annotations
 
@@ -90,18 +91,14 @@ def evaluate(
 
     i = len(c) - 1
     p = c[i]
-
-    # ------------------------------------------------------------------ hard gates
-    a_now = adx_v[i] if i < len(adx_v) else np.nan
-    if np.isnan(a_now) or a_now < cfg.adx_min:
+    if p <= 0:
         return None
 
+    # ATR is still required for SL/TP sizing (not as a gate).
     atr_now = atr_v[i] if i < len(atr_v) else np.nan
-    if np.isnan(atr_now) or p <= 0:
+    if np.isnan(atr_now):
         return None
     atr_pct = (atr_now / p) * 100.0
-    if atr_pct < cfg.min_atr_pct:
-        return None
 
     # ------------------------------------------------------------------ indicators
     long_reasons: list[str] = []
@@ -149,9 +146,21 @@ def evaluate(
         elif st_dir[i] == -1:
             short_reasons.append("supertrend_down")
 
+    # 7. ADX trend strength — counts for whichever side is otherwise winning.
+    a_now = adx_v[i] if i < len(adx_v) else np.nan
+    if not np.isnan(a_now) and a_now >= cfg.adx_min:
+        # ADX is direction-agnostic; it amplifies whichever side has more votes.
+        if len(long_reasons) > len(short_reasons):
+            long_reasons.append(f"adx({a_now:.0f})")
+        elif len(short_reasons) > len(long_reasons):
+            short_reasons.append(f"adx({a_now:.0f})")
+        else:
+            # Tie — ADX doesn't break it, but record context.
+            pass
+
     indicator_long = len(long_reasons)
     indicator_short = len(short_reasons)
-    INDICATOR_MAX = 6
+    INDICATOR_MAX = 7
 
     # ------------------------------------------------------------------ patterns
     hits = patterns.detect(o, h, l, c)
@@ -176,7 +185,7 @@ def evaluate(
         ind_reasons = long_reasons if is_long else short_reasons
         pat_names = pat_long_names if is_long else pat_short_names
         all_reasons = (
-            [f"adx({a_now:.0f})", f"atr({atr_pct:.2f}%)"]
+            [f"atr({atr_pct:.2f}%)"]
             + [f"PAT:{n}" for n in pat_names]
             + (["NEU:" + ",".join(pat_neutral_names)] if pat_neutral_names else [])
             + ind_reasons

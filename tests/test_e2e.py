@@ -179,32 +179,32 @@ def test_uptrend_produces_long_signal_with_paper_order():
     bot.client.place_order.assert_not_called()
 
 
-def test_chop_produces_no_signal_due_to_adx_filter():
+def test_no_hard_gates_only_combined_threshold():
+    """Verify the removal of ADX/ATR hard gates: signals fire purely based on
+    the combined pattern+indicator score crossing fire_threshold."""
     reset_state()
     cfg = fresh_cfg()
-    bot = BitunixBot(cfg)
-    bot.client = make_mock_client()
-    bot.client.klines.side_effect = lambda *a, **kw: make_chop_klines()
-    bot._resolve_symbol_meta()
-    bot._tick()
-
-    kinds = [e["kind"] for e in bot.state.snapshot()["events"]]
-    assert "signal" not in kinds, "ADX filter should reject chop"
-
-
-def test_dead_market_skipped_by_atr_filter():
-    """Even on a clean trend, if ATR is below min_atr_pct, no signal."""
-    reset_state()
-    cfg = fresh_cfg()
-    cfg.strategy.min_atr_pct = 99.0  # impossible threshold to force a skip
+    # Make threshold impossible — even strong setups shouldn't fire.
+    cfg.strategy.fire_threshold = 0.99
     bot = BitunixBot(cfg)
     bot.client = make_mock_client()
     bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
     bot._resolve_symbol_meta()
     bot._tick()
-
     kinds = [e["kind"] for e in bot.state.snapshot()["events"]]
-    assert "signal" not in kinds, "ATR filter should block dead markets"
+    assert "signal" not in kinds, "should not fire when threshold is 0.99"
+
+    # And reverse: lower threshold dramatically — should fire on the same data.
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.strategy.fire_threshold = 0.05
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+    bot._resolve_symbol_meta()
+    bot._tick()
+    kinds = [e["kind"] for e in bot.state.snapshot()["events"]]
+    assert "signal" in kinds, "should fire when threshold is 0.05"
 
 
 def test_global_max_open_positions_cap():
@@ -562,8 +562,7 @@ def main() -> int:
     tests = [
         test_signing_matches_bitunix_spec_example,
         test_uptrend_produces_long_signal_with_paper_order,
-        test_chop_produces_no_signal_due_to_adx_filter,
-        test_dead_market_skipped_by_atr_filter,
+        test_no_hard_gates_only_combined_threshold,
         test_global_max_open_positions_cap,
         test_same_direction_cap_kills_correlated_risk,
         test_per_symbol_cap_blocks_same_symbol_but_allows_others,

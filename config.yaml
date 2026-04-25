@@ -54,19 +54,25 @@ strategy:
   bb_period: 20
   bb_std: 2.0
   atr_period: 14
-  # ADX trend-strength filter (whipsaw killer; HARD GATE — not counted)
+  # ADX trend strength — now a COUNTED indicator, not a hard gate. ADX above
+  # this threshold votes for whichever side has the most other agreement.
   adx_period: 14
-  adx_min: 22.0
+  adx_min: 18.0
   # Supertrend regime filter (direction-aware; counted)
   supertrend_period: 10
   supertrend_mult: 3.0
-  # Dead-market filter (HARD GATE — not counted): skip if ATR/price < this %
-  min_atr_pct: 0.08
-  # Pattern recognition is the heavy half of the decision (55% weight).
-  # combined = 0.55 * pattern_score + 0.45 * indicator_score; fire if ≥ 0.45
+  # Dead-market filter REMOVED. Set to 0 to disable (kept for backward compat).
+  min_atr_pct: 0.0
+  # Pattern recognition + indicators are the entire decision.
+  # combined = pattern_weight * pattern + (1 - pattern_weight) * indicator
+  # fire if combined >= fire_threshold AND that side wins.
   pattern_weight: 0.55
-  pattern_norm: 2.5      # raw pattern strength / norm = 0-1; 2.5 means 2-3 mid patterns saturate
-  fire_threshold: 0.45
+  pattern_norm: 2.0      # 2 mid-strength patterns = saturation
+  fire_threshold: 0.30   # lower so technicals alone can fire trades:
+                         # 4-of-7 indicators (no pattern) → 0.45 × 4/7 = 0.26 (close)
+                         # 5-of-7 indicators (no pattern) → 0.45 × 5/7 = 0.32 ✓
+                         # 1 strong pattern (1.0 normalized, no indicators) → 0.55 ✓
+                         # 1 mid pattern + 3 indicators → 0.27 + 0.19 = 0.46 ✓
   min_confluence: 4      # of 6 confluence rules; ADX is a hard gate (not counted).
                          # 3-of-6 = aggressive; 4-of-6 = selective; 5+ = rare
 
