@@ -29,6 +29,14 @@ class TradingCfg:
     max_same_direction: int = 2      # max concurrent LONGs (or SHORTs) — kills correlated risk
     cooldown_seconds: int = 60       # min seconds between actions on same symbol
     max_position_age_seconds: int = 0  # 0 = disabled; else force-close stale positions
+    # Streak protection — pause a symbol after N consecutive losses there.
+    # Catches "wrong about this symbol's regime" without manual intervention.
+    streak_loss_limit: int = 3
+    streak_loss_pause_seconds: int = 7200    # 2 hours
+    # Profit-aware time exit: when a position reaches max_position_age_seconds,
+    # only force-close if it's at a loss. Profitable positions keep running
+    # under the SL ratchet (which has already locked in some gain at +1R).
+    time_exit_only_if_losing: bool = True
 
 
 @dataclass
@@ -123,7 +131,7 @@ class StrategyCfg:
     # combined_score = pattern_weight * pattern + (1 - pattern_weight) * indicator
     pattern_weight: float = 0.55          # 55% pattern, 45% indicator
     pattern_norm: float = 2.0             # divide raw pattern strength by this for 0-1 normalization
-    fire_threshold: float = 0.30          # combined score must be ≥ this to fire
+    fire_threshold: float = 0.50          # combined score must be ≥ this to fire
 
 
 @dataclass

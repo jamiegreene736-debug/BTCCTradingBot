@@ -76,6 +76,12 @@ class BitunixBot:
         self.htf_cache: dict[str, tuple[int, list[float]]] = {}
         # Funding rate cache: symbol -> (fetched_unix_ts, rate).
         self.funding_cache: dict[str, tuple[int, float]] = {}
+        # Streak-protection state: symbol -> (paused_until_ts, reason).
+        self.streak_pause_until: dict[str, int] = {}
+        # Closed-positions watermark — used to detect newly-closed trades each
+        # tick and update the consecutive-loss streak per symbol.
+        self.last_seen_closed_mtime: int = 0
+        self.consec_losses: dict[str, int] = {}   # symbol -> count
         # Live order-book feed (WebSocket). Started in start() / run_forever().
         self.ob_feed: OrderBookFeed | None = None
         self.stop_flag = False
@@ -251,6 +257,53 @@ class BitunixBot:
             return 0.75 * weekend_mul
         return 1.0 * weekend_mul
 
+    def _update_streak_state(self) -> None:
+        """Pull recent closed positions and update consecutive-loss counts
+        per symbol. Pause a symbol after streak_loss_limit consecutive losses."""
+        try:
+            hist = self.client.history_positions(limit=20)
+            closed = hist.get("positionList", [])
+        except Exception as e:
+            log.debug("history_positions fetch for streak failed: %s", e)
+            return
+        # Filter to positions closed AFTER our watermark, in chronological order.
+        new_closed = sorted(
+            [p for p in closed
+             if int(p.get("mtime") or 0) > self.last_seen_closed_mtime],
+            key=lambda p: int(p.get("mtime") or 0),
+        )
+        for p in new_closed:
+            sym = str(p.get("symbol") or "").upper()
+            if not sym:
+                continue
+            # Net PnL = realizedPNL + fee + funding (Bitunix excludes fees from
+            # realizedPNL per spec; fee/funding are signed).
+            def _f(v):
+                try:
+                    return float(v) if v not in (None, "", "null") else 0.0
+                except (ValueError, TypeError):
+                    return 0.0
+            net = _f(p.get("realizedPNL")) + _f(p.get("fee")) + _f(p.get("funding"))
+            if net > 0:
+                # Win resets the streak.
+                self.consec_losses[sym] = 0
+            elif net < 0:
+                self.consec_losses[sym] = self.consec_losses.get(sym, 0) + 1
+                if self.consec_losses[sym] >= self.cfg.trading.streak_loss_limit:
+                    until = int(time.time()) + self.cfg.trading.streak_loss_pause_seconds
+                    self.streak_pause_until[sym] = until
+                    log.warning("STREAK PAUSE %s after %d consecutive losses; "
+                                "no entries until %ss",
+                                sym, self.consec_losses[sym],
+                                self.cfg.trading.streak_loss_pause_seconds)
+                    self.state.record_skip(
+                        f"{sym}: STREAK PAUSE — {self.consec_losses[sym]} losses, "
+                        f"halt for {self.cfg.trading.streak_loss_pause_seconds // 60}min"
+                    )
+                    self.consec_losses[sym] = 0  # reset count after triggering
+            self.last_seen_closed_mtime = max(self.last_seen_closed_mtime,
+                                               int(p.get("mtime") or 0))
+
     def _get_funding_rate(self, symbol: str) -> float | None:
         sym_u = symbol.upper()
         now = int(time.time())
@@ -269,24 +322,35 @@ class BitunixBot:
     # ------------------------------------------------------------------ tick
 
     def _tick(self) -> None:
+        # 0. Update streak-loss state from newly-closed positions.
+        self._update_streak_state()
+
         # 1. Snapshot global state once per tick.
         all_open = [p for p in self.client.pending_positions() if float(p.get("qty") or 0) != 0]
 
-        # Time-based exit: force-close any position older than max_position_age_seconds.
+        # Time-based exit: force-close stale positions, but only if the
+        # position is at a loss when time_exit_only_if_losing=True. Winners
+        # past max-age stay alive under the SL ratchet — proven signals
+        # deserve the chance to harvest more profit.
         max_age = self.cfg.trading.max_position_age_seconds
+        only_if_losing = self.cfg.trading.time_exit_only_if_losing
         if max_age > 0 and self.cfg.is_live:
             now_ms = int(time.time() * 1000)
             still_open = []
             for p in all_open:
                 ctime = int(p.get("ctime") or 0)
                 age_s = (now_ms - ctime) // 1000 if ctime else 0
-                if age_s >= max_age:
+                upnl = float(p.get("unrealizedPNL") or 0)
+                if age_s >= max_age and (not only_if_losing or upnl < 0):
                     pid = str(p.get("positionId") or "")
                     sym = str(p.get("symbol") or "")
-                    log.info("Force-close stale position %s (%s) age=%ss", pid, sym, age_s)
+                    log.info("Force-close stale position %s (%s) age=%ss uPnL=%s",
+                             pid, sym, age_s, upnl)
                     try:
                         self.client.flash_close_position(pid)
-                        self.state.record_order(f"{sym} TIME_EXIT positionId={pid} age={age_s}s")
+                        self.state.record_order(
+                            f"{sym} TIME_EXIT positionId={pid} age={age_s}s uPnL={upnl:.4f}"
+                        )
                     except BitunixError as e:
                         log.error("Force-close failed for %s: %s", pid, e)
                         self.state.record_error(f"{sym} time-exit failed: {e.code} {e.msg}")
@@ -329,6 +393,16 @@ class BitunixBot:
 
             # Per-symbol cap.
             if per_sym_count.get(sym_u, 0) >= self.cfg.trading.max_positions_per_symbol:
+                continue
+
+            # Streak-loss circuit breaker — pause this symbol if it's hit
+            # streak_loss_limit consecutive losses recently.
+            paused_until = self.streak_pause_until.get(sym_u, 0)
+            if paused_until and now < paused_until:
+                self.state.record_skip(
+                    f"{sym}: streak-paused for {(paused_until - now) // 60}m more "
+                    f"({self.consec_losses.get(sym_u, 0)} consecutive losses)"
+                )
                 continue
 
             # Cooldown.

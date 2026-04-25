@@ -315,25 +315,47 @@ def test_bar_dedupe_blocks_same_candle_re_eval():
     assert n1 == n2, f"bar-dedupe failed: orders {n1} -> {n2}"
 
 
-def test_time_based_exit_closes_stale_position():
+def test_time_based_exit_closes_stale_LOSING_position():
+    """With time_exit_only_if_losing=True, a stale position is force-closed
+    only when its unrealizedPNL is negative."""
     reset_state()
     cfg = fresh_cfg()
-    cfg.mode = "live"  # time-exit only fires in live mode
-    cfg.trading.max_position_age_seconds = 60  # 1 min for test
+    cfg.mode = "live"
+    cfg.trading.max_position_age_seconds = 60
     bot = BitunixBot(cfg)
     bot.client = make_mock_client()
-    # A stale position from 10 minutes ago.
-    stale_pos = {
+    stale_loser = {
         "positionId": "STALE1", "symbol": "BTCUSDT", "qty": "0.01",
         "side": "LONG", "leverage": 100,
         "ctime": int(time.time() * 1000) - 600_000,  # 10 min ago
+        "unrealizedPNL": "-0.5",  # losing → eligible for force-close
     }
-    bot.client.pending_positions.return_value = [stale_pos]
+    bot.client.pending_positions.return_value = [stale_loser]
     bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
     bot._resolve_symbol_meta()
     bot._tick()
-
     bot.client.flash_close_position.assert_called_once_with("STALE1")
+
+
+def test_time_based_exit_LETS_WINNER_RUN():
+    """A winning stale position past max age stays alive (SL ratchet protects it)."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.trading.max_position_age_seconds = 60
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    stale_winner = {
+        "positionId": "WINNER1", "symbol": "BTCUSDT", "qty": "0.01",
+        "side": "LONG", "leverage": 100,
+        "ctime": int(time.time() * 1000) - 600_000,
+        "unrealizedPNL": "+1.50",  # winning → NOT closed by time exit
+    }
+    bot.client.pending_positions.return_value = [stale_winner]
+    bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+    bot._resolve_symbol_meta()
+    bot._tick()
+    bot.client.flash_close_position.assert_not_called()
 
 
 def test_live_mode_with_zero_margin_skips_orders():
@@ -1251,7 +1273,8 @@ def main() -> int:
         test_per_symbol_cap_blocks_same_symbol_but_allows_others,
         test_cooldown_blocks_immediate_re_entry,
         test_bar_dedupe_blocks_same_candle_re_eval,
-        test_time_based_exit_closes_stale_position,
+        test_time_based_exit_closes_stale_LOSING_position,
+        test_time_based_exit_LETS_WINNER_RUN,
         test_live_mode_with_zero_margin_skips_orders,
         test_paper_mode_with_zero_margin_simulates_anyway,
         test_live_mode_actually_calls_place_order,

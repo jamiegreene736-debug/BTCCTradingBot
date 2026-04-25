@@ -25,6 +25,17 @@ trading:
   # scalping — long enough that valid TP setups still resolve, short
   # enough to free up slots and avoid range-bound dead trades.
   max_position_age_seconds: 5400
+  # Profit-aware time exit: when max age hits, ONLY force-close if the
+  # position is at a loss. Winners keep running under the SL ratchet —
+  # a winning trade that's been alive 90+ min has already proven the
+  # signal was right; we want to harvest more. The SL ratchet (already
+  # at break-even or trailing by then) protects the downside.
+  time_exit_only_if_losing: true
+  # Streak protection: pause a symbol for streak_loss_pause_seconds after
+  # N consecutive losses. Live data showed 6 XRP SHORTs in a row losing —
+  # bot kept doubling down on a wrong-regime call. This catches it.
+  streak_loss_limit: 3
+  streak_loss_pause_seconds: 7200    # 2 hours
 
 risk:
   # CONSERVATIVE stop loss — tight, in % of entry price.
@@ -135,11 +146,13 @@ strategy:
   # fire if combined >= fire_threshold AND that side wins.
   pattern_weight: 0.55
   pattern_norm: 2.0      # 2 mid-strength patterns = saturation
-  fire_threshold: 0.30   # lower so technicals alone can fire trades:
-                         # 4-of-7 indicators (no pattern) → 0.45 × 4/7 = 0.26 (close)
-                         # 5-of-7 indicators (no pattern) → 0.45 × 5/7 = 0.32 ✓
-                         # 1 strong pattern (1.0 normalized, no indicators) → 0.55 ✓
-                         # 1 mid pattern + 3 indicators → 0.27 + 0.19 = 0.46 ✓
+  # Tightened to 0.50 after reviewing 24-trade live results: the previous
+  # 0.30 threshold produced ~3 trades/hour with 17% win rate. Most losses
+  # were time-exits on weak signals oscillating in chop. At 0.50 we require
+  # genuine consensus — either 2+ strong patterns OR ~12 of 23 indicators
+  # OR a mid pattern + strong indicator confluence. Fewer trades, higher
+  # conviction, less fee drag.
+  fire_threshold: 0.50
   min_confluence: 4      # of 6 confluence rules; ADX is a hard gate (not counted).
                          # 3-of-6 = aggressive; 4-of-6 = selective; 5+ = rare
 
