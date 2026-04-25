@@ -84,6 +84,20 @@ class TradeFeed:
         self._ping_thread: threading.Thread | None = None
         self._last_message_at: float = 0.0
         self._last_trade_at: dict[str, float] = {}
+        # ----- observability counters / capture -----
+        self._connect_count = 0
+        self._disconnect_count = 0
+        self._error_count = 0
+        self._last_error: str | None = None
+        self._sub_ack_count = 0
+        self._data_msg_count = 0
+        self._unrecognized_count = 0
+        self._unparseable_count = 0
+        self._pong_count = 0
+        self._last_subscribe_msg_sent: str | None = None
+        self._subscribe_responses: list[dict] = []
+        self._unrecognized_samples: list[dict] = []
+        self._raw_message_samples: list[str] = []
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -299,13 +313,18 @@ class TradeFeed:
     # ------------------------------------------------------------------ callbacks
 
     def _on_open(self, ws: websocket.WebSocketApp) -> None:
-        log.info("Trade WS connected; subscribing to %d symbols", len(self.symbols))
+        self._connect_count += 1
+        log.info("Trade WS connected (connect #%d); subscribing to %d symbols: %s",
+                 self._connect_count, len(self.symbols), self.symbols)
         sub_msg = {
             "op": "subscribe",
             "args": [{"symbol": s, "ch": CHANNEL} for s in self.symbols],
         }
+        sub_str = json.dumps(sub_msg)
+        self._last_subscribe_msg_sent = sub_str
         try:
-            ws.send(json.dumps(sub_msg))
+            ws.send(sub_str)
+            log.info("Trade WS subscribe SENT: %s", sub_str)
         except Exception as e:
             log.warning("Trade WS subscribe send failed: %s", e)
         if not self._ping_thread or not self._ping_thread.is_alive():
@@ -314,26 +333,102 @@ class TradeFeed:
 
     def _on_message(self, ws: websocket.WebSocketApp, message: str) -> None:
         self._last_message_at = time.time()
+        if len(self._raw_message_samples) < 5:
+            self._raw_message_samples.append(message[:500])
         try:
             msg = json.loads(message)
         except json.JSONDecodeError:
+            self._unparseable_count += 1
             return
         if isinstance(msg, dict):
             op = msg.get("op")
-            if op in ("pong", "subscribe", "ping"):
+            if op == "pong":
+                self._pong_count += 1
+                return
+            if op == "subscribe":
+                self._sub_ack_count += 1
+                log.info("Trade WS subscribe ACK #%d: %s",
+                         self._sub_ack_count, msg)
+                if len(self._subscribe_responses) < 5:
+                    self._subscribe_responses.append(msg)
+                return
+            if op == "ping":
                 return
 
         symbol, trades = self._extract_trades(msg)
         if not symbol or not trades:
+            self._unrecognized_count += 1
+            if len(self._unrecognized_samples) < 5:
+                self._unrecognized_samples.append(msg)
+                log.warning("Trade WS UNRECOGNIZED msg #%d: %s",
+                            self._unrecognized_count, str(msg)[:300])
             return
         for t in trades:
             self._ingest(t, symbol)
+        self._data_msg_count += 1
 
     def _on_error(self, ws: websocket.WebSocketApp, error: Any) -> None:
-        log.warning("Trade WS error: %s", error)
+        self._error_count += 1
+        self._last_error = str(error)[:300]
+        log.warning("Trade WS error #%d: %s", self._error_count, error)
 
     def _on_close(self, ws: websocket.WebSocketApp, *args: Any) -> None:
-        log.info("Trade WS closed")
+        self._disconnect_count += 1
+        log.info("Trade WS closed (disconnect #%d, args=%s)",
+                 self._disconnect_count, args[:2] if args else "")
+
+    # ------------------------------------------------------------------ status
+
+    def get_status(self) -> dict[str, Any]:
+        """Diagnostic snapshot for /api/feeds/status."""
+        with self._lock:
+            tape_status = {}
+            now = time.time()
+            for sym, buf in self._trades.items():
+                last_age = None
+                if buf:
+                    last_age = now - buf[-1].ts
+                # 60s and 10s recent counts (a healthy crypto feed shows
+                # dozens to hundreds in 60s for BTC; a few in 10s).
+                cutoff_60 = now - 60.0
+                cutoff_10 = now - 10.0
+                count_60 = sum(1 for t in buf if t.ts >= cutoff_60)
+                count_10 = sum(1 for t in buf if t.ts >= cutoff_10)
+                tape_status[sym] = {
+                    "buffered_count": len(buf),
+                    "trades_last_60s": count_60,
+                    "trades_last_10s": count_10,
+                    "last_trade_age_secs": last_age,
+                    "is_fresh": (last_age is not None and last_age < 30.0),
+                }
+            return {
+                "type": "TradeFeed",
+                "url": WS_URL,
+                "channel": CHANNEL,
+                "symbols": list(self.symbols),
+                "connected": self.is_connected(),
+                "lifecycle": {
+                    "connect_count": self._connect_count,
+                    "disconnect_count": self._disconnect_count,
+                    "error_count": self._error_count,
+                    "last_error": self._last_error,
+                },
+                "messages": {
+                    "data_msg_count": self._data_msg_count,
+                    "subscribe_ack_count": self._sub_ack_count,
+                    "pong_count": self._pong_count,
+                    "unrecognized_count": self._unrecognized_count,
+                    "unparseable_count": self._unparseable_count,
+                },
+                "last_message_at": self._last_message_at,
+                "last_message_age_secs": (now - self._last_message_at
+                                            if self._last_message_at else None),
+                "subscribe_msg_sent": self._last_subscribe_msg_sent,
+                "subscribe_responses_captured": list(self._subscribe_responses),
+                "unrecognized_samples": list(self._unrecognized_samples),
+                "raw_message_samples": list(self._raw_message_samples),
+                "tape": tape_status,
+            }
 
     def _pinger(self) -> None:
         """Send heartbeats and watchdog the connection — silence > 60s

@@ -117,6 +117,9 @@ def fresh_cfg():
     cfg.strategy.rsi_long_max = 80
     cfg.strategy.rsi_short_min = 20
     cfg.strategy.rsi_short_max = 60
+    # Disable the ADX-floor filter for fixture tests (most tests don't care
+    # about regime gating; specific min_adx tests set this explicitly).
+    cfg.strategy.min_adx_for_trade = 0.0
     return cfg
 
 
@@ -790,6 +793,98 @@ def test_orderbook_imbalance_compute():
     imb = feed.get_imbalance("BTCUSDT")
     # (3 - 15) / (3 + 15) = -0.667
     assert abs(imb - (-0.667)) < 0.01, f"expected ≈ -0.67 got {imb}"
+
+
+def test_orderbook_extract_symbol_handles_list_data():
+    """Bitunix sometimes wraps payload as {'data': [{'symbol': X, ...}]}.
+    Original parser missed this case (silently dropped book updates),
+    while TradeFeed handled it correctly. Both are now aligned."""
+    from bitunix_bot.orderbook import OrderBookFeed
+    # List-shaped data with symbol nested in first dict element.
+    msg = {"ch": "depth_books", "data": [
+        {"symbol": "BTCUSDT",
+         "b": [["60000", "1.0"]],
+         "a": [["60001", "1.0"]]}
+    ]}
+    sym = OrderBookFeed._extract_symbol(msg)
+    assert sym == "BTCUSDT", f"list-shaped symbol extraction failed: got {sym}"
+
+    # Top-level symbol still works.
+    msg2 = {"ch": "depth_books", "symbol": "ETHUSDT", "data": {}}
+    assert OrderBookFeed._extract_symbol(msg2) == "ETHUSDT"
+
+    # Dict-shaped data still works.
+    msg3 = {"ch": "depth_books", "data": {"s": "SOLUSDT", "b": [], "a": []}}
+    assert OrderBookFeed._extract_symbol(msg3) == "SOLUSDT"
+
+    # Neither — None.
+    assert OrderBookFeed._extract_symbol({"ch": "x", "data": []}) is None
+
+
+def test_orderbook_get_status_shape():
+    """get_status() returns lifecycle + per-symbol diagnostic fields."""
+    from bitunix_bot.orderbook import OrderBookFeed
+    feed = OrderBookFeed(symbols=["BTCUSDT", "ETHUSDT"], depth_levels=10)
+    status = feed.get_status()
+    assert status["type"] == "OrderBookFeed"
+    assert status["symbols"] == ["BTCUSDT", "ETHUSDT"]
+    assert status["connected"] is False  # never started
+    assert "lifecycle" in status and "messages" in status
+    assert "BTCUSDT" in status["books"]
+    assert status["books"]["BTCUSDT"]["has_bids"] is False
+    assert status["books"]["BTCUSDT"]["is_fresh"] is False
+
+
+def test_tradetape_get_status_shape():
+    """TradeFeed.get_status() includes counters + per-symbol activity."""
+    from bitunix_bot.tradetape import TradeFeed, Trade
+    feed = TradeFeed(symbols=["BTCUSDT"])
+    status = feed.get_status()
+    assert status["type"] == "TradeFeed"
+    assert "BTCUSDT" in status["tape"]
+    # Add some trades and verify counts surface.
+    now = time.time()
+    feed._ingest(Trade(ts=now - 5, price=60000, qty=1.0, is_buy=True), "BTCUSDT")
+    feed._ingest(Trade(ts=now - 70, price=60000, qty=1.0, is_buy=False), "BTCUSDT")
+    status2 = feed.get_status()
+    assert status2["tape"]["BTCUSDT"]["buffered_count"] == 2
+    assert status2["tape"]["BTCUSDT"]["trades_last_10s"] == 1   # only the 5s one
+    assert status2["tape"]["BTCUSDT"]["trades_last_60s"] == 1
+
+
+def test_feeds_status_endpoint():
+    """GET /api/feeds/status returns both feeds' status snapshots."""
+    reset_state()
+    cfg = fresh_cfg()
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    from bitunix_bot.orderbook import OrderBookFeed
+    from bitunix_bot.tradetape import TradeFeed
+    bot.ob_feed = OrderBookFeed(symbols=cfg.trading.symbols)
+    bot.tape_feed = TradeFeed(symbols=cfg.trading.symbols)
+
+    app = create_app(cfg, bot.client, bot=bot)
+    c = app.test_client()
+    auth = base64.b64encode(b"admin:test_pass").decode()
+    r = c.get("/api/feeds/status",
+              headers={"Authorization": f"Basic {auth}"})
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["ob_feed"]["type"] == "OrderBookFeed"
+    assert body["tape_feed"]["type"] == "TradeFeed"
+    assert body["ob_feed"]["connected"] is False
+    assert body["tape_feed"]["connected"] is False
+
+
+def test_feeds_status_requires_auth():
+    reset_state()
+    cfg = fresh_cfg()
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    app = create_app(cfg, bot.client, bot=bot)
+    c = app.test_client()
+    r = c.get("/api/feeds/status")
+    assert r.status_code == 401
 
 
 def test_orderbook_parser_handles_multiple_formats():
@@ -3432,6 +3527,10 @@ def test_dynamic_post_only_timeout_shortens_with_high_activity():
     bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
     bot.ob_feed = _FakeOBFeed()
 
+    # Make session_weight time-of-day-stable for the test (otherwise this
+    # flakes whenever it runs in dead UTC hours / weekends, dampening
+    # combined score below threshold).
+    bot._session_weight = lambda: 1.0
     # Fake high activity (raw ×1.5) → expected timeout = round(8 / 1.5) = 5s.
     # The fake mirrors the real impl: applies the caller's clamp range so
     # the strategy-side call (default [0.85, 1.10]) and the timeout-side
@@ -3464,6 +3563,7 @@ def test_dynamic_post_only_timeout_lengthens_in_dead_market():
     bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
     bot.ob_feed = _FakeOBFeed()
 
+    bot._session_weight = lambda: 1.0   # stabilize for time-of-day
     # Fake low activity (raw ×0.7) → expected timeout = round(8 / 0.7) = 11s.
     # Mirrors the real impl: respects the caller's clamp range.
     class LowActTape:
@@ -3494,6 +3594,7 @@ def test_dynamic_post_only_timeout_clamps_to_4_12():
     bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
     bot.ob_feed = _FakeOBFeed()
 
+    bot._session_weight = lambda: 1.0   # stabilize for time-of-day
     # Extreme high activity (raw ×3.0). Clamped at the caller's bound:
     # strategy uses [0.85, 1.10] → 1.10; timeout uses [0.5, 2.0] → 2.0.
     # Final timeout = 8 / 2.0 = 4s.
@@ -3516,6 +3617,7 @@ def test_dynamic_post_only_timeout_clamps_to_4_12():
     bot2.client = make_mock_client()
     bot2.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
     bot2.ob_feed = _FakeOBFeed()
+    bot2._session_weight = lambda: 1.0   # stabilize for time-of-day
     class DeadTape:
         def get_aggression_ratio(self, sym, **kw): return None
         def get_cvd(self, sym, **kw): return None
@@ -3982,6 +4084,11 @@ def main() -> int:
         test_chart_pattern_score_aggregation,
         test_sr_detection_finds_real_levels,
         test_orderbook_imbalance_compute,
+        test_orderbook_extract_symbol_handles_list_data,
+        test_orderbook_get_status_shape,
+        test_tradetape_get_status_shape,
+        test_feeds_status_endpoint,
+        test_feeds_status_requires_auth,
         test_orderbook_parser_handles_multiple_formats,
         test_imbalance_vote_in_strategy,
         test_clientid_is_deterministic_and_includes_symbol_side,

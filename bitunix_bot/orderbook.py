@@ -57,6 +57,23 @@ class OrderBookFeed:
         self._thread: threading.Thread | None = None
         self._ping_thread: threading.Thread | None = None
         self._last_message_at: float = 0.0  # for the silence watchdog
+        # ----- observability counters / capture -----
+        # Connection lifecycle.
+        self._connect_count = 0
+        self._disconnect_count = 0
+        self._error_count = 0
+        self._last_error: str | None = None
+        # Message processing.
+        self._sub_ack_count = 0
+        self._data_msg_count = 0          # successfully parsed book updates
+        self._unrecognized_count = 0      # messages we received but couldn't classify
+        self._unparseable_count = 0       # JSON decode failures
+        self._pong_count = 0
+        # Diagnostic captures.
+        self._last_subscribe_msg_sent: str | None = None
+        self._subscribe_responses: list[dict] = []  # capture the first few acks
+        self._unrecognized_samples: list[dict] = []  # first 5 unrecognized payloads
+        self._raw_message_samples: list[str] = []   # first 5 raw messages for debugging
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -163,13 +180,18 @@ class OrderBookFeed:
     # ------------------------------------------------------------------ callbacks
 
     def _on_open(self, ws: websocket.WebSocketApp) -> None:
-        log.info("OB WS connected; subscribing to %d symbols", len(self.symbols))
+        self._connect_count += 1
+        log.info("OB WS connected (connect #%d); subscribing to %d symbols: %s",
+                 self._connect_count, len(self.symbols), self.symbols)
         sub_msg = {
             "op": "subscribe",
             "args": [{"symbol": s, "ch": CHANNEL} for s in self.symbols],
         }
+        sub_str = json.dumps(sub_msg)
+        self._last_subscribe_msg_sent = sub_str
         try:
-            ws.send(json.dumps(sub_msg))
+            ws.send(sub_str)
+            log.info("OB WS subscribe SENT: %s", sub_str)
         except Exception as e:
             log.warning("OB WS subscribe send failed: %s", e)
         # Start a self-pinger to keep connection alive.
@@ -179,23 +201,43 @@ class OrderBookFeed:
 
     def _on_message(self, ws: websocket.WebSocketApp, message: str) -> None:
         self._last_message_at = time.time()
+        # Capture the first few raw messages verbatim — invaluable when
+        # debugging "why isn't data flowing" because Bitunix's exact
+        # payload shape isn't fully documented and may have changed.
+        if len(self._raw_message_samples) < 5:
+            self._raw_message_samples.append(message[:500])
         try:
             msg = json.loads(message)
         except json.JSONDecodeError:
+            self._unparseable_count += 1
             return
         # Heartbeat reply: ignore.
         if isinstance(msg, dict) and msg.get("op") == "pong":
+            self._pong_count += 1
             return
-        # Subscribe ack.
+        # Subscribe ack — promote to INFO so we see it in production logs.
         if isinstance(msg, dict) and msg.get("op") == "subscribe":
-            log.debug("OB WS subscribe ack: %s", msg)
+            self._sub_ack_count += 1
+            log.info("OB WS subscribe ACK #%d: %s", self._sub_ack_count, msg)
+            if len(self._subscribe_responses) < 5:
+                self._subscribe_responses.append(msg)
             return
         # Data payload — defensive parsing.
         symbol = self._extract_symbol(msg)
         if not symbol:
+            self._unrecognized_count += 1
+            if len(self._unrecognized_samples) < 5:
+                self._unrecognized_samples.append(msg)
+                log.warning("OB WS UNRECOGNIZED msg #%d (no symbol): %s",
+                            self._unrecognized_count, str(msg)[:300])
             return
         bids, asks = self._extract_book(msg)
         if bids is None and asks is None:
+            self._unrecognized_count += 1
+            if len(self._unrecognized_samples) < 5:
+                self._unrecognized_samples.append(msg)
+                log.warning("OB WS UNRECOGNIZED msg #%d (no book): %s",
+                            self._unrecognized_count, str(msg)[:300])
             return
         with self._lock:
             book = self._books.setdefault(symbol.upper(), Book())
@@ -204,12 +246,17 @@ class OrderBookFeed:
             if asks is not None:
                 book.asks = asks
             book.last_update = time.time()
+        self._data_msg_count += 1
 
     def _on_error(self, ws: websocket.WebSocketApp, error: Any) -> None:
-        log.warning("OB WS error: %s", error)
+        self._error_count += 1
+        self._last_error = str(error)[:300]
+        log.warning("OB WS error #%d: %s", self._error_count, error)
 
     def _on_close(self, ws: websocket.WebSocketApp, *args: Any) -> None:
-        log.info("OB WS closed")
+        self._disconnect_count += 1
+        log.info("OB WS closed (disconnect #%d, args=%s)",
+                 self._disconnect_count, args[:2] if args else "")
 
     def _pinger(self) -> None:
         """Send heartbeats AND watchdog the connection — if no messages have
@@ -240,6 +287,10 @@ class OrderBookFeed:
     @staticmethod
     def _extract_symbol(msg: dict) -> str | None:
         # Bitunix typically wraps payloads as {"ch":..., "symbol":..., "data":{...}}
+        # but can also send {"data": [{"symbol": ..., ...}]} — list-shaped.
+        # The original implementation missed the list case, which silently
+        # dropped book updates from any deploy where Bitunix uses that shape.
+        # TradeFeed's parser already handled this; bringing OB feed in line.
         for key in ("symbol", "s"):
             v = msg.get(key)
             if v:
@@ -250,7 +301,66 @@ class OrderBookFeed:
                 v = data.get(key)
                 if v:
                     return str(v)
+        if isinstance(data, list) and data and isinstance(data[0], dict):
+            for key in ("symbol", "s"):
+                v = data[0].get(key)
+                if v:
+                    return str(v)
         return None
+
+    # ------------------------------------------------------------------ status
+
+    def get_status(self) -> dict[str, Any]:
+        """Return a JSON-serializable diagnostic snapshot for /api/feeds/status.
+
+        Includes connection lifecycle counters, per-symbol book staleness,
+        and captured samples of unrecognized messages so we can reverse-
+        engineer Bitunix's payload shape if the silent-drop bug returns.
+        """
+        with self._lock:
+            books_status = {}
+            for sym, book in self._books.items():
+                age = (time.time() - book.last_update) if book.last_update else None
+                books_status[sym] = {
+                    "has_bids": bool(book.bids),
+                    "has_asks": bool(book.asks),
+                    "bid_levels": len(book.bids),
+                    "ask_levels": len(book.asks),
+                    "top_bid": book.bids[0][0] if book.bids else None,
+                    "top_ask": book.asks[0][0] if book.asks else None,
+                    "last_update_ts": book.last_update or None,
+                    "age_secs": age,
+                    "is_fresh": (age is not None and age < 30.0),
+                }
+            now = time.time()
+            return {
+                "type": "OrderBookFeed",
+                "url": WS_URL,
+                "channel": CHANNEL,
+                "symbols": list(self.symbols),
+                "connected": self.is_connected(),
+                "lifecycle": {
+                    "connect_count": self._connect_count,
+                    "disconnect_count": self._disconnect_count,
+                    "error_count": self._error_count,
+                    "last_error": self._last_error,
+                },
+                "messages": {
+                    "data_msg_count": self._data_msg_count,
+                    "subscribe_ack_count": self._sub_ack_count,
+                    "pong_count": self._pong_count,
+                    "unrecognized_count": self._unrecognized_count,
+                    "unparseable_count": self._unparseable_count,
+                },
+                "last_message_at": self._last_message_at,
+                "last_message_age_secs": (now - self._last_message_at
+                                            if self._last_message_at else None),
+                "subscribe_msg_sent": self._last_subscribe_msg_sent,
+                "subscribe_responses_captured": list(self._subscribe_responses),
+                "unrecognized_samples": list(self._unrecognized_samples),
+                "raw_message_samples": list(self._raw_message_samples),
+                "books": books_status,
+            }
 
     @staticmethod
     def _extract_book(msg: dict) -> tuple[list[tuple[float, float]] | None,

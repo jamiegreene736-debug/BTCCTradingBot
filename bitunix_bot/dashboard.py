@@ -252,6 +252,30 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
         return send_file(str(path), mimetype="application/x-ndjson",
                          as_attachment=True, download_name="trades.jsonl")
 
+    @app.get("/api/feeds/status")
+    def feeds_status() -> Response:
+        """Diagnostic snapshot of both WebSocket feeds (OB + trade tape).
+
+        Returns connection lifecycle counters, per-symbol freshness, and
+        captured samples of unrecognized payloads — invaluable when one
+        of the feeds silently stops delivering data (e.g. Bitunix changes
+        a payload schema, or Railway's networking interferes with WSS).
+
+        Read this when you see /api/journal entries with tob_bid=null +
+        order_type=MARKET — that's the OB feed being offline forcing the
+        bot to fall through to taker market entries.
+        """
+        if bot is None:
+            return Response("bot reference not wired (admin endpoint disabled)",
+                            status=503, mimetype="text/plain")
+        ob_status = bot.ob_feed.get_status() if getattr(bot, "ob_feed", None) else None
+        tape_status = bot.tape_feed.get_status() if getattr(bot, "tape_feed", None) else None
+        return jsonify({
+            "now": time.time(),
+            "ob_feed": ob_status,
+            "tape_feed": tape_status,
+        })
+
     @app.post("/api/admin/reset-streaks")
     def reset_streaks() -> Response:
         """Clear all streak / mini-cooldown / consecutive-loss state on the

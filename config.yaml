@@ -216,6 +216,11 @@ strategy:
   # OR a mid pattern + strong indicator confluence. Fewer trades, higher
   # conviction, less fee drag.
   fire_threshold: 0.50
+  # Hard ADX floor — don't trade when below this. Live drawdown analysis
+  # showed the bot firing 0.64+ scores at ADX 15-20 and bleeding via 6-min
+  # stale exits. In deep chop, confluence agreement DOESN'T predict direction.
+  # 22 = lower bound of neutral/trending. Set to 0 to disable.
+  min_adx_for_trade: 22.0
 
 loop:
   tick_seconds: 10
