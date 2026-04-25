@@ -195,9 +195,15 @@ class BitunixBot:
 
         n_open = len(all_open)
         per_sym_count: dict[str, int] = {}
+        long_count = short_count = 0
         for p in all_open:
             s = str(p.get("symbol", "")).upper()
             per_sym_count[s] = per_sym_count.get(s, 0) + 1
+            side = str(p.get("side", "")).upper()
+            if side == "BUY" or side == "LONG":
+                long_count += 1
+            elif side == "SELL" or side == "SHORT":
+                short_count += 1
 
         self.state.record_tick(None, len(all_open))
 
@@ -252,6 +258,15 @@ class BitunixBot:
             log.info("Signal: %s", sig_text)
             self.state.record_signal(sig_text)
 
+            # Same-direction cap: kills correlated-bet risk (e.g. 4 longs on
+            # crypto = 1 big bet on crypto, not 4 diversified bets).
+            if sig.direction == "long" and long_count >= self.cfg.trading.max_same_direction:
+                self.state.record_skip(f"{sym}: same-direction cap ({long_count} longs already)")
+                continue
+            if sig.direction == "short" and short_count >= self.cfg.trading.max_same_direction:
+                self.state.record_skip(f"{sym}: same-direction cap ({short_count} shorts already)")
+                continue
+
             # Risk plan.
             if cached_acct is None:
                 try:
@@ -293,6 +308,10 @@ class BitunixBot:
                 self.last_action_at[sym_u] = now
                 per_sym_count[sym_u] = per_sym_count.get(sym_u, 0) + 1
                 n_open += 1
+                if sig.direction == "long":
+                    long_count += 1
+                else:
+                    short_count += 1
                 # Reduce optimistic free margin in cache so subsequent symbols
                 # don't oversize against the same dollars.
                 used_margin = (plan.volume * plan.price) / max(plan.leverage, 1)

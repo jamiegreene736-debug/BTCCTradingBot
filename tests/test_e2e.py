@@ -98,8 +98,17 @@ def reset_state():
 # ----------------------------------------------------------------- fixtures
 
 def fresh_cfg():
+    """Loose-defaults config so 'should fire' tests work on synthetic data
+    regardless of how aggressively production config has been tuned."""
     cfg = load("config.yaml", "/dev/null")
-    cfg.mode = "paper"  # default for most scenarios; specific tests override
+    cfg.mode = "paper"
+    # Override strategy to permissive values so synthetic uptrends/downtrends
+    # reliably produce signals. Production tightness is verified separately.
+    cfg.strategy.min_confluence = 3
+    cfg.strategy.rsi_long_min = 40
+    cfg.strategy.rsi_long_max = 80
+    cfg.strategy.rsi_short_min = 20
+    cfg.strategy.rsi_short_max = 60
     return cfg
 
 
@@ -192,6 +201,32 @@ def test_global_max_open_positions_cap():
     # Should NOT have placed any new orders; klines may be skipped entirely.
     kinds = [e["kind"] for e in bot.state.snapshot()["events"]]
     assert "order" not in kinds, f"capped, no new orders allowed, got {kinds}"
+
+
+def test_same_direction_cap_kills_correlated_risk():
+    """If 2 longs are already open, a 3rd long signal must be skipped even
+    though global cap and per-symbol cap allow it."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.trading.max_open_positions = 4
+    cfg.trading.max_same_direction = 2
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    # Two longs already open on BTC and ETH.
+    bot.client.pending_positions.return_value = [
+        {"positionId": "P1", "symbol": "BTCUSDT", "qty": "0.01",
+         "side": "BUY", "leverage": 100, "ctime": int(time.time() * 1000)},
+        {"positionId": "P2", "symbol": "ETHUSDT", "qty": "0.1",
+         "side": "BUY", "leverage": 100, "ctime": int(time.time() * 1000)},
+    ]
+    bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+    bot._resolve_symbol_meta()
+    bot._tick()
+
+    # Should record at least one same-direction-cap skip.
+    skips = [e for e in bot.state.snapshot()["events"] if e["kind"] == "skip"]
+    assert any("same-direction" in e["text"] for e in skips), \
+        f"expected same-direction skip, got skips={[e['text'] for e in skips]}"
 
 
 def test_per_symbol_cap_blocks_same_symbol_but_allows_others():
@@ -418,6 +453,7 @@ def main() -> int:
         test_uptrend_produces_long_signal_with_paper_order,
         test_chop_produces_no_signal_due_to_adx_filter,
         test_global_max_open_positions_cap,
+        test_same_direction_cap_kills_correlated_risk,
         test_per_symbol_cap_blocks_same_symbol_but_allows_others,
         test_cooldown_blocks_immediate_re_entry,
         test_bar_dedupe_blocks_same_candle_re_eval,

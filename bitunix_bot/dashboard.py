@@ -101,7 +101,25 @@ def create_app(cfg: Config, client: BitunixClient) -> Flask:
 
         # Pull positions / history across the whole universe (no symbol filter).
         try:
-            out["open_positions"] = client.pending_positions()
+            positions = client.pending_positions()
+            # Merge in TPSL trigger prices (Bitunix stores them as separate orders).
+            try:
+                tpsl_rows = client.pending_tpsl()
+                tp_by_pos: dict[str, str] = {}
+                sl_by_pos: dict[str, str] = {}
+                for r in tpsl_rows:
+                    pid = str(r.get("positionId") or "")
+                    if r.get("tpPrice"):
+                        tp_by_pos[pid] = r["tpPrice"]
+                    if r.get("slPrice"):
+                        sl_by_pos[pid] = r["slPrice"]
+                for p in positions:
+                    pid = str(p.get("positionId") or "")
+                    p["slPrice"] = sl_by_pos.get(pid)
+                    p["tpPrice"] = tp_by_pos.get(pid)
+            except Exception as e:
+                out["tpsl_error"] = str(e)
+            out["open_positions"] = positions
         except Exception as e:
             out["open_positions_error"] = str(e)
             out["open_positions"] = []
@@ -224,22 +242,27 @@ function renderAccount(s) {
 function renderOpen(s) {
   const t = document.getElementById('open-positions');
   const rows = s.open_positions || [];
-  t.querySelector('thead').innerHTML = `<tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Mark</th><th>uPnL</th><th>Lev</th><th>Mode</th><th>Liq</th></tr>`;
+  t.querySelector('thead').innerHTML = `<tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>SL</th><th>TP</th><th>uPnL</th><th>Lev</th><th>Liq</th></tr>`;
   if (s.open_positions_error) { t.querySelector('tbody').innerHTML = `<tr><td colspan="9" class="ev-error">API error: ${s.open_positions_error}</td></tr>`; return; }
   if (!rows.length) { t.querySelector('tbody').innerHTML = `<tr><td colspan="9" class="small">No open positions (paper mode never opens real ones — see Recent activity for paper trades).</td></tr>`; return; }
-  t.querySelector('tbody').innerHTML = rows.map(p => `
+  t.querySelector('tbody').innerHTML = rows.map(p => {
+    const sideUp = (p.side==='BUY' || p.side==='LONG');
+    const sideClass = sideUp ? 'pos' : 'neg';
+    const sl = p.slPrice ? fmt(p.slPrice,4) : '<span class="small">—</span>';
+    const tp = p.tpPrice ? fmt(p.tpPrice,4) : '<span class="small">—</span>';
+    return `
     <tr>
       <td>${p.symbol||''}</td>
-      <td class="${p.side==='LONG'?'pos':p.side==='SHORT'?'neg':''}">${p.side||''}</td>
+      <td class="${sideClass}">${p.side||''}</td>
       <td>${fmt(p.qty,4)}</td>
-      <td>${fmt(p.avgOpenPrice,2)}</td>
-      <td>${fmt(p.markPrice,2)}</td>
+      <td>${fmt(p.avgOpenPrice,4)}</td>
+      <td class="neg">${sl}</td>
+      <td class="pos">${tp}</td>
       <td>${pnl(p.unrealizedPNL)}</td>
       <td>${p.leverage||''}x</td>
-      <td>${p.marginMode||''}</td>
-      <td>${fmt(p.liqPrice,2)}</td>
-    </tr>
-  `).join('');
+      <td>${fmt(p.liqPrice,4)}</td>
+    </tr>`;
+  }).join('');
 }
 
 function renderEvents(s) {

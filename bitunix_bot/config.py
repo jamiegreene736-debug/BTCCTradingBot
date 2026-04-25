@@ -26,6 +26,7 @@ class TradingCfg:
     risk_per_trade_pct: float
     max_open_positions: int = 1      # global cap across all symbols
     max_positions_per_symbol: int = 1
+    max_same_direction: int = 2      # max concurrent LONGs (or SHORTs) — kills correlated risk
     cooldown_seconds: int = 60       # min seconds between actions on same symbol
     max_position_age_seconds: int = 0  # 0 = disabled; else force-close stale positions
 

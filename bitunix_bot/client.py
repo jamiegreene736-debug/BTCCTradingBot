@@ -191,6 +191,19 @@ class BitunixClient:
         )
         return data.get("data") or {"orderList": [], "total": 0}
 
+    def pending_tpsl(self, symbol: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        """Fetch pending TP/SL trigger orders. Bitunix stores TPSL as separate
+        trigger orders, one per side (one TP-only row + one SL-only row per
+        position), so the position object alone does not carry SL/TP prices."""
+        data = self._get(
+            "/api/v1/futures/tpsl/get_pending_orders",
+            {"symbol": symbol, "limit": limit},
+        )
+        d = data.get("data") or {}
+        if isinstance(d, dict):
+            return d.get("orderList") or d.get("list") or []
+        return d if isinstance(d, list) else []
+
     # ------------------------------------------------------------------ trading
 
     def place_order(

@@ -16,14 +16,17 @@ trading:
   risk_per_trade_pct: 1.0
   max_open_positions: 4         # global cap; total across all symbols
   max_positions_per_symbol: 1   # never pyramid into the same trade
+  max_same_direction: 2         # max concurrent LONGs (or SHORTs) — anti-correlation
   cooldown_seconds: 60          # min seconds between trades on same symbol
   max_position_age_seconds: 900 # 15min: force-close stale positions (0 disables)
 
 risk:
   # CONSERVATIVE stop loss — tight, in % of entry price.
   stop_loss_pct: 0.25    # 0.25% price move = full SL at leverage
-  # AGGRESSIVE take profit — multiple of SL distance (R-multiple).
-  take_profit_r: 5.0     # TP at 5x SL distance = 1.25% price move
+  # TAKE PROFIT — R-multiple of SL distance.
+  # 5R is too aggressive for 1m + 15min time-exit (need 1.25% move within 15min).
+  # 2.5R = 0.625% target — much more reachable, still ~30% breakeven win rate.
+  take_profit_r: 2.5
   use_atr: false
   atr_multiplier_sl: 0.8
   atr_multiplier_tp: 4.0
@@ -34,9 +37,10 @@ strategy:
   ema_mid:  21
   ema_slow: 50
   rsi_period: 14
+  # Tighter windows: avoid late-cycle entries near overbought/oversold.
   rsi_long_min: 45
-  rsi_long_max: 70
-  rsi_short_min: 30
+  rsi_long_max: 60       # was 70 — RSI > 60 = late in long move, prone to fade
+  rsi_short_min: 40      # was 30 — RSI < 40 = late in short move
   rsi_short_max: 55
   macd_fast: 12
   macd_slow: 26
@@ -50,7 +54,7 @@ strategy:
   # Supertrend regime filter (direction-aware)
   supertrend_period: 10
   supertrend_mult: 3.0
-  min_confluence: 3      # of 6 confluence rules; ADX is a hard gate (not counted).
+  min_confluence: 4      # of 6 confluence rules; ADX is a hard gate (not counted).
                          # 3-of-6 = aggressive; 4-of-6 = selective; 5+ = rare
 
 loop:
