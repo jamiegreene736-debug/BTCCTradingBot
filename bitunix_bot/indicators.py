@@ -189,6 +189,80 @@ def adx(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) 
     return out
 
 
+def obv(close: np.ndarray, volumes: np.ndarray) -> np.ndarray:
+    """On-Balance Volume — cumulative volume signed by direction.
+
+    Up bar adds volume, down bar subtracts. Used as a momentum-with-volume
+    confirmation indicator and as an oscillator for divergence detection.
+    """
+    n = len(close)
+    out = np.zeros(n)
+    for i in range(1, n):
+        if close[i] > close[i - 1]:
+            out[i] = out[i - 1] + volumes[i]
+        elif close[i] < close[i - 1]:
+            out[i] = out[i - 1] - volumes[i]
+        else:
+            out[i] = out[i - 1]
+    return out
+
+
+def mfi(
+    high: np.ndarray,
+    low: np.ndarray,
+    close: np.ndarray,
+    volumes: np.ndarray,
+    period: int = 14,
+) -> np.ndarray:
+    """Money Flow Index — volume-weighted RSI.
+
+    Typical price = (H+L+C)/3. Money flow = typical * volume. Positive flow
+    when typical rises, negative when it falls. MFI = 100 - 100/(1 + ratio).
+    Range 0-100, like RSI.
+    """
+    n = len(close)
+    out = np.full(n, np.nan)
+    if n < period + 1:
+        return out
+    typical = (high + low + close) / 3.0
+    money_flow = typical * volumes
+    pos = np.zeros(n)
+    neg = np.zeros(n)
+    for i in range(1, n):
+        if typical[i] > typical[i - 1]:
+            pos[i] = money_flow[i]
+        elif typical[i] < typical[i - 1]:
+            neg[i] = money_flow[i]
+    for i in range(period, n):
+        p = pos[i - period + 1 : i + 1].sum()
+        ng = neg[i - period + 1 : i + 1].sum()
+        if ng == 0:
+            out[i] = 100.0
+        else:
+            ratio = p / ng
+            out[i] = 100.0 - (100.0 / (1.0 + ratio))
+    return out
+
+
+def keltner_channels(
+    high: np.ndarray,
+    low: np.ndarray,
+    close: np.ndarray,
+    period: int = 20,
+    multiplier: float = 1.5,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Keltner Channels: EMA mid line ± multiplier × ATR. Returns (upper, mid, lower).
+
+    Used standalone for breakout detection AND as the inner band in TTM Squeeze
+    (when Bollinger Bands are INSIDE Keltner, the market is compressed).
+    """
+    mid = ema(close, period)
+    a = atr(high, low, close, period)
+    upper = mid + multiplier * a
+    lower = mid - multiplier * a
+    return upper, mid, lower
+
+
 def supertrend(
     high: np.ndarray,
     low: np.ndarray,

@@ -16,7 +16,7 @@ Architecture:
 
   Fire if combined >= fire_threshold for one direction AND that side wins.
 
-INDICATOR RULES (counted, non-pattern half — 14 votes):
+INDICATOR RULES (counted, non-pattern half — 19 votes):
   1.  EMA stack (fast > mid > slow for long; reverse for short)
   2.  Close cross of EMA fast (bar-to-bar)
   3.  RSI in long/short window
@@ -31,6 +31,11 @@ INDICATOR RULES (counted, non-pattern half — 14 votes):
   12. Funding rate (contrarian — vote against crowded positioning)
   13. Support/Resistance bounce/rejection (swing-detected levels)
   14. Order book imbalance (live WebSocket depth feed)
+  15. RSI divergence (regular = reversal, hidden = continuation)
+  16. MACD divergence
+  17. OBV divergence (volume-confirmed momentum reversal)
+  18. SMC Fair Value Gap (3-candle imbalance respected on revisit)
+  19. SMC Liquidity sweep (wick-through-then-reverse stop hunt fade)
 
 PATTERNS (combined into pattern_score):
   - 23 candlestick patterns (1-3 bar) — see patterns.py
@@ -48,12 +53,14 @@ from typing import Literal
 import numpy as np
 
 from . import chart_patterns
+from . import divergence as div_mod
 from . import levels as levels_mod
 from . import patterns
+from . import smc as smc_mod
 from .config import StrategyCfg
 from .indicators import adx as adx_fn
 from .indicators import atr as atr_fn
-from .indicators import bollinger, ema, macd, rsi
+from .indicators import bollinger, ema, macd, mfi, obv, rsi
 from .indicators import stoch_rsi as stoch_rsi_fn
 from .indicators import supertrend as supertrend_fn
 from .indicators import volume_ma as volume_ma_fn
@@ -253,9 +260,41 @@ def evaluate(
         elif ob_imbalance <= -cfg.ob_imbalance_threshold:
             short_reasons.append(f"ob_imb{ob_imbalance:.2f}")
 
+    # 15. RSI divergence — bullish: price LL but RSI HL (reversal up).
+    #     bearish: price HH but RSI LH. Hidden divergences = continuation.
+    # 16. MACD divergence — same logic against MACD line.
+    # 17. OBV divergence — same logic against on-balance volume.
+    # All three computed in one pass via div_mod.detect_divergences.
+    obv_v = obv(c, v) if v.sum() > 0 else np.zeros(len(c))
+    div_hits = div_mod.detect_divergences(c, h, l, rsi_v, macd_l, obv_v,
+                                           pivot_lookback=cfg.swing_lookback)
+    seen_div = set()
+    for d in div_hits:
+        # One vote per oscillator+side to avoid double-counting hidden+regular.
+        osc = d.name.split("_")[0]  # "rsi", "macd", "obv"
+        bull_side = d.direction in ("bullish", "hidden_bullish")
+        key = (osc, bull_side)
+        if key in seen_div:
+            continue
+        seen_div.add(key)
+        if bull_side:
+            long_reasons.append(f"DIV:{d.name}")
+        else:
+            short_reasons.append(f"DIV:{d.name}")
+
+    # 18. SMC: Fair Value Gap respect — price returning to a recent FVG.
+    # 19. SMC: Liquidity sweep — wick-through-then-close-inside fade pattern.
+    smc_hits = smc_mod.detect_all(h, l, c, swing_lookback=cfg.swing_lookback)
+    for s in smc_hits:
+        tag = f"SMC:{s.name}"
+        if s.direction == "bullish":
+            long_reasons.append(tag)
+        else:
+            short_reasons.append(tag)
+
     indicator_long = len(long_reasons)
     indicator_short = len(short_reasons)
-    INDICATOR_MAX = 14
+    INDICATOR_MAX = 19
 
     # ------------------------------------------------------------------ patterns
     candle_hits = patterns.detect(o, h, l, c)

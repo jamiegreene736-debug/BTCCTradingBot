@@ -973,6 +973,98 @@ logging:
     assert raised, "expected ValueError on insane config"
 
 
+def test_divergence_detector_finds_bullish_divergence():
+    """Construct: price makes lower-low, RSI makes higher-low → bullish divergence.
+    Pivots must be strictly less than their neighbors, so we use single-bar
+    spike lows with non-tied surroundings."""
+    from bitunix_bot import divergence as div
+    n = 80
+    # Highs neutral; we control lows directly to engineer two clear pivots.
+    closes = np.full(n, 100.0)
+    highs = np.full(n, 100.5)
+    lows = np.full(n, 99.5)
+    # First pivot low: idx 25 = 94, neighbors strictly higher.
+    lows[20:25] = [98.0, 97.0, 96.0, 95.5, 95.0]
+    lows[25] = 94.0
+    lows[26:31] = [95.0, 95.5, 96.0, 97.0, 98.0]
+    # Second pivot low: idx 60 = 92 (lower than 94), neighbors strictly higher.
+    lows[55:60] = [97.0, 96.0, 95.0, 94.0, 93.0]
+    lows[60] = 92.0
+    lows[61:66] = [93.0, 94.0, 95.0, 96.0, 97.0]
+    # Build a synthetic RSI that makes a HIGHER low at idx 60 (the divergence).
+    rsi_v = np.full(n, 50.0)
+    rsi_v[25] = 28.0   # deeply oversold first
+    rsi_v[60] = 38.0   # less oversold second — divergence
+    macd = np.zeros(n)
+    obv_v = np.zeros(n)
+    hits = div.detect_divergences(closes, highs, lows, rsi_v, macd, obv_v,
+                                   pivot_lookback=5)
+    names = [h.name for h in hits]
+    assert any("rsi_bullish_div" in n for n in names), f"expected RSI bullish div in {names}"
+
+
+def test_smc_fvg_detection():
+    """Construct a clear bullish FVG: bar 0 high < bar 2 low. Then verify
+    that when price returns INTO the gap, the detector reports it."""
+    from bitunix_bot import smc
+    n = 20
+    closes = np.full(n, 100.0)
+    highs = np.full(n, 100.5)
+    lows = np.full(n, 99.5)
+    # Build FVG at idx 5..7: bar 5 high=100.5, bar 6 high=103, bar 7 low=102.
+    highs[5] = 100.5; lows[5] = 99.8
+    closes[6] = 102.0; highs[6] = 103.0; lows[6] = 101.0
+    closes[7] = 102.5; highs[7] = 103.0; lows[7] = 102.0  # gap: 100.5 -> 102.0
+    # Walk price up then back down INTO the gap by bar 19.
+    closes[8:15] = 102.5
+    highs[8:15] = 103.0
+    lows[8:15] = 102.0
+    closes[15:20] = np.linspace(102.5, 101.5, 5)  # pulling back into FVG zone
+    highs[15:20] = closes[15:20] + 0.2
+    lows[15:20] = closes[15:20] - 0.2
+    sig = smc.detect_recent_fvg(highs, lows, closes)
+    assert sig is not None, "expected to detect bullish FVG"
+    assert sig.direction == "bullish", f"got {sig.direction}"
+
+
+def test_smc_liquidity_sweep_bearish():
+    """Bar wicks ABOVE a recent swing high but closes BELOW it = bear sweep."""
+    from bitunix_bot import smc
+    n = 30
+    closes = np.full(n, 100.0)
+    closes[0:8] = np.linspace(95, 105, 8)
+    closes[8] = 105.0      # swing high candidate (single bar high)
+    closes[9:24] = np.linspace(105, 95, 15)  # decline
+    closes[24:29] = np.linspace(95, 100, 5)
+    # Last bar: high pierces 105 swing high, but closes below it.
+    highs = closes + 0.5
+    lows = closes - 0.5
+    highs[8] = 106.0  # the swing high to sweep
+    closes[29] = 104.0
+    highs[29] = 106.5  # wicks above 106 swing high
+    lows[29] = 103.5
+    sig = smc.detect_liquidity_sweep(highs, lows, closes, swing_lookback=3)
+    assert sig is not None, "expected bear liquidity sweep"
+    assert sig.direction == "bearish", f"got {sig.direction}"
+
+
+def test_obv_and_mfi_indicators_compute():
+    from bitunix_bot.indicators import obv, mfi
+    n = 50
+    rng = np.random.default_rng(1)
+    closes = 100 + np.cumsum(rng.normal(0, 0.5, n))
+    highs = closes + 0.3
+    lows = closes - 0.3
+    vols = rng.uniform(100, 1000, n)
+    obv_v = obv(closes, vols)
+    mfi_v = mfi(highs, lows, closes, vols, period=14)
+    assert obv_v.shape == (n,)
+    assert mfi_v.shape == (n,)
+    assert not np.isnan(obv_v[-1])
+    assert not np.isnan(mfi_v[-1])
+    assert 0 <= mfi_v[-1] <= 100, f"MFI out of range: {mfi_v[-1]}"
+
+
 def test_sl_and_tp_always_on_correct_side():
     """Critical: SL must be BELOW entry for longs and ABOVE for shorts.
     Inverted SL = catastrophic loss. Verify across both directions."""
@@ -1037,6 +1129,10 @@ def main() -> int:
         test_execute_handles_network_timeout_without_crashing,
         test_health_check_fails_when_tick_loop_stalls,
         test_config_rejects_silly_values,
+        test_divergence_detector_finds_bullish_divergence,
+        test_smc_fvg_detection,
+        test_smc_liquidity_sweep_bearish,
+        test_obv_and_mfi_indicators_compute,
         test_sl_and_tp_always_on_correct_side,
     ]
     passed = failed = 0

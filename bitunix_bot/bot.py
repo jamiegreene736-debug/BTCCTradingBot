@@ -324,7 +324,7 @@ class BitunixBot:
             if sig is None:
                 continue
             sig_text = (f"{sym} {sig.direction.upper()} score={sig.score:.2f} "
-                        f"(pat={sig.pattern_score:.1f},ind={sig.indicator_score}/14) @ "
+                        f"(pat={sig.pattern_score:.1f},ind={sig.indicator_score}/19) @ "
                         f"{sig.price:.4f} ({', '.join(sig.reasons)})")
             log.info("Signal: %s", sig_text)
             self.state.record_signal(sig_text)
