@@ -226,6 +226,20 @@ const fmt = (n, d=2) => (n===null || n===undefined || n==='') ? '—' : Number(n
 const tsfmt = ms => { if (!ms) return '—'; const d = new Date(typeof ms==='string' ? Number(ms) : ms); return d.toLocaleString(); };
 const sec = ts => ts ? new Date(ts*1000).toLocaleTimeString() : '—';
 const pnl = v => { const n = Number(v||0); const cls = n>0?'pos':n<0?'neg':''; return `<span class="${cls}">${fmt(n,2)}</span>`; };
+const ageFmt = ms => {
+  if (!ms || ms < 0) return '—';
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return s + 's';
+  if (s < 3600) return Math.floor(s / 60) + 'm';
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+  return h + 'h' + (m ? m + 'm' : '');
+};
+const rFmt = r => {
+  if (r === null || r === undefined || isNaN(r)) return '—';
+  const cls = r >= 1 ? 'pos' : r > 0 ? '' : r < 0 ? 'neg' : '';
+  const sign = r > 0 ? '+' : '';
+  return `<span class="${cls}">${sign}${r.toFixed(2)}R</span>`;
+};
 
 function renderHeader(s) {
   const cfg = s.config, b = s.bot, wr = s.win_rate || {};
@@ -271,25 +285,52 @@ function renderAccount(s) {
 function renderOpen(s) {
   const t = document.getElementById('open-positions');
   const rows = s.open_positions || [];
-  t.querySelector('thead').innerHTML = `<tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>SL</th><th>TP</th><th>uPnL</th><th>Liq</th></tr>`;
-  if (s.open_positions_error) { t.querySelector('tbody').innerHTML = `<tr><td colspan="8" class="ev-error">API error: ${s.open_positions_error}</td></tr>`; return; }
-  if (!rows.length) { t.querySelector('tbody').innerHTML = `<tr><td colspan="8" class="small">No open positions.</td></tr>`; return; }
+  t.querySelector('thead').innerHTML =
+    `<tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Mark</th>` +
+    `<th>R</th><th>Age</th><th>SL</th><th>TP</th><th>uPnL</th><th>Liq</th></tr>`;
+  if (s.open_positions_error) {
+    t.querySelector('tbody').innerHTML =
+      `<tr><td colspan="11" class="ev-error">API error: ${s.open_positions_error}</td></tr>`;
+    return;
+  }
+  if (!rows.length) {
+    t.querySelector('tbody').innerHTML =
+      `<tr><td colspan="11" class="small">No open positions.</td></tr>`;
+    return;
+  }
+  const now = Date.now();
   t.querySelector('tbody').innerHTML = rows.map(p => {
-    const sideUp = (p.side==='BUY' || p.side==='LONG');
+    const sideUp = (p.side === 'BUY' || p.side === 'LONG');
     const sideClass = sideUp ? 'pos' : 'neg';
-    const sl = p.slPrice ? fmt(p.slPrice,4) : '<span class="small">—</span>';
-    const tp = p.tpPrice ? fmt(p.tpPrice,4) : '<span class="small">—</span>';
+    // Mark price: derived from entry + uPnL/qty (no extra API call needed).
+    const entry = Number(p.avgOpenPrice || 0);
+    const qty = Number(p.qty || 0);
+    const upnl = Number(p.unrealizedPNL || 0);
+    const priceDelta = qty > 0 ? (upnl / qty) : 0;
+    const mark = sideUp ? entry + priceDelta : entry - priceDelta;
+    // R-multiple favorable, measured against original SL distance from entry.
+    const slPx = Number(p.slPrice || 0);
+    const slDist = slPx ? Math.abs(entry - slPx) : 0;
+    const favor = sideUp ? (mark - entry) : (entry - mark);
+    const r = slDist > 0 ? (favor / slDist) : null;
+    // Age since opened.
+    const age = p.ctime ? (now - Number(p.ctime)) : null;
+    const sl = p.slPrice ? fmt(p.slPrice, 4) : '<span class="small">—</span>';
+    const tp = p.tpPrice ? fmt(p.tpPrice, 4) : '<span class="small">—</span>';
     return `
-    <tr>
-      <td>${p.symbol||''}</td>
-      <td class="${sideClass}">${p.side||''}</td>
-      <td>${fmt(p.qty,4)}</td>
-      <td>${fmt(p.avgOpenPrice,4)}</td>
-      <td class="neg">${sl}</td>
-      <td class="pos">${tp}</td>
-      <td>${pnl(p.unrealizedPNL)}</td>
-      <td>${fmt(p.liqPrice,4)}</td>
-    </tr>`;
+      <tr>
+        <td>${p.symbol||''}</td>
+        <td class="${sideClass}">${p.side||''}</td>
+        <td>${fmt(p.qty,4)}</td>
+        <td>${fmt(entry,4)}</td>
+        <td>${fmt(mark,4)}</td>
+        <td>${rFmt(r)}</td>
+        <td class="small">${ageFmt(age)}</td>
+        <td class="neg">${sl}</td>
+        <td class="pos">${tp}</td>
+        <td>${pnl(p.unrealizedPNL)}</td>
+        <td>${fmt(p.liqPrice,4)}</td>
+      </tr>`;
   }).join('');
 }
 
@@ -339,7 +380,7 @@ async function refresh() {
   }
 }
 refresh();
-setInterval(refresh, 10000);
+setInterval(refresh, 5000);
 </script>
 </body>
 </html>
