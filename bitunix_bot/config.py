@@ -37,6 +37,15 @@ class TradingCfg:
     # only force-close if it's at a loss. Profitable positions keep running
     # under the SL ratchet (which has already locked in some gain at +1R).
     time_exit_only_if_losing: bool = True
+    # Daily drawdown circuit breaker — global kill switch for the day.
+    # If equity drops below session_start × (1 - max_daily_dd_pct/100), all
+    # new entries halt until next UTC midnight. Existing positions still
+    # managed (SL ratchet, time exit, etc).
+    max_daily_dd_pct: float = 8.0
+    # Pre-trade spread filter — refuse entries when (ask-bid)/mid exceeds
+    # this %. Wide spread means single-tick adverse fills eat large chunks
+    # of the 0.25% SL budget.
+    max_entry_spread_pct: float = 0.05
 
 
 @dataclass
@@ -52,6 +61,13 @@ class RiskCfg:
     breakeven_buffer_pct: float = 0.05   # SL sits this % above (long) / below (short) entry
     trailing_activate_r: float = 1.5     # at +1.5R favorable, start trailing
     trailing_distance_r: float = 0.5     # SL trails this many R behind current price
+    # Partial TP at +1R — close N% of position at break-even ratchet point.
+    # Lock in fee-clearing profit on half, let the rest ride to TP target.
+    # Mathematically transforms a 2.5R target into ~1.4R realized but with
+    # higher effective hit rate (more trades end positive).
+    partial_tp_enabled: bool = True
+    partial_tp_at_r: float = 1.0         # fire when r_favor reaches this
+    partial_tp_close_pct: float = 50.0   # close this % of qty at market
     # Round-trip fee buffer (round-trip taker fee + slippage estimate). Used
     # to enforce a minimum profitable TP target after fees. 0.17% is the
     # observed Bitunix taker round-trip + slippage on 50x.

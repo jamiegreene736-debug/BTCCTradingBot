@@ -82,6 +82,13 @@ class BitunixBot:
         # tick and update the consecutive-loss streak per symbol.
         self.last_seen_closed_mtime: int = 0
         self.consec_losses: dict[str, int] = {}   # symbol -> count
+        # Daily drawdown circuit breaker state.
+        self.session_start_equity: float | None = None
+        self.session_start_day: int = 0       # UTC day-of-year, resets daily
+        self.daily_dd_breached: bool = False
+        # Partial-TP tracking: positionId set of those that already had
+        # the +1R partial close fired. Prevents double-firing.
+        self.partial_tp_done: set[str] = set()
         # Live order-book feed (WebSocket). Started in start() / run_forever().
         self.ob_feed: OrderBookFeed | None = None
         self.stop_flag = False
@@ -304,6 +311,49 @@ class BitunixBot:
             self.last_seen_closed_mtime = max(self.last_seen_closed_mtime,
                                                int(p.get("mtime") or 0))
 
+    def _check_daily_drawdown(self) -> bool:
+        """Return True if the daily-DD circuit breaker is tripped.
+
+        Compares current equity (available + margin + uPnL) against
+        session_start_equity (sampled at the start of each UTC day). If
+        drawdown exceeds max_daily_dd_pct, halt new entries for the rest
+        of the day. Existing positions keep being managed normally.
+        """
+        try:
+            acct = self.client.account()
+            avail = float(acct.get("available") or 0)
+            margin = float(acct.get("margin") or 0)
+            upnl = (float(acct.get("crossUnrealizedPNL") or 0)
+                    + float(acct.get("isolationUnrealizedPNL") or 0))
+            equity = avail + margin + upnl
+        except Exception as e:
+            log.debug("DD-check account fetch failed: %s", e)
+            return self.daily_dd_breached  # keep last state
+
+        # Reset session at UTC midnight.
+        today = time.gmtime().tm_yday
+        if today != self.session_start_day:
+            self.session_start_day = today
+            self.session_start_equity = equity
+            self.daily_dd_breached = False
+            log.info("New session: start equity=$%.2f", equity)
+            return False
+
+        if self.session_start_equity is None or self.session_start_equity <= 0:
+            self.session_start_equity = equity
+            return False
+
+        dd_pct = (self.session_start_equity - equity) / self.session_start_equity * 100.0
+        threshold = self.cfg.trading.max_daily_dd_pct
+        if dd_pct >= threshold and not self.daily_dd_breached:
+            self.daily_dd_breached = True
+            msg = (f"DAILY DD HALT: -{dd_pct:.2f}% from session start "
+                   f"${self.session_start_equity:.2f} → ${equity:.2f} "
+                   f"(threshold {threshold}%)")
+            log.warning(msg)
+            self.state.record_error(msg)
+        return self.daily_dd_breached
+
     def _get_funding_rate(self, symbol: str) -> float | None:
         sym_u = symbol.upper()
         now = int(time.time())
@@ -324,6 +374,10 @@ class BitunixBot:
     def _tick(self) -> None:
         # 0. Update streak-loss state from newly-closed positions.
         self._update_streak_state()
+
+        # 0b. Daily drawdown check — halt new entries if equity has dropped
+        # too far since session start. Existing positions still managed.
+        dd_halted = self._check_daily_drawdown()
 
         # 1. Snapshot global state once per tick.
         all_open = [p for p in self.client.pending_positions() if float(p.get("qty") or 0) != 0]
@@ -382,6 +436,10 @@ class BitunixBot:
             log.debug("Global cap reached (%d/%d open); waiting", n_open, self.cfg.trading.max_open_positions)
             return
 
+        # If daily drawdown is breached, no new entries.
+        if dd_halted:
+            return
+
         # Account fetched lazily — only when we're about to size an order.
         cached_acct: dict[str, Any] | None = None
 
@@ -408,6 +466,16 @@ class BitunixBot:
             # Cooldown.
             last = self.last_action_at.get(sym_u, 0)
             if now - last < self.cfg.trading.cooldown_seconds:
+                continue
+
+            # Spread filter — reject if order book spread is too wide.
+            # Wide spreads cause adverse fills that eat the SL budget.
+            spread_pct = self.ob_feed.get_spread_pct(sym) if self.ob_feed else None
+            if spread_pct is not None and spread_pct > self.cfg.trading.max_entry_spread_pct:
+                self.state.record_skip(
+                    f"{sym}: spread {spread_pct:.3f}% > "
+                    f"{self.cfg.trading.max_entry_spread_pct:.3f}% threshold"
+                )
                 continue
 
             # Klines.
@@ -585,6 +653,10 @@ class BitunixBot:
                 current_sl = float(sl_order["slPrice"])
                 sl_order_id = str(sl_order["id"])
 
+                # Symbol meta needed early for both partial-TP qty quantization
+                # and SL price rounding.
+                meta = self.metas.get(symbol, _DEFAULT_META)
+
                 # R-multiple is measured from the ORIGINAL config-based SL
                 # distance, not the current SL — otherwise sl_distance shrinks
                 # as we ratchet, and r_favor inflates artificially.
@@ -595,6 +667,42 @@ class BitunixBot:
                     r_favor = (current_price - entry) / sl_distance
                 else:
                     r_favor = (entry - current_price) / sl_distance
+
+                # Partial TP at +1R favorable — close partial_tp_close_pct% of the
+                # position at market when r_favor first reaches partial_tp_at_r.
+                # Locks in a guaranteed fee-clearing profit on half the position
+                # while the runner trails toward the full TP target. Done ONCE
+                # per position; tracked in self.partial_tp_done.
+                if (rk.partial_tp_enabled
+                        and r_favor >= rk.partial_tp_at_r
+                        and pid not in self.partial_tp_done):
+                    partial_qty = qty * (rk.partial_tp_close_pct / 100.0)
+                    # Quantize to symbol's step.
+                    step = meta.base_precision
+                    n_steps = int(partial_qty / step) if step > 0 else 0
+                    partial_qty_q = round(n_steps * step, 6)
+                    if partial_qty_q >= meta.min_qty:
+                        opp_side = "SELL" if is_long else "BUY"
+                        try:
+                            self.client.place_order(
+                                symbol=symbol,
+                                side=opp_side,
+                                qty=str(partial_qty_q),
+                                order_type="MARKET",
+                                trade_side="CLOSE",
+                                reduce_only=True,
+                                client_id=f"ptp-{pid}",
+                            )
+                            self.partial_tp_done.add(pid)
+                            log.info("Partial TP fired %s: closed %s @ market (r=%.2f)",
+                                     symbol, partial_qty_q, r_favor)
+                            self.state.record_order(
+                                f"{symbol} PARTIAL_TP closed {partial_qty_q} "
+                                f"({rk.partial_tp_close_pct:.0f}% of position) at r={r_favor:.2f}"
+                            )
+                        except BitunixError as e:
+                            log.warning("Partial TP failed for %s: %s", symbol, e)
+                            self.partial_tp_done.add(pid)  # avoid retry storm
 
                 # Decide new SL: trailing region wins over break-even region.
                 new_sl: float | None = None

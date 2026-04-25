@@ -1232,6 +1232,85 @@ def test_combo_smc_reversal_requires_three_independent_components():
     assert not any(h.name == "smc_reversal" for h in hits2)
 
 
+def test_daily_drawdown_halts_new_entries():
+    """When equity drops below the DD threshold, new entries pause."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.trading.max_daily_dd_pct = 8.0
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    # Force the bot into a "started with $100, now $90" state (-10% DD).
+    bot.session_start_day = time.gmtime().tm_yday
+    bot.session_start_equity = 100.0
+    bot.client.account.return_value = {
+        "marginCoin": "USDT", "available": "85", "frozen": "0",
+        "margin": "5", "transfer": "85", "positionMode": "ONE_WAY",
+        "crossUnrealizedPNL": "0", "isolationUnrealizedPNL": "0", "bonus": "0",
+    }
+    bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+    bot._resolve_symbol_meta()
+    bot._tick()
+    # No new orders should have been placed despite signals firing.
+    bot.client.place_order.assert_not_called()
+    assert bot.daily_dd_breached, "DD breached flag should be set"
+
+
+def test_spread_filter_blocks_when_spread_too_wide():
+    """Spread > max_entry_spread_pct should suppress new entries."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.trading.max_entry_spread_pct = 0.05  # 0.05%
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+    bot._resolve_symbol_meta()
+
+    # Inject a fake OB feed that returns a 0.10% spread (above threshold).
+    class FakeOBFeed:
+        def get_imbalance(self, sym, max_age_secs=30):
+            return None
+        def get_top_of_book(self, sym, max_age_secs=30):
+            return (99.95, 100.05)
+        def get_spread_pct(self, sym):
+            return 0.10
+    bot.ob_feed = FakeOBFeed()
+    bot._tick()
+    # Expect spread skips in the events.
+    skips = [e for e in bot.state.snapshot()["events"] if e["kind"] == "skip"]
+    assert any("spread" in e["text"] for e in skips), \
+        f"expected spread skip, got skips={[s['text'] for s in skips]}"
+
+
+def test_partial_tp_fires_at_1r_and_only_once():
+    """At +1R favorable, the bot should fire a market close for 50% of qty
+    via place_order(reduce_only=True). Subsequent ticks must not re-fire."""
+    bot, _, _ = _setup_bot_with_open_position(
+        side="BUY", entry=100_000.0, current_price=100_250.0,  # +1R exactly
+    )
+    # Default partial_tp_enabled=True, partial_tp_at_r=1.0, close_pct=50.
+    bot._tick()
+    # Should have called place_order with reduce_only=True for half qty.
+    place_calls = bot.client.place_order.call_args_list
+    partial_calls = [c for c in place_calls
+                     if c.kwargs.get("reduce_only") and c.kwargs.get("trade_side") == "CLOSE"]
+    assert len(partial_calls) == 1, \
+        f"expected 1 partial-TP close, got {len(partial_calls)}"
+    qty_str = partial_calls[0].kwargs["qty"]
+    # qty was 0.01; partial_tp_close_pct = 50% → 0.005.
+    assert abs(float(qty_str) - 0.005) < 1e-6, f"expected 0.005, got {qty_str}"
+    # Side opposite of position (LONG → SELL).
+    assert partial_calls[0].kwargs["side"] == "SELL"
+
+    # Tick again — partial TP should NOT re-fire.
+    bot._tick()
+    place_calls2 = bot.client.place_order.call_args_list
+    partial_calls2 = [c for c in place_calls2
+                      if c.kwargs.get("reduce_only") and c.kwargs.get("trade_side") == "CLOSE"]
+    assert len(partial_calls2) == 1, "partial TP must fire only once per position"
+
+
 def test_sl_and_tp_always_on_correct_side():
     """Critical: SL must be BELOW entry for longs and ABOVE for shorts.
     Inverted SL = catastrophic loss. Verify across both directions."""
@@ -1307,6 +1386,9 @@ def main() -> int:
         test_cvd_indicator_signs_by_body_position,
         test_combo_recipe_fires_on_matching_reasons,
         test_combo_smc_reversal_requires_three_independent_components,
+        test_daily_drawdown_halts_new_entries,
+        test_spread_filter_blocks_when_spread_too_wide,
+        test_partial_tp_fires_at_1r_and_only_once,
         test_sl_and_tp_always_on_correct_side,
     ]
     passed = failed = 0

@@ -94,6 +94,29 @@ class OrderBookFeed:
                 return None
             return (bid_vol - ask_vol) / total
 
+    def get_top_of_book(self, symbol: str, max_age_secs: float = 30.0) -> tuple[float, float] | None:
+        """Return (best_bid, best_ask) or None if stale/missing."""
+        sym = symbol.upper()
+        with self._lock:
+            book = self._books.get(sym)
+            if not book or not book.bids or not book.asks:
+                return None
+            if (time.time() - book.last_update) > max_age_secs:
+                return None
+            return (book.bids[0][0], book.asks[0][0])
+
+    def get_spread_pct(self, symbol: str) -> float | None:
+        """Return (ask - bid) / mid as a percentage, or None if data missing.
+        Used as a pre-trade gate to skip entries when liquidity is poor."""
+        tob = self.get_top_of_book(symbol)
+        if not tob:
+            return None
+        bid, ask = tob
+        mid = (bid + ask) / 2.0
+        if mid <= 0:
+            return None
+        return (ask - bid) / mid * 100.0
+
     def is_connected(self) -> bool:
         return self._ws is not None and getattr(self._ws, "sock", None) is not None
 

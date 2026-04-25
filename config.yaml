@@ -36,6 +36,14 @@ trading:
   # bot kept doubling down on a wrong-regime call. This catches it.
   streak_loss_limit: 3
   streak_loss_pause_seconds: 7200    # 2 hours
+  # Daily drawdown circuit breaker — halts NEW entries for the rest of the
+  # UTC day if equity drops more than this % from session start. Existing
+  # positions still managed (SL ratchet, time-exit). Resets at UTC midnight.
+  max_daily_dd_pct: 8.0
+  # Spread filter — reject signals when (ask-bid)/mid exceeds this %.
+  # At 50x with 0.25% SL, a 0.05% adverse spread eats 20% of risk budget
+  # on entry alone. Wide spreads = bad time to enter.
+  max_entry_spread_pct: 0.05
 
 risk:
   # CONSERVATIVE stop loss — tight, in % of entry price.
@@ -74,6 +82,13 @@ risk:
   # them time-exit at a loss. Tier ladder is hard-coded in risk.py.
   adaptive_tp_enabled: true
   adaptive_tp_floor_r: 0.7      # minimum profitable TP after fees
+  # Partial TP at +1R — close 50% of position when SL ratchets to break-even.
+  # Locks in a fee-clearing profit on half the position, lets the runner ride
+  # to the full 2.5R target. Standard "scale-out + runner" technique that pro
+  # scalpers use to raise effective win rate without giving up R-multiple.
+  partial_tp_enabled: true
+  partial_tp_at_r: 1.0
+  partial_tp_close_pct: 50.0
 
 strategy:
   # 5-rule confluence; min_confluence is how many must agree to fire.
