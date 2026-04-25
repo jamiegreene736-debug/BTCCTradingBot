@@ -36,6 +36,18 @@ risk:
   use_atr: false
   atr_multiplier_sl: 0.8
   atr_multiplier_tp: 4.0
+  # Dynamic SL — once price moves in your favor, ratchet the SL forward to
+  # lock in profit. The "give-back" killer for high-leverage scalping.
+  #
+  # At +1R favorable: SL moves to entry + buffer (trade becomes "free").
+  # At +1.5R favorable: SL starts trailing 0.5R behind current price.
+  #
+  # Example at 50x leverage, 0.25% SL:
+  #   Price moves +1.0% favorable (4R) → SL trails at +0.75% (3R) → locks +37.5% margin.
+  breakeven_at_r: 1.0
+  breakeven_buffer_pct: 0.05    # tiny cushion above entry to cover round-trip fees
+  trailing_activate_r: 1.5
+  trailing_distance_r: 0.5
 
 strategy:
   # 5-rule confluence; min_confluence is how many must agree to fire.

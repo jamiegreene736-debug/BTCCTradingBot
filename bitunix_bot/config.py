@@ -38,6 +38,12 @@ class RiskCfg:
     use_atr: bool
     atr_multiplier_sl: float
     atr_multiplier_tp: float
+    # Dynamic SL management — once a trade moves favorably, SL moves with it.
+    # Set any of these to 0 (or breakeven_at_r above trailing_activate_r) to disable.
+    breakeven_at_r: float = 1.0          # at +1R favorable, SL → entry+buffer
+    breakeven_buffer_pct: float = 0.05   # SL sits this % above (long) / below (short) entry
+    trailing_activate_r: float = 1.5     # at +1.5R favorable, start trailing
+    trailing_distance_r: float = 0.5     # SL trails this many R behind current price
 
 
 @dataclass

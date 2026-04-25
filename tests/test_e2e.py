@@ -444,6 +444,106 @@ def test_dashboard_routes_and_auth():
     assert set(wr.keys()) == {"wins", "losses", "total", "rate"}
 
 
+def _setup_bot_with_open_position(side: str, entry: float, current_price: float,
+                                   qty: float = 0.01, original_sl: float | None = None,
+                                   original_tp: float | None = None,
+                                   breakeven_at_r=1.0, trailing_activate_r=1.5,
+                                   trailing_distance_r=0.5, buffer_pct=0.05):
+    """Helper: build a live-mode bot with one open position and the given TPSL state."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.risk.breakeven_at_r = breakeven_at_r
+    cfg.risk.breakeven_buffer_pct = buffer_pct
+    cfg.risk.trailing_activate_r = trailing_activate_r
+    cfg.risk.trailing_distance_r = trailing_distance_r
+    sl_dist = entry * (cfg.risk.stop_loss_pct / 100.0)
+    if original_sl is None:
+        original_sl = entry - sl_dist if side == "BUY" else entry + sl_dist
+    if original_tp is None:
+        original_tp = (entry + sl_dist * cfg.risk.take_profit_r if side == "BUY"
+                       else entry - sl_dist * cfg.risk.take_profit_r)
+    upnl = (current_price - entry) * qty if side == "BUY" else (entry - current_price) * qty
+
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    pos = {
+        "positionId": "POS1", "symbol": "BTCUSDT", "qty": str(qty),
+        "side": side, "leverage": 50, "ctime": int(time.time() * 1000),
+        "avgOpenPrice": str(entry), "unrealizedPNL": str(upnl),
+    }
+    bot.client.pending_positions.return_value = [pos]
+    bot.client.pending_tpsl.return_value = [
+        {"id": "T1", "positionId": "POS1", "symbol": "BTCUSDT",
+         "tpPrice": str(original_tp), "slPrice": None,
+         "tpStopType": "LAST_PRICE", "slStopType": "LAST_PRICE"},
+        {"id": "T2", "positionId": "POS1", "symbol": "BTCUSDT",
+         "tpPrice": None, "slPrice": str(original_sl),
+         "tpStopType": "LAST_PRICE", "slStopType": "LAST_PRICE"},
+    ]
+    bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+    bot._resolve_symbol_meta()
+    return bot, original_sl, original_tp
+
+
+def test_breakeven_sl_move_at_1r_long():
+    bot, orig_sl, orig_tp = _setup_bot_with_open_position(
+        side="BUY", entry=100_000.0, current_price=100_250.0,  # +1R exactly
+    )
+    bot._tick()
+    bot.client.modify_position_tpsl.assert_called_once()
+    kw = bot.client.modify_position_tpsl.call_args.kwargs
+    new_sl = float(kw["sl_price"])
+    # Expected: entry + 0.05% buffer = 100_050
+    assert abs(new_sl - 100_050.0) < 1.0, f"long BE SL wrong: {new_sl}"
+    # Should preserve existing TP.
+    assert kw["tp_price"] == str(orig_tp), f"TP should be preserved: {kw['tp_price']} vs {orig_tp}"
+
+
+def test_trailing_sl_at_2r_long():
+    bot, _, _ = _setup_bot_with_open_position(
+        side="BUY", entry=100_000.0, current_price=100_500.0,  # +2R
+    )
+    bot._tick()
+    bot.client.modify_position_tpsl.assert_called_once()
+    new_sl = float(bot.client.modify_position_tpsl.call_args.kwargs["sl_price"])
+    # Expected: current - trail_dist = 100_500 - 0.5*250 = 100_375
+    assert abs(new_sl - 100_375.0) < 1.0, f"long trailing SL wrong: {new_sl}"
+
+
+def test_breakeven_sl_short():
+    bot, _, _ = _setup_bot_with_open_position(
+        side="SELL", entry=100_000.0, current_price=99_750.0,  # +1R for short
+    )
+    bot._tick()
+    bot.client.modify_position_tpsl.assert_called_once()
+    new_sl = float(bot.client.modify_position_tpsl.call_args.kwargs["sl_price"])
+    # Expected: entry - 0.05% buffer = 99_950
+    assert abs(new_sl - 99_950.0) < 1.0, f"short BE SL wrong: {new_sl}"
+
+
+def test_sl_never_moves_against_position():
+    """If existing SL is already more favorable than the new computed SL, skip."""
+    # Long: existing SL is already at 100_100 (very tight, profit-locked).
+    # +1R move would target 100_050 — that's WORSE (further from current).
+    # Should not call modify.
+    bot, _, _ = _setup_bot_with_open_position(
+        side="BUY", entry=100_000.0, current_price=100_250.0,
+        original_sl=100_100.0,  # already locked in some profit
+    )
+    bot._tick()
+    bot.client.modify_position_tpsl.assert_not_called()
+
+
+def test_no_management_below_threshold():
+    """At +0.5R favorable (below breakeven_at_r=1.0), no SL move."""
+    bot, _, _ = _setup_bot_with_open_position(
+        side="BUY", entry=100_000.0, current_price=100_125.0,  # +0.5R
+    )
+    bot._tick()
+    bot.client.modify_position_tpsl.assert_not_called()
+
+
 def test_pattern_detection_basic_shapes():
     """Verify the pattern detector recognizes textbook shapes."""
     from bitunix_bot import patterns
@@ -575,6 +675,11 @@ def main() -> int:
         test_paper_mode_with_zero_margin_simulates_anyway,
         test_live_mode_actually_calls_place_order,
         test_dashboard_routes_and_auth,
+        test_breakeven_sl_move_at_1r_long,
+        test_trailing_sl_at_2r_long,
+        test_breakeven_sl_short,
+        test_sl_never_moves_against_position,
+        test_no_management_below_threshold,
         test_pattern_detection_basic_shapes,
         test_pattern_alone_can_fire_signal,
         test_sl_and_tp_always_on_correct_side,

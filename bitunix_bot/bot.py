@@ -193,6 +193,11 @@ class BitunixBot:
                     still_open.append(p)
             all_open = still_open
 
+        # Dynamic SL management: ratchet stops forward once price moves favorably.
+        # Skipped in paper mode (no real positions to manage).
+        if all_open and self.cfg.is_live:
+            self._manage_open_positions(all_open)
+
         n_open = len(all_open)
         per_sym_count: dict[str, int] = {}
         long_count = short_count = 0
@@ -322,6 +327,119 @@ class BitunixBot:
                     log.info("Hit global cap %d after placing %s; halting tick",
                              n_open, sym)
                     return
+
+    # ------------------------------------------------------------------ position management
+
+    def _manage_open_positions(self, open_positions: list[dict[str, Any]]) -> None:
+        """Ratchet SL forward as price moves favorably.
+
+        For each open position:
+          - Derive current price from entry + unrealizedPNL/qty (no extra API call)
+          - Compute R-multiple favorable: (current - entry) / original_sl_distance
+          - If trailing region: SL = current_price ∓ trailing_distance_r × sl_dist
+          - Else if break-even region: SL = entry ± buffer
+          - Only update if new SL is MORE favorable than the existing SL
+            (never moves a stop AGAINST you).
+        """
+        try:
+            tpsl_rows = self.client.pending_tpsl()
+        except Exception as e:
+            log.warning("pending_tpsl fetch failed (skipping SL management): %s", e)
+            return
+        sl_by_pos: dict[str, str] = {}
+        tp_by_pos: dict[str, str] = {}
+        for r in tpsl_rows:
+            pid = str(r.get("positionId") or "")
+            if r.get("slPrice"):
+                sl_by_pos[pid] = r["slPrice"]
+            if r.get("tpPrice"):
+                tp_by_pos[pid] = r["tpPrice"]
+
+        rk = self.cfg.risk
+        for p in open_positions:
+            try:
+                pid = str(p.get("positionId") or "")
+                if not pid:
+                    continue
+                symbol = str(p.get("symbol") or "")
+                side = str(p.get("side") or "").upper()
+                is_long = side in ("BUY", "LONG")
+                entry = float(p.get("avgOpenPrice") or 0)
+                qty = float(p.get("qty") or 0)
+                upnl = float(p.get("unrealizedPNL") or 0)
+                if entry <= 0 or qty <= 0:
+                    continue
+
+                # Derive current price from PnL.
+                # long:  upnl = (current - entry) * qty   →   current = entry + upnl/qty
+                # short: upnl = (entry - current) * qty   →   current = entry - upnl/qty
+                price_delta = upnl / qty if qty else 0.0
+                current_price = entry + price_delta if is_long else entry - price_delta
+
+                current_sl_str = sl_by_pos.get(pid)
+                if not current_sl_str:
+                    continue  # no SL set; can't safely manage
+                current_sl = float(current_sl_str)
+
+                # R-multiple is measured from the ORIGINAL config-based SL
+                # distance, not the current SL — otherwise sl_distance shrinks
+                # as we ratchet, and r_favor inflates artificially.
+                sl_distance = entry * (rk.stop_loss_pct / 100.0)
+                if sl_distance <= 0:
+                    continue
+                if is_long:
+                    r_favor = (current_price - entry) / sl_distance
+                else:
+                    r_favor = (entry - current_price) / sl_distance
+
+                # Decide new SL: trailing region wins over break-even region.
+                new_sl: float | None = None
+                reason = ""
+                if rk.trailing_activate_r > 0 and r_favor >= rk.trailing_activate_r:
+                    trail_dist = rk.trailing_distance_r * sl_distance
+                    new_sl = (current_price - trail_dist) if is_long else (current_price + trail_dist)
+                    reason = f"trail (r={r_favor:.2f})"
+                elif rk.breakeven_at_r > 0 and r_favor >= rk.breakeven_at_r:
+                    buffer = entry * (rk.breakeven_buffer_pct / 100.0)
+                    new_sl = (entry + buffer) if is_long else (entry - buffer)
+                    reason = f"breakeven (r={r_favor:.2f})"
+
+                if new_sl is None:
+                    continue
+
+                # Only ratchet forward — never move SL against the position.
+                if is_long and new_sl <= current_sl:
+                    continue
+                if (not is_long) and new_sl >= current_sl:
+                    continue
+
+                # Round to symbol's price precision.
+                meta = self.metas.get(symbol, _DEFAULT_META)
+                new_sl_rounded = round(new_sl, meta.price_precision)
+                if (is_long and new_sl_rounded <= current_sl) or \
+                   ((not is_long) and new_sl_rounded >= current_sl):
+                    continue
+
+                # Push update — preserve existing TP.
+                tp_existing = tp_by_pos.get(pid)
+                self.client.modify_position_tpsl(
+                    symbol=symbol,
+                    position_id=pid,
+                    sl_price=str(new_sl_rounded),
+                    tp_price=tp_existing,
+                )
+                log.info(
+                    "SL %s for %s: %s → %s (%s, entry=%s, current=%.6f)",
+                    "ratchet", symbol, current_sl, new_sl_rounded, reason, entry, current_price,
+                )
+                self.state.record_order(
+                    f"{symbol} SL {current_sl} → {new_sl_rounded} ({reason})"
+                )
+            except BitunixError as e:
+                log.warning("SL update failed for %s: %s", p.get("symbol"), e)
+                self.state.record_error(f"SL update failed: {e.code} {e.msg}")
+            except Exception as e:
+                log.exception("Position management error for %s: %s", p.get("symbol"), e)
 
     def _execute(self, symbol: str, plan: OrderPlan) -> bool:
         prefix = "LIVE" if self.cfg.is_live else "PAPER"
