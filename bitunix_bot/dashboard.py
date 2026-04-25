@@ -127,18 +127,36 @@ def create_app(cfg: Config, client: BitunixClient) -> Flask:
             out["open_positions"] = []
 
         try:
-            hist = client.history_positions(limit=30)
-            out["history_positions"] = hist.get("positionList", [])
+            hist = client.history_positions(limit=50)
+            closed = hist.get("positionList", [])
+            out["history_positions"] = closed
+
+            # Win rate: count closed positions where net PnL (realized + fee +
+            # funding, all signed) is > 0. Bitunix's `realizedPNL` excludes
+            # fees and funding per spec, so add them back signed.
+            def _f(v):
+                try:
+                    return float(v) if v not in (None, "", "null") else 0.0
+                except (ValueError, TypeError):
+                    return 0.0
+            wins = losses = 0
+            for p in closed:
+                net = _f(p.get("realizedPNL")) + _f(p.get("fee")) + _f(p.get("funding"))
+                if net > 0:
+                    wins += 1
+                elif net < 0:
+                    losses += 1
+            total = wins + losses
+            out["win_rate"] = {
+                "wins": wins,
+                "losses": losses,
+                "total": total,
+                "rate": round(wins / total * 100, 1) if total else None,
+            }
         except Exception as e:
             out["history_positions_error"] = str(e)
             out["history_positions"] = []
-
-        try:
-            ord_hist = client.history_orders(limit=30)
-            out["history_orders"] = ord_hist.get("orderList", [])
-        except Exception as e:
-            out["history_orders_error"] = str(e)
-            out["history_orders"] = []
+            out["win_rate"] = {"wins": 0, "losses": 0, "total": 0, "rate": None}
 
         return jsonify(out)
 
@@ -166,6 +184,8 @@ _HTML = r"""<!doctype html>
   .pill.live { background:#da3633; color:#fff; }
   .pill.paper { background:#1f6feb; color:#fff; }
   .pill.muted { background:#21262d; color:#8b949e; }
+  .pill.pos   { background:#1f7a3a; color:#fff; }
+  .pill.neg-pill { background:#7a2326; color:#fff; }
   table { width:100%; border-collapse:collapse; margin-top:6px; }
   th, td { text-align:left; padding:6px 10px; border-bottom:1px solid #21262d; font-variant-numeric:tabular-nums; }
   th { color:#8b949e; font-weight:500; font-size:12px; text-transform:uppercase; }
@@ -201,9 +221,6 @@ _HTML = r"""<!doctype html>
 <h2>Closed positions</h2>
 <table id="hist-pos"><thead></thead><tbody></tbody></table>
 
-<h2>Order history</h2>
-<table id="hist-ord"><thead></thead><tbody></tbody></table>
-
 <script>
 const fmt = (n, d=2) => (n===null || n===undefined || n==='') ? '—' : Number(n).toLocaleString(undefined,{maximumFractionDigits:d});
 const tsfmt = ms => { if (!ms) return '—'; const d = new Date(typeof ms==='string' ? Number(ms) : ms); return d.toLocaleString(); };
@@ -211,17 +228,24 @@ const sec = ts => ts ? new Date(ts*1000).toLocaleTimeString() : '—';
 const pnl = v => { const n = Number(v||0); const cls = n>0?'pos':n<0?'neg':''; return `<span class="${cls}">${fmt(n,2)}</span>`; };
 
 function renderHeader(s) {
-  const cfg = s.config, b = s.bot;
+  const cfg = s.config, b = s.bot, wr = s.win_rate || {};
   const modePill = cfg.mode === 'live' ? `<span class="pill live">LIVE</span>` : `<span class="pill paper">PAPER</span>`;
   const syms = (cfg.symbols || []).join(', ');
   const patPct = Math.round((cfg.pattern_weight || 0) * 100);
+  let wrPill;
+  if (!wr.total) {
+    wrPill = `<span class="pill muted">win rate — (no closed trades yet)</span>`;
+  } else {
+    const cls = wr.rate >= 50 ? 'pos' : wr.rate >= 35 ? 'muted' : 'neg-pill';
+    wrPill = `<span class="pill ${cls}">win rate ${wr.rate}% · ${wr.wins}W / ${wr.losses}L</span>`;
+  }
   document.getElementById('header').innerHTML =
     modePill +
     `<span class="pill muted">${syms} · ${cfg.timeframe} · ${cfg.leverage}x</span>` +
     `<span class="pill muted">SL ${cfg.stop_loss_pct}% / TP ${cfg.take_profit_r}R</span>` +
     `<span class="pill muted">${patPct}% candle patterns + ${100-patPct}% indicators · fire ≥ ${cfg.fire_threshold}</span>` +
-    `<span class="pill muted">max ${cfg.max_open_positions} open · ${cfg.cooldown_seconds}s cooldown</span>` +
-    `<span class="pill muted">ticks ${b.tick_count} · signals ${b.signal_count} · orders ${b.order_count} · errors ${b.error_count}</span>` +
+    wrPill +
+    `<span class="pill muted">${b.signal_count} signals · ${b.order_count} orders · ${b.error_count} errors</span>` +
     `<span class="pill muted">last tick ${sec(b.last_tick_at)}</span>`;
 }
 
@@ -231,14 +255,15 @@ function renderAccount(s) {
     s.account_error ? `<div class="err">Account error: ${s.account_error}</div>` : '';
   if (!s.account) { c.innerHTML = ''; return; }
   const a = s.account;
+  const num = v => Number(v||0);
+  const upnl = num(a.crossUnrealizedPNL) + num(a.isolationUnrealizedPNL);
+  const equity = num(a.available) + num(a.margin) + upnl;
+  const coin = a.marginCoin || '';
   const cards = [
-    ['Available', fmt(a.available, 2) + ' ' + (a.marginCoin||'')],
-    ['In margin', fmt(a.margin, 2)],
-    ['Frozen', fmt(a.frozen, 2)],
-    ['Cross uPnL', pnl(a.crossUnrealizedPNL)],
-    ['Iso uPnL', pnl(a.isolationUnrealizedPNL)],
-    ['Bonus', fmt(a.bonus, 2)],
-    ['Position mode', a.positionMode || '—'],
+    ['Available', fmt(a.available, 2) + ' ' + coin],
+    ['In margin', fmt(a.margin, 2) + ' ' + coin],
+    ['Open uPnL', pnl(upnl)],
+    ['Equity', fmt(equity, 2) + ' ' + coin],
   ];
   c.innerHTML = cards.map(([l,v]) => `<div class="card"><div class="label">${l}</div><div class="val">${v}</div></div>`).join('');
 }
@@ -246,9 +271,9 @@ function renderAccount(s) {
 function renderOpen(s) {
   const t = document.getElementById('open-positions');
   const rows = s.open_positions || [];
-  t.querySelector('thead').innerHTML = `<tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>SL</th><th>TP</th><th>uPnL</th><th>Lev</th><th>Liq</th></tr>`;
-  if (s.open_positions_error) { t.querySelector('tbody').innerHTML = `<tr><td colspan="9" class="ev-error">API error: ${s.open_positions_error}</td></tr>`; return; }
-  if (!rows.length) { t.querySelector('tbody').innerHTML = `<tr><td colspan="9" class="small">No open positions (paper mode never opens real ones — see Recent activity for paper trades).</td></tr>`; return; }
+  t.querySelector('thead').innerHTML = `<tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>SL</th><th>TP</th><th>uPnL</th><th>Liq</th></tr>`;
+  if (s.open_positions_error) { t.querySelector('tbody').innerHTML = `<tr><td colspan="8" class="ev-error">API error: ${s.open_positions_error}</td></tr>`; return; }
+  if (!rows.length) { t.querySelector('tbody').innerHTML = `<tr><td colspan="8" class="small">No open positions.</td></tr>`; return; }
   t.querySelector('tbody').innerHTML = rows.map(p => {
     const sideUp = (p.side==='BUY' || p.side==='LONG');
     const sideClass = sideUp ? 'pos' : 'neg';
@@ -263,7 +288,6 @@ function renderOpen(s) {
       <td class="neg">${sl}</td>
       <td class="pos">${tp}</td>
       <td>${pnl(p.unrealizedPNL)}</td>
-      <td>${p.leverage||''}x</td>
       <td>${fmt(p.liqPrice,4)}</td>
     </tr>`;
   }).join('');
@@ -303,34 +327,13 @@ function renderHistPos(s) {
   `).join('');
 }
 
-function renderHistOrd(s) {
-  const t = document.getElementById('hist-ord');
-  const rows = s.history_orders || [];
-  t.querySelector('thead').innerHTML = `<tr><th>Placed</th><th>Symbol</th><th>Side</th><th>Type</th><th>Qty</th><th>Price</th><th>Status</th><th>SL</th><th>TP</th><th>Realized</th></tr>`;
-  if (s.history_orders_error) { t.querySelector('tbody').innerHTML = `<tr><td colspan="10" class="ev-error">API error: ${s.history_orders_error}</td></tr>`; return; }
-  if (!rows.length) { t.querySelector('tbody').innerHTML = `<tr><td colspan="10" class="small">No orders yet (paper mode never reaches Bitunix).</td></tr>`; return; }
-  t.querySelector('tbody').innerHTML = rows.map(o => `
-    <tr>
-      <td>${tsfmt(o.ctime)}</td>
-      <td>${o.symbol||''}</td>
-      <td class="${o.side==='BUY'?'pos':'neg'}">${o.side||''}</td>
-      <td>${o.orderType||''}</td>
-      <td>${fmt(o.qty,4)}</td>
-      <td>${fmt(o.price,2)}</td>
-      <td>${o.status||''}</td>
-      <td>${fmt(o.slPrice,2)}</td>
-      <td>${fmt(o.tpPrice,2)}</td>
-      <td>${pnl(o.realizedPNL)}</td>
-    </tr>
-  `).join('');
-}
 
 async function refresh() {
   try {
     const r = await fetch('/api/state', { cache: 'no-store' });
     if (!r.ok) throw new Error('HTTP ' + r.status);
     const s = await r.json();
-    renderHeader(s); renderAccount(s); renderOpen(s); renderEvents(s); renderHistPos(s); renderHistOrd(s);
+    renderHeader(s); renderAccount(s); renderOpen(s); renderEvents(s); renderHistPos(s);
   } catch (e) {
     document.getElementById('header').innerHTML = `<div class="err">Refresh failed: ${e}</div>`;
   }

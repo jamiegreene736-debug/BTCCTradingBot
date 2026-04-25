@@ -438,8 +438,10 @@ def test_dashboard_routes_and_auth():
     assert isinstance(j["config"]["symbols"], list)
     assert "open_positions" in j
     assert "history_positions" in j
-    assert "history_orders" in j
     assert "account" in j
+    assert "win_rate" in j
+    wr = j["win_rate"]
+    assert set(wr.keys()) == {"wins", "losses", "total", "rate"}
 
 
 def test_pattern_detection_basic_shapes():
