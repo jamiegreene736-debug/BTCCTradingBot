@@ -711,11 +711,43 @@ def evaluate(
     # AND raises the bar.
     eff_threshold = _effective_fire_threshold(a_for_regime, base_threshold)
 
+    # ABSORPTION HARD VETO. The absorption vote (#25) fires when extreme
+    # aggression (|ratio| ≥ 0.55) coincides with no meaningful price
+    # movement — the classic "big flow being absorbed at a level"
+    # signature. It votes OPPOSITE the aggressive flow direction, but as
+    # a single +1 it gets drowned out by trend/momentum votes that point
+    # WITH the aggressive flow.
+    #
+    # Live data showed the bot shorting BTC at agg=-0.90/-0.92 with
+    # essentially no price movement (textbook sell-side absorption →
+    # buyers defending the level), getting stopped out as price reversed
+    # up. EVERY single trade in the recent 30-trade window had negative
+    # realized PnL — the bot was systematically taking trades INTO the
+    # absorbing flow.
+    #
+    # Veto: when absorption fires, BLOCK any signal in the same direction
+    # as the aggressive flow. Reversal trades (opposite direction) are
+    # still allowed if they otherwise score above threshold.
+    #   absorb(buyflow)  in short_reasons → buyers being absorbed → veto LONG
+    #   absorb(sellflow) in long_reasons  → sellers being absorbed → veto SHORT
+    absorption_vetoes_short = any(r.startswith("absorb(sellflow")
+                                   for r in long_reasons)
+    absorption_vetoes_long = any(r.startswith("absorb(buyflow")
+                                  for r in short_reasons)
+
     if combined_long >= eff_threshold and combined_long > combined_short:
+        if absorption_vetoes_long:
+            log.info("ABSORPTION VETO long signal (buyflow being absorbed → "
+                     "expect reversal down, not continuation up)")
+            return None
         sig = _build("long")
         sig.fire_threshold_used = eff_threshold
         return sig
     if combined_short >= eff_threshold and combined_short > combined_long:
+        if absorption_vetoes_short:
+            log.info("ABSORPTION VETO short signal (sellflow being absorbed → "
+                     "expect reversal up, not continuation down)")
+            return None
         sig = _build("short")
         sig.fire_threshold_used = eff_threshold
         return sig

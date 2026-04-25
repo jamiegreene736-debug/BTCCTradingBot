@@ -2151,6 +2151,114 @@ def test_reset_streaks_requires_auth():
     assert "BTCUSDT" in bot.streak_pause_until
 
 
+def test_absorption_vetoes_same_direction_short():
+    """When absorb(sellflow) fires (sell aggression being absorbed → buyers
+    defending), any SHORT signal must be vetoed — that's the textbook
+    'shorting into absorption' pattern that bled 100% of recent trades."""
+    from bitunix_bot.config import StrategyCfg
+    from bitunix_bot.strategy import evaluate
+    rng = np.random.default_rng(11)
+    n = 250
+    # Build a downtrend that would normally fire SHORT.
+    closes = 60000.0 - np.cumsum(rng.normal(12, 25, n))
+    opens = closes + rng.uniform(5, 20, n)
+    highs = np.maximum(opens, closes) + rng.uniform(0.5, 3, n)
+    lows = np.minimum(opens, closes) - rng.uniform(0.5, 3, n)
+    for k in range(n - 3, n):
+        opens[k] = closes[k] + 30
+        highs[k] = opens[k] + 0.5
+        lows[k] = closes[k] - 0.5
+    cfg = StrategyCfg(
+        ema_fast=9, ema_mid=21, ema_slow=50,
+        rsi_period=14, rsi_long_min=40, rsi_long_max=80,
+        rsi_short_min=20, rsi_short_max=60,
+        macd_fast=12, macd_slow=26, macd_signal=9,
+        bb_period=20, bb_std=2.0, atr_period=14,
+        adx_period=14, adx_min=15.0,
+        supertrend_period=10, supertrend_mult=3.0,
+        pattern_weight=0.55, pattern_norm=2.0, fire_threshold=0.05,
+    )
+    # Without absorption: short should fire.
+    sig_normal = evaluate(opens.tolist(), highs.tolist(), lows.tolist(),
+                           closes.tolist(), cfg, aggression_10s=-0.30)
+    assert sig_normal is not None, "baseline short signal should fire"
+    assert sig_normal.direction == "short"
+
+    # Now with absorption (extreme sell aggression + no movement):
+    # absorb(sellflow) goes to long_reasons, vetoing the short signal.
+    sig_absorbed = evaluate(opens.tolist(), highs.tolist(), lows.tolist(),
+                             closes.tolist(), cfg,
+                             aggression_10s=-0.85,
+                             price_change_10s_pct=0.05)
+    assert sig_absorbed is None or sig_absorbed.direction != "short", \
+        "short signal must be vetoed when sellflow absorption fires"
+
+
+def test_absorption_vetoes_same_direction_long():
+    """Mirror: absorb(buyflow) blocks a LONG signal."""
+    from bitunix_bot.config import StrategyCfg
+    from bitunix_bot.strategy import evaluate
+    klines = make_uptrend_klines()
+    o = [k["open"] for k in klines]
+    h = [k["high"] for k in klines]
+    l_ = [k["low"] for k in klines]
+    c = [k["close"] for k in klines]
+    cfg = StrategyCfg(
+        ema_fast=9, ema_mid=21, ema_slow=50,
+        rsi_period=14, rsi_long_min=40, rsi_long_max=80,
+        rsi_short_min=20, rsi_short_max=60,
+        macd_fast=12, macd_slow=26, macd_signal=9,
+        bb_period=20, bb_std=2.0, atr_period=14,
+        adx_period=14, adx_min=15.0,
+        supertrend_period=10, supertrend_mult=3.0,
+        pattern_weight=0.55, pattern_norm=2.0, fire_threshold=0.05,
+    )
+    sig_normal = evaluate(o, h, l_, c, cfg, aggression_10s=0.30)
+    assert sig_normal is not None
+    assert sig_normal.direction == "long"
+
+    sig_absorbed = evaluate(o, h, l_, c, cfg,
+                             aggression_10s=0.85,
+                             price_change_10s_pct=-0.05)
+    assert sig_absorbed is None or sig_absorbed.direction != "long", \
+        "long signal must be vetoed when buyflow absorption fires"
+
+
+def test_absorption_does_not_block_reversal_trade():
+    """Absorption signals reversal — the OPPOSITE-direction trade should
+    still be allowed if other indicators agree. This is the whole point:
+    absorption suggests where price is GOING (reversal), not where it
+    came from."""
+    from bitunix_bot.config import StrategyCfg
+    from bitunix_bot.strategy import evaluate
+    klines = make_uptrend_klines()
+    o = [k["open"] for k in klines]
+    h = [k["high"] for k in klines]
+    l_ = [k["low"] for k in klines]
+    c = [k["close"] for k in klines]
+    cfg = StrategyCfg(
+        ema_fast=9, ema_mid=21, ema_slow=50,
+        rsi_period=14, rsi_long_min=40, rsi_long_max=80,
+        rsi_short_min=20, rsi_short_max=60,
+        macd_fast=12, macd_slow=26, macd_signal=9,
+        bb_period=20, bb_std=2.0, atr_period=14,
+        adx_period=14, adx_min=15.0,
+        supertrend_period=10, supertrend_mult=3.0,
+        pattern_weight=0.55, pattern_norm=2.0, fire_threshold=0.05,
+    )
+    # Sellflow absorbed (agg=-0.85, no move) → absorption vote LONG.
+    # On an uptrend, the LONG signal should still fire — absorption AGREES
+    # with the uptrend direction.
+    sig = evaluate(o, h, l_, c, cfg,
+                    aggression_10s=-0.85,
+                    price_change_10s_pct=0.05)
+    # May or may not fire long depending on score, but it should NOT be
+    # blocked by absorption (which votes long here).
+    if sig is not None:
+        assert sig.direction == "long", \
+            "absorption shouldn't veto reversal-direction trades"
+
+
 def test_flat_trades_dont_count_toward_streak():
     """A near-zero net PnL trade (BE-ratchet-then-reversal) must NOT
     increment consec_losses or recent_losses. Found in live data: 6 of 14
@@ -3773,6 +3881,9 @@ def main() -> int:
         test_reset_streaks_endpoint_clears_in_memory_state,
         test_reset_streaks_requires_auth,
         test_reset_streaks_returns_503_when_no_bot,
+        test_absorption_vetoes_same_direction_short,
+        test_absorption_vetoes_same_direction_long,
+        test_absorption_does_not_block_reversal_trade,
         test_flat_trades_dont_count_toward_streak,
         test_real_losses_still_trigger_streak,
         test_journal_endpoint_returns_recent_events,
