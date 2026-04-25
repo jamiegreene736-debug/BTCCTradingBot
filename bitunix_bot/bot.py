@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 from .client import BitunixClient, BitunixError
 from .config import Config
 from .orderbook import OrderBookFeed
@@ -185,6 +187,7 @@ class BitunixBot:
 
     _HTF_CACHE_SECONDS = 60          # HTF bars update slowly; 1 min is plenty
     _FUNDING_CACHE_SECONDS = 300     # funding rate updates every 8h on Bitunix
+    _BTC_LEADER_CACHE_SECONDS = 30   # leader trend is checked frequently
 
     def _get_htf_closes(self, symbol: str) -> list[float] | None:
         sym_u = symbol.upper()
@@ -201,6 +204,52 @@ class BitunixBot:
         except Exception as e:
             log.debug("HTF kline fetch failed for %s: %s", sym_u, e)
             return None
+
+    def _get_btc_trend(self) -> int | None:
+        """Return +1 if BTC's recent 1m closes are above EMA(btc_leader_ema),
+        -1 if below, None if can't tell. Cached briefly."""
+        sym = self.cfg.strategy.btc_leader_symbol
+        now = int(time.time())
+        cached = self.htf_cache.get(f"__btc_trend__")
+        if cached and (now - cached[0]) < self._BTC_LEADER_CACHE_SECONDS:
+            return cached[1]
+        try:
+            rows = self.client.klines(sym, "1m", limit=80)
+            rows = sorted(rows, key=lambda r: int(r.get("time") or 0))
+            closes = np.array([float(r["close"]) for r in rows])
+            if len(closes) < self.cfg.strategy.btc_leader_ema + 5:
+                return None
+            from .indicators import ema as ema_fn
+            ema_arr = ema_fn(closes, self.cfg.strategy.btc_leader_ema)
+            if np.isnan(ema_arr[-1]):
+                return None
+            trend = 1 if closes[-1] > ema_arr[-1] else (-1 if closes[-1] < ema_arr[-1] else 0)
+            self.htf_cache["__btc_trend__"] = (now, trend)
+            return trend
+        except Exception as e:
+            log.debug("BTC leader fetch failed: %s", e)
+            return None
+
+    @staticmethod
+    def _session_weight() -> float:
+        """Multiplier on combined score by UTC hour.
+
+        Asia/EU overlap (04-07 UTC) and London/NY overlap (13-16 UTC) are
+        the highest-edge windows for crypto per published exchange volume
+        data. Weekends are lower-volume / wickier.
+        """
+        now = time.gmtime()
+        hour = now.tm_hour
+        wday = now.tm_wday  # Mon=0, Sun=6
+        # Weekend dampener.
+        weekend_mul = 0.85 if wday in (5, 6) else 1.0
+        # High-edge overlap windows.
+        if 4 <= hour < 7 or 13 <= hour < 16:
+            return 1.20 * weekend_mul
+        # Dead hours: 23-02 UTC (post-NY-close before Asia volume).
+        if hour >= 23 or hour < 2:
+            return 0.75 * weekend_mul
+        return 1.0 * weekend_mul
 
     def _get_funding_rate(self, symbol: str) -> float | None:
         sym_u = symbol.upper()
@@ -314,17 +363,23 @@ class BitunixBot:
             funding = self._get_funding_rate(sym)
             # Tier-3 input (live WebSocket): top-N order book imbalance.
             ob_imb = self.ob_feed.get_imbalance(sym) if self.ob_feed else None
+            # Wave-3 inputs: BTC leader trend (None for BTC itself), session weight.
+            btc_trend = (None if sym_u == self.cfg.strategy.btc_leader_symbol.upper()
+                         else self._get_btc_trend())
+            sess_w = self._session_weight()
 
             # Signal.
             sig = evaluate(
                 opens, highs, lows, closes, self.cfg.strategy,
                 volumes=volumes, htf_closes=htf_closes, funding_rate=funding,
                 ob_imbalance=ob_imb,
+                btc_trend=btc_trend, session_weight=sess_w,
             )
             if sig is None:
                 continue
             sig_text = (f"{sym} {sig.direction.upper()} score={sig.score:.2f} "
-                        f"(pat={sig.pattern_score:.1f},ind={sig.indicator_score}/19) @ "
+                        f"(pat={sig.pattern_score:.1f},ind={sig.indicator_score}/22,"
+                        f"sess={sess_w:.2f}) @ "
                         f"{sig.price:.4f} ({', '.join(sig.reasons)})")
             log.info("Signal: %s", sig_text)
             self.state.record_signal(sig_text)

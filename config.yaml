@@ -103,6 +103,20 @@ strategy:
   # <-threshold → ask pressure (short).
   ob_depth_levels: 10
   ob_imbalance_threshold: 0.30
+  # Money Flow Index (volume-weighted RSI). Looser windows than RSI since
+  # MFI is naturally smoother. Long if MFI < 60; short if > 40.
+  mfi_period: 14
+  mfi_long_max: 60.0
+  mfi_short_min: 40.0
+  # TTM Squeeze — Bollinger Bands inside Keltner Channels = compression.
+  # When the squeeze RELEASES (BB exits Keltner), we vote in the direction
+  # of the most recent close vs the Keltner midline.
+  keltner_period: 20
+  keltner_atr_multiplier: 1.5
+  # BTC leader: alts shouldn't fight BTC. Vote 22 fires when alt signal
+  # direction agrees with BTC's 1m EMA-trend direction.
+  btc_leader_symbol: BTCUSDT
+  btc_leader_ema: 21
   # Dead-market filter REMOVED. Set to 0 to disable (kept for backward compat).
   min_atr_pct: 0.0
   # Pattern recognition + indicators are the entire decision.

@@ -16,7 +16,7 @@ Architecture:
 
   Fire if combined >= fire_threshold for one direction AND that side wins.
 
-INDICATOR RULES (counted, non-pattern half — 19 votes):
+INDICATOR RULES (counted, non-pattern half — 21 votes):
   1.  EMA stack (fast > mid > slow for long; reverse for short)
   2.  Close cross of EMA fast (bar-to-bar)
   3.  RSI in long/short window
@@ -36,6 +36,13 @@ INDICATOR RULES (counted, non-pattern half — 19 votes):
   17. OBV divergence (volume-confirmed momentum reversal)
   18. SMC Fair Value Gap (3-candle imbalance respected on revisit)
   19. SMC Liquidity sweep (wick-through-then-reverse stop hunt fade)
+  20. MFI (volume-weighted RSI window)
+  21. TTM Squeeze (BB inside Keltner = compression; vote on release direction)
+  22. BTC-leader (alts vote with BTC's 1m EMA trend; passed in by bot)
+
+GLOBAL MULTIPLIERS:
+  - session_weight: 0.7 dead hours, 1.0 normal, 1.2 high-edge overlaps.
+    Multiplied into combined score after pattern+indicator combine.
 
 PATTERNS (combined into pattern_score):
   - 23 candlestick patterns (1-3 bar) — see patterns.py
@@ -60,7 +67,7 @@ from . import smc as smc_mod
 from .config import StrategyCfg
 from .indicators import adx as adx_fn
 from .indicators import atr as atr_fn
-from .indicators import bollinger, ema, macd, mfi, obv, rsi
+from .indicators import bollinger, ema, keltner_channels, macd, mfi, obv, rsi
 from .indicators import stoch_rsi as stoch_rsi_fn
 from .indicators import supertrend as supertrend_fn
 from .indicators import volume_ma as volume_ma_fn
@@ -97,6 +104,8 @@ def evaluate(
     htf_closes: list[float] | None = None,
     funding_rate: float | None = None,
     ob_imbalance: float | None = None,
+    btc_trend: int | None = None,    # +1 BTC up, -1 BTC down, 0/None unknown
+    session_weight: float | None = None,  # 0.0–1.5; reweights combined score
 ) -> Signal | None:
     if len(closes) < max(cfg.ema_slow, cfg.macd_slow, cfg.bb_period, cfg.atr_period) + 5:
         return None
@@ -292,9 +301,46 @@ def evaluate(
         else:
             short_reasons.append(tag)
 
+    # 20. MFI (Money Flow Index) — volume-weighted RSI. Long when not
+    # overbought, short when not oversold. Stronger than raw RSI because
+    # it confirms with volume.
+    if v.sum() > 0:
+        mfi_v = mfi(h, l, c, v, cfg.mfi_period)
+        mfi_now = mfi_v[i] if i < len(mfi_v) else np.nan
+        if not np.isnan(mfi_now):
+            if mfi_now < cfg.mfi_long_max:
+                long_reasons.append(f"mfi({mfi_now:.0f})")
+            if mfi_now > cfg.mfi_short_min:
+                short_reasons.append(f"mfi({mfi_now:.0f})")
+
+    # 21. TTM Squeeze — when BB are INSIDE Keltner Channels, market is
+    # compressed. We vote in the direction of momentum (close vs Keltner
+    # midline) — typical TTM Squeeze release direction tells us where the
+    # break is more likely to go.
+    k_up, k_mid, k_lo = keltner_channels(h, l, c, cfg.keltner_period,
+                                          cfg.keltner_atr_multiplier)
+    if (i < len(bb_up) and i < len(k_up)
+            and not np.isnan(bb_up[i]) and not np.isnan(k_up[i])):
+        squeeze_on = (bb_up[i] < k_up[i]) and (bb_lo[i] > k_lo[i])
+        if squeeze_on:
+            # Direction by close vs Keltner mid.
+            if not np.isnan(k_mid[i]):
+                if p > k_mid[i]:
+                    long_reasons.append(f"squeeze_up")
+                elif p < k_mid[i]:
+                    short_reasons.append(f"squeeze_down")
+
+    # 22. BTC leader gate — alts shouldn't fight BTC's intraday trend.
+    # +1 = BTC uptrend (vote LONG); -1 = BTC downtrend (vote SHORT).
+    # The bot passes None for BTC's own evaluation (no self-confirmation).
+    if btc_trend == 1:
+        long_reasons.append("btc_leader_up")
+    elif btc_trend == -1:
+        short_reasons.append("btc_leader_down")
+
     indicator_long = len(long_reasons)
     indicator_short = len(short_reasons)
-    INDICATOR_MAX = 19
+    INDICATOR_MAX = 22
 
     # ------------------------------------------------------------------ patterns
     candle_hits = patterns.detect(o, h, l, c)
@@ -310,6 +356,13 @@ def evaluate(
     pw = cfg.pattern_weight
     combined_long = pw * pattern_long_n + (1 - pw) * (indicator_long / INDICATOR_MAX)
     combined_short = pw * pattern_short_n + (1 - pw) * (indicator_short / INDICATOR_MAX)
+
+    # Session reweighting: combined scores get multiplied by session_weight
+    # (default 1.0). High-edge sessions can boost; dead hours dampen. The
+    # bot passes the multiplier in based on UTC hour.
+    if session_weight is not None and session_weight > 0:
+        combined_long *= session_weight
+        combined_short *= session_weight
 
     pat_long_names = [p.name for p in candle_hits if p.direction == "bullish"]
     pat_short_names = [p.name for p in candle_hits if p.direction == "bearish"]

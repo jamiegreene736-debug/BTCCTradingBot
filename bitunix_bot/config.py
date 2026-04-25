@@ -91,6 +91,19 @@ class StrategyCfg:
     # Order book imbalance (live WebSocket).
     ob_depth_levels: int = 10          # top-N levels to sum on each side
     ob_imbalance_threshold: float = 0.30  # |(bid - ask) / (bid + ask)| above this fires
+    # Money Flow Index — volume-weighted RSI. Same windows as RSI.
+    mfi_period: int = 14
+    mfi_long_max: float = 60.0          # MFI must be < this for long entry (room to run)
+    mfi_short_min: float = 40.0
+    # TTM Squeeze — Bollinger Bands inside Keltner Channels = compression.
+    # Direction is determined by momentum (close vs midpoint) at release.
+    keltner_period: int = 20
+    keltner_atr_multiplier: float = 1.5
+    # BTC-as-leader: alts shouldn't long against a BTC dump. We compute a
+    # short-term BTC trend and add a vote in BTC's direction when alts
+    # signal the same way (and against when opposed).
+    btc_leader_symbol: str = "BTCUSDT"
+    btc_leader_ema: int = 21    # EMA period on BTC 1m closes for trend direction
     # Dead-market filter: skip if ATR/price < this (no point trading when
     # the market can't move enough to clear fees + reach TP within hours).
     min_atr_pct: float = 0.08    # 0.08% = 8 bps
