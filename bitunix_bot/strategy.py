@@ -16,7 +16,7 @@ Architecture:
 
   Fire if combined >= fire_threshold for one direction AND that side wins.
 
-INDICATOR RULES (counted, non-pattern half — 12 votes):
+INDICATOR RULES (counted, non-pattern half — 13 votes):
   1.  EMA stack (fast > mid > slow for long; reverse for short)
   2.  Close cross of EMA fast (bar-to-bar)
   3.  RSI in long/short window
@@ -29,9 +29,14 @@ INDICATOR RULES (counted, non-pattern half — 12 votes):
   10. ADX trend strength (votes for whichever side wins)
   11. HTF (higher-timeframe) trend — close vs EMA on htf_timeframe
   12. Funding rate (contrarian — vote against crowded positioning)
+  13. Support/Resistance bounce/rejection (swing-detected levels)
 
-PATTERNS: 23 classical candlestick patterns from bitunix_bot.patterns,
-weighted 0.4–1.5 by historical reliability. See patterns.py.
+PATTERNS (combined into pattern_score):
+  - 23 candlestick patterns (1-3 bar) — see patterns.py
+  - 7 multi-bar chart patterns — see chart_patterns.py:
+      double_top, double_bottom, head_and_shoulders,
+      inverse_head_and_shoulders, ascending/descending/symmetric_triangle,
+      bull_flag, bear_flag
 """
 from __future__ import annotations
 
@@ -41,6 +46,8 @@ from typing import Literal
 
 import numpy as np
 
+from . import chart_patterns
+from . import levels as levels_mod
 from . import patterns
 from .config import StrategyCfg
 from .indicators import adx as adx_fn
@@ -221,13 +228,31 @@ def evaluate(
         else:
             long_reasons.append(f"funding{funding_rate*100:.3f}%")
 
+    # 13. Support/Resistance — bounce off swing-detected support votes long;
+    # rejection at swing-detected resistance votes short.
+    sr_long, sr_short = levels_mod.detect_sr_signal(
+        h, l, c,
+        swing_lookback=cfg.swing_lookback,
+        cluster_tol_pct=cfg.sr_cluster_tol_pct,
+        min_touches=cfg.sr_min_touches,
+        proximity_pct=cfg.sr_proximity_pct,
+    )
+    if sr_long:
+        long_reasons.append(sr_long)
+    if sr_short:
+        short_reasons.append(sr_short)
+
     indicator_long = len(long_reasons)
     indicator_short = len(short_reasons)
-    INDICATOR_MAX = 12
+    INDICATOR_MAX = 13
 
     # ------------------------------------------------------------------ patterns
-    hits = patterns.detect(o, h, l, c)
-    pattern_long, pattern_short = patterns.score(hits)
+    candle_hits = patterns.detect(o, h, l, c)
+    chart_hits = chart_patterns.detect_all(h, l, c, cfg.swing_lookback)
+    candle_long, candle_short = patterns.score(candle_hits)
+    chart_long, chart_short = chart_patterns.score(chart_hits)
+    pattern_long = candle_long + chart_long
+    pattern_short = candle_short + chart_short
     pattern_long_n = min(1.0, pattern_long / cfg.pattern_norm)
     pattern_short_n = min(1.0, pattern_short / cfg.pattern_norm)
 
@@ -236,9 +261,11 @@ def evaluate(
     combined_long = pw * pattern_long_n + (1 - pw) * (indicator_long / INDICATOR_MAX)
     combined_short = pw * pattern_short_n + (1 - pw) * (indicator_short / INDICATOR_MAX)
 
-    pat_long_names = [p.name for p in hits if p.direction == "bullish"]
-    pat_short_names = [p.name for p in hits if p.direction == "bearish"]
-    pat_neutral_names = [p.name for p in hits if p.direction == "neutral"]
+    pat_long_names = [p.name for p in candle_hits if p.direction == "bullish"]
+    pat_short_names = [p.name for p in candle_hits if p.direction == "bearish"]
+    pat_neutral_names = [p.name for p in candle_hits if p.direction == "neutral"]
+    chart_long_names = [p.name for p in chart_hits if p.direction == "bullish"]
+    chart_short_names = [p.name for p in chart_hits if p.direction == "bearish"]
 
     def _build(direction: Direction) -> Signal:
         is_long = direction == "long"
@@ -246,10 +273,12 @@ def evaluate(
         ind_score = indicator_long if is_long else indicator_short
         pat_score = pattern_long if is_long else pattern_short
         ind_reasons = long_reasons if is_long else short_reasons
-        pat_names = pat_long_names if is_long else pat_short_names
+        candle_names = pat_long_names if is_long else pat_short_names
+        cp_names = chart_long_names if is_long else chart_short_names
         all_reasons = (
             [f"atr({atr_pct:.2f}%)"]
-            + [f"PAT:{n}" for n in pat_names]
+            + [f"PAT:{n}" for n in candle_names]
+            + [f"CP:{n}" for n in cp_names]
             + (["NEU:" + ",".join(pat_neutral_names)] if pat_neutral_names else [])
             + ind_reasons
         )
@@ -259,7 +288,7 @@ def evaluate(
             indicator_score=ind_score,
             pattern_score=pat_score,
             reasons=all_reasons,
-            pattern_hits=pat_names,
+            pattern_hits=candle_names + cp_names,
             price=float(p),
             atr=float(atr_now),
         )

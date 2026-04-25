@@ -89,6 +89,13 @@ strategy:
   # longs = vote SHORT (taking the unfavored side). Bitunix returns per-interval
   # rate (typically 8h), so 0.0005 = 0.05%/8h = elevated crowded-longs zone.
   funding_threshold: 0.0005
+  # Support/Resistance — find swing highs/lows in recent klines, cluster nearby
+  # swings into horizontal levels, then vote on bounce off support / rejection
+  # at resistance. swing_lookback=5 means 5 bars on each side confirm a swing.
+  swing_lookback: 5
+  sr_cluster_tol_pct: 0.3
+  sr_min_touches: 2
+  sr_proximity_pct: 0.3
   # Dead-market filter REMOVED. Set to 0 to disable (kept for backward compat).
   min_atr_pct: 0.0
   # Pattern recognition + indicators are the entire decision.

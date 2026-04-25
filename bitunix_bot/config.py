@@ -83,6 +83,11 @@ class StrategyCfg:
     # Funding rate (perp futures) — vote against crowded positioning.
     # Bitunix's fundingRate is per-interval (typically 8h). 0.0005 = 0.05%/8h.
     funding_threshold: float = 0.0005
+    # Support/Resistance via swing-point clustering. Vote on bounce/rejection.
+    swing_lookback: int = 5            # bars on each side that confirm a swing
+    sr_cluster_tol_pct: float = 0.3    # swings within 0.3% cluster into one level
+    sr_min_touches: int = 2            # minimum swings to qualify as a "real" level
+    sr_proximity_pct: float = 0.3      # how close current price must be to fire
     # Dead-market filter: skip if ATR/price < this (no point trading when
     # the market can't move enough to clear fees + reach TP within hours).
     min_atr_pct: float = 0.08    # 0.08% = 8 bps

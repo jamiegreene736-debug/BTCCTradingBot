@@ -680,6 +680,69 @@ def test_pattern_alone_can_fire_signal():
     assert any("PAT:" in r for r in sig.reasons), f"reasons missing pattern tags: {sig.reasons}"
 
 
+def test_double_bottom_detection():
+    """Two swing lows at similar level, then close breaks above the intervening
+    high. Single-bar swing-low dips so the fractal detector triggers."""
+    from bitunix_bot import chart_patterns
+    n = 60
+    closes = np.full(n, 105.0)
+    # Down-trend setup: descending closes into bottom 1.
+    closes[0:15] = np.linspace(110, 100, 15)
+    # Bottom 1 (single sharp dip at idx 15).
+    closes[15] = 100.0
+    # Rally to ~105 (intervening high).
+    closes[16:30] = np.linspace(100, 105, 14)
+    # Bottom 2 (similar low at idx 30).
+    closes[30] = 100.1
+    # Break above the rally high (above 105).
+    closes[31:60] = np.linspace(100.1, 110, 29)
+    highs = closes + 0.5
+    lows = closes - 0.2
+    # Single-bar lows so fractal detector picks them up unambiguously.
+    lows[15] = 99.5
+    lows[30] = 99.6
+    hits = chart_patterns.detect_all(highs, lows, closes, swing_lookback=3)
+    names = [h.name for h in hits]
+    assert "double_bottom" in names, f"expected double_bottom in {names}"
+
+
+def test_chart_pattern_score_aggregation():
+    from bitunix_bot import chart_patterns
+
+    bullish_hits = [
+        chart_patterns.ChartPattern("double_bottom", "bullish", 1.4, "x"),
+        chart_patterns.ChartPattern("bull_flag", "bullish", 1.2, "x"),
+    ]
+    bearish_hits = [
+        chart_patterns.ChartPattern("head_and_shoulders", "bearish", 1.5, "x"),
+    ]
+    bull, bear = chart_patterns.score(bullish_hits + bearish_hits)
+    assert abs(bull - 2.6) < 0.01
+    assert abs(bear - 1.5) < 0.01
+
+
+def test_sr_detection_finds_real_levels():
+    """Single-bar swing lows at similar prices → cluster into one support level."""
+    from bitunix_bot import levels
+    n = 60
+    closes = np.full(n, 105.0)
+    closes[:10] = np.linspace(110, 100, 10)
+    closes[10] = 100.0  # swing low 1 (single bar)
+    closes[11:25] = np.linspace(100, 108, 14)
+    closes[25] = 100.1  # swing low 2 (single bar)
+    closes[26:60] = np.linspace(100.1, 112, 34)
+    highs = closes + 0.5
+    lows = closes - 0.2
+    lows[10] = 99.5
+    lows[25] = 99.6
+    sh, sl = levels.find_swings(highs, lows, lookback=3)
+    assert len(sl) >= 2, f"expected ≥2 swing lows, got {len(sl)}"
+    lvls = levels.cluster_levels(sh + sl, tolerance_pct=0.5, min_touches=2)
+    support_levels = [lv for lv in lvls if lv.kind == "support"]
+    assert support_levels, f"no support levels detected: {lvls}"
+    assert support_levels[0].touches >= 2
+
+
 def test_sl_and_tp_always_on_correct_side():
     """Critical: SL must be BELOW entry for longs and ABOVE for shorts.
     Inverted SL = catastrophic loss. Verify across both directions."""
@@ -734,6 +797,9 @@ def main() -> int:
         test_htf_and_funding_votes_contribute_to_score,
         test_pattern_detection_basic_shapes,
         test_pattern_alone_can_fire_signal,
+        test_double_bottom_detection,
+        test_chart_pattern_score_aggregation,
+        test_sr_detection_finds_real_levels,
         test_sl_and_tp_always_on_correct_side,
     ]
     passed = failed = 0
