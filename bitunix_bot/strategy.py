@@ -337,9 +337,9 @@ def evaluate(
             # Direction by close vs Keltner mid.
             if not np.isnan(k_mid[i]):
                 if p > k_mid[i]:
-                    long_reasons.append(f"squeeze_up")
+                    long_reasons.append("squeeze_up")
                 elif p < k_mid[i]:
-                    short_reasons.append(f"squeeze_down")
+                    short_reasons.append("squeeze_down")
 
     # 22. BTC leader gate — alts shouldn't fight BTC's intraday trend.
     # +1 = BTC uptrend (vote LONG); -1 = BTC downtrend (vote SHORT).

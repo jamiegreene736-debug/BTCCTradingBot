@@ -112,12 +112,10 @@ def fresh_cfg():
     cfg.mode = "paper"
     # Override strategy to permissive values so synthetic uptrends/downtrends
     # reliably produce signals. Production tightness is verified separately.
-    cfg.strategy.min_confluence = 3
     cfg.strategy.rsi_long_min = 40
     cfg.strategy.rsi_long_max = 80
     cfg.strategy.rsi_short_min = 20
     cfg.strategy.rsi_short_max = 60
-    cfg.strategy.min_atr_pct = 0.0  # disable ATR floor for fixture
     return cfg
 
 
@@ -594,10 +592,8 @@ def test_htf_and_funding_votes_contribute_to_score():
         rsi_short_min=20, rsi_short_max=60,
         macd_fast=12, macd_slow=26, macd_signal=9,
         bb_period=20, bb_std=2.0, atr_period=14,
-        min_confluence=3,
         adx_period=14, adx_min=15.0,
         supertrend_period=10, supertrend_mult=3.0,
-        min_atr_pct=0.0,
         pattern_weight=0.55, pattern_norm=2.0, fire_threshold=0.05,
         volume_ma_period=20, volume_spike_multiplier=1.5,
         stoch_rsi_period=14, stoch_rsi_k=3, stoch_rsi_d=3,
@@ -689,10 +685,8 @@ def test_pattern_alone_can_fire_signal():
         rsi_short_min=20, rsi_short_max=60,
         macd_fast=12, macd_slow=26, macd_signal=9,
         bb_period=20, bb_std=2.0, atr_period=14,
-        min_confluence=4,
         adx_period=14, adx_min=15.0,        # loose ADX so the gate doesn't block
         supertrend_period=10, supertrend_mult=3.0,
-        min_atr_pct=0.0,
         pattern_weight=0.55, pattern_norm=2.5, fire_threshold=0.45,
     )
     sig = evaluate(opens.tolist(), highs.tolist(), lows.tolist(), closes.tolist(), cfg)
@@ -827,10 +821,8 @@ def test_imbalance_vote_in_strategy():
         rsi_short_min=20, rsi_short_max=70,
         macd_fast=12, macd_slow=26, macd_signal=9,
         bb_period=20, bb_std=2.0, atr_period=14,
-        min_confluence=1,
         adx_period=14, adx_min=15.0,
         supertrend_period=10, supertrend_mult=3.0,
-        min_atr_pct=0.0,
         pattern_weight=0.55, pattern_norm=2.0, fire_threshold=0.05,
         volume_ma_period=20, volume_spike_multiplier=1.5,
         stoch_rsi_period=14, stoch_rsi_k=3, stoch_rsi_d=3,
@@ -952,11 +944,9 @@ strategy:
   adx_min: 18.0
   supertrend_period: 10
   supertrend_mult: 3.0
-  min_atr_pct: 0.0
   pattern_weight: 0.55
   pattern_norm: 2.0
   fire_threshold: 0.30
-  min_confluence: 4
   volume_ma_period: 20
   volume_spike_multiplier: 1.5
   stoch_rsi_period: 14

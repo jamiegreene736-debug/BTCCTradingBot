@@ -97,7 +97,6 @@ class StrategyCfg:
     bb_period: int
     bb_std: float
     atr_period: int
-    min_confluence: int
     # ADX trend-strength filter — counts for whichever side is otherwise winning.
     adx_period: int = 14
     adx_min: float = 22.0
@@ -139,9 +138,6 @@ class StrategyCfg:
     # signal the same way (and against when opposed).
     btc_leader_symbol: str = "BTCUSDT"
     btc_leader_ema: int = 21    # EMA period on BTC 1m closes for trend direction
-    # Dead-market filter: skip if ATR/price < this (no point trading when
-    # the market can't move enough to clear fees + reach TP within hours).
-    min_atr_pct: float = 0.08    # 0.08% = 8 bps
     # Pattern recognition: candlestick patterns are weighted heavily because
     # they're the primary technical-trading signal a human chartist uses.
     # combined_score = pattern_weight * pattern + (1 - pattern_weight) * indicator

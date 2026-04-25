@@ -223,7 +223,7 @@ class BitunixBot:
         -1 if below, None if can't tell. Cached briefly."""
         sym = self.cfg.strategy.btc_leader_symbol
         now = int(time.time())
-        cached = self.htf_cache.get(f"__btc_trend__")
+        cached = self.htf_cache.get("__btc_trend__")
         if cached and (now - cached[0]) < self._BTC_LEADER_CACHE_SECONDS:
             return cached[1]
         try:

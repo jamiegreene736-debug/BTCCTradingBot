@@ -91,7 +91,8 @@ risk:
   partial_tp_close_pct: 50.0
 
 strategy:
-  # 5-rule confluence; min_confluence is how many must agree to fire.
+  # 23 indicator votes + 30 patterns + 5 combo recipes. The combined score
+  # gate is `fire_threshold` below — the single tunable for selectivity.
   ema_fast: 9
   ema_mid:  21
   ema_slow: 50
@@ -156,8 +157,6 @@ strategy:
   # direction agrees with BTC's 1m EMA-trend direction.
   btc_leader_symbol: BTCUSDT
   btc_leader_ema: 21
-  # Dead-market filter REMOVED. Set to 0 to disable (kept for backward compat).
-  min_atr_pct: 0.0
   # Pattern recognition + indicators are the entire decision.
   # combined = pattern_weight * pattern + (1 - pattern_weight) * indicator
   # fire if combined >= fire_threshold AND that side wins.
@@ -170,8 +169,6 @@ strategy:
   # OR a mid pattern + strong indicator confluence. Fewer trades, higher
   # conviction, less fee drag.
   fire_threshold: 0.50
-  min_confluence: 4      # of 6 confluence rules; ADX is a hard gate (not counted).
-                         # 3-of-6 = aggressive; 4-of-6 = selective; 5+ = rare
 
 loop:
   tick_seconds: 10

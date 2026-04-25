@@ -179,11 +179,11 @@ def detect(long_reasons: list[str], short_reasons: list[str]) -> list[Combo]:
         if recipe.direction == "bullish" and recipe.long_match:
             if _match_recipe(long_reasons, recipe.long_match):
                 out.append(Combo(recipe.name, "bullish", 1.0,
-                                  f"3+ confirming votes co-fire"))
+                                  "3+ confirming votes co-fire"))
                 seen.add(key)
         elif recipe.direction == "bearish" and recipe.short_match:
             if _match_recipe(short_reasons, recipe.short_match):
                 out.append(Combo(recipe.name, "bearish", 1.0,
-                                  f"3+ confirming votes co-fire"))
+                                  "3+ confirming votes co-fire"))
                 seen.add(key)
     return out

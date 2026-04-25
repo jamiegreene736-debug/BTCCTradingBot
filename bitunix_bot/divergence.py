@@ -39,7 +39,6 @@ def _last_two_pivots(
     if n < 2 * lookback + 1:
         return None
     pivots: list[int] = []
-    cmp = (lambda a, b: a > b) if extrema == "high" else (lambda a, b: a < b)
     for i in range(n - lookback - 1, lookback - 1, -1):
         v = arr[i]
         if np.isnan(v):
