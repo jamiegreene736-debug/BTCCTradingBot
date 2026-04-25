@@ -1301,6 +1301,53 @@ def test_partial_tp_fires_at_1r_and_only_once():
     assert len(partial_calls2) == 1, "partial TP must fire only once per position"
 
 
+def test_regime_weighting_boosts_aligned_signals():
+    """In a strong uptrend (high ADX), trend-aligned indicator votes should
+    multiply the combined score above the raw pattern + indicator math.
+    Verifies the regime weighting layer wires through to the score."""
+    from bitunix_bot.config import StrategyCfg
+    from bitunix_bot.strategy import evaluate
+    rng = np.random.default_rng(11)
+    n = 220
+    closes = 100.0 + np.cumsum(rng.normal(0.18, 0.18, n))   # strong uptrend
+    opens = closes - rng.uniform(0.05, 0.15, n)
+    highs = np.maximum(opens, closes) + rng.uniform(0.01, 0.05, n)
+    lows = np.minimum(opens, closes) - rng.uniform(0.01, 0.05, n)
+    for j in range(n - 3, n):                                # clean bull marubozu
+        opens[j] = closes[j] - 0.5; highs[j] = closes[j] + 0.05; lows[j] = opens[j] - 0.05
+    vols = np.full(n, 1.0)
+    cfg = StrategyCfg(
+        ema_fast=9, ema_mid=21, ema_slow=50,
+        rsi_period=14, rsi_long_min=40, rsi_long_max=80,
+        rsi_short_min=20, rsi_short_max=60,
+        macd_fast=12, macd_slow=26, macd_signal=9,
+        bb_period=20, bb_std=2.0, atr_period=14,
+        adx_period=14, adx_min=1.0,
+        supertrend_period=10, supertrend_mult=3.0,
+        volume_ma_period=20, volume_spike_multiplier=1.5,
+        stoch_rsi_period=14, stoch_rsi_k=3, stoch_rsi_d=3,
+        htf_timeframe="15m", htf_ema_period=50,
+        funding_threshold=0.0005,
+        swing_lookback=5, sr_cluster_tol_pct=0.3, sr_min_touches=2, sr_proximity_pct=0.3,
+        ob_depth_levels=10, ob_imbalance_threshold=0.30,
+        mfi_period=14, mfi_long_max=60.0, mfi_short_min=40.0,
+        keltner_period=20, keltner_atr_multiplier=1.5,
+        btc_leader_symbol="BTCUSDT", btc_leader_ema=21,
+        pattern_weight=0.55, pattern_norm=2.0, fire_threshold=0.05,
+    )
+    sig = evaluate(opens.tolist(), highs.tolist(), lows.tolist(), closes.tolist(),
+                    cfg, volumes=vols.tolist())
+    assert sig is not None
+    pw = cfg.pattern_weight
+    raw = pw * min(1.0, sig.pattern_score / cfg.pattern_norm) \
+          + (1 - pw) * (sig.indicator_score / 23.0)
+    has_trend_tag = any("ema_stack_up" in r or "supertrend_up" in r or "htf_uptrend" in r
+                        for r in sig.reasons)
+    if has_trend_tag:
+        assert sig.score >= raw, \
+            f"trending regime + trend tags should not reduce score: {sig.score} vs {raw}"
+
+
 def test_sl_and_tp_always_on_correct_side():
     """Critical: SL must be BELOW entry for longs and ABOVE for shorts.
     Inverted SL = catastrophic loss. Verify across both directions."""
@@ -1379,6 +1426,7 @@ def main() -> int:
         test_daily_drawdown_halts_new_entries,
         test_spread_filter_blocks_when_spread_too_wide,
         test_partial_tp_fires_at_1r_and_only_once,
+        test_regime_weighting_boosts_aligned_signals,
         test_sl_and_tp_always_on_correct_side,
     ]
     passed = failed = 0

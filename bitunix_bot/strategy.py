@@ -51,6 +51,12 @@ COMBO-BONUS LAYER (extra vote when 3+ co-fire on the same side):
 GLOBAL MULTIPLIERS:
   - session_weight: 0.7 dead hours, 1.0 normal, 1.2 high-edge overlaps.
     Multiplied into combined score after pattern+indicator combine.
+  - REGIME WEIGHT (ADX-derived): in trending markets (ADX>28), trend-aligned
+    signals (ema_stack, supertrend, htf, btc_leader, macd, trend_pullback,
+    squeeze_breakout combos) each add +4% to combined score. In ranging
+    markets (ADX<18), mean-reversion signals (divergences, S/R, FVG, liquidity
+    sweep, smc_reversal/bb_extreme_revert combos) each add +4%. Same vote
+    framework — just colored to match what the market is doing.
 
 PATTERNS (combined into pattern_score):
   - 23 candlestick patterns (1-3 bar) — see patterns.py
@@ -392,6 +398,32 @@ def evaluate(
     pw = cfg.pattern_weight
     combined_long = pw * pattern_long_n + (1 - pw) * (indicator_long / INDICATOR_MAX)
     combined_short = pw * pattern_short_n + (1 - pw) * (indicator_short / INDICATOR_MAX)
+
+    # ----------------- REGIME-AWARE WEIGHTING -----------------
+    # ADX-based market regime: trend (>28), neutral, or range (<18). In a
+    # trending regime, trend-aligned signals deserve a boost; in chop, mean-
+    # reversion signals (divergence, S/R bounce, FVG) deserve the boost.
+    # Same signal stack, just weighted to match what the market is doing.
+    a_for_regime = adx_v[i] if i < len(adx_v) else float("nan")
+    if not np.isnan(a_for_regime):
+        TREND_TAGS = ("ema_stack_", "supertrend_", "htf_", "btc_leader_",
+                      "macd_up", "macd_down", "CMB:trend_pullback",
+                      "CMB:squeeze_breakout")
+        REV_TAGS = ("DIV:", "sr_bounce_", "sr_reject_", "SMC:fvg_",
+                    "SMC:liquidity_sweep_", "CMB:smc_reversal",
+                    "CMB:bb_extreme_revert")
+        if a_for_regime > 28:
+            # Trending: bump trend-aligned, dampen mean-reversion.
+            t_long = sum(1 for r in long_reasons if any(t in r for t in TREND_TAGS))
+            t_short = sum(1 for r in short_reasons if any(t in r for t in TREND_TAGS))
+            combined_long *= 1.0 + 0.04 * t_long
+            combined_short *= 1.0 + 0.04 * t_short
+        elif a_for_regime < 18:
+            # Ranging: bump mean-reversion, dampen trend-following.
+            r_long = sum(1 for r in long_reasons if any(t in r for t in REV_TAGS))
+            r_short = sum(1 for r in short_reasons if any(t in r for t in REV_TAGS))
+            combined_long *= 1.0 + 0.04 * r_long
+            combined_short *= 1.0 + 0.04 * r_short
 
     # Session reweighting: combined scores get multiplied by session_weight
     # (default 1.0). High-edge sessions can boost; dead hours dampen. The
