@@ -2151,6 +2151,70 @@ def test_reset_streaks_requires_auth():
     assert "BTCUSDT" in bot.streak_pause_until
 
 
+def test_flat_trades_dont_count_toward_streak():
+    """A near-zero net PnL trade (BE-ratchet-then-reversal) must NOT
+    increment consec_losses or recent_losses. Found in live data: 6 of 14
+    'losses' were within $0.001 of break-even, triggering the 3-loss
+    streak pause inappropriately."""
+    reset_state()
+    cfg = fresh_cfg()
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    now_ms = int(time.time() * 1000)
+    # Three "flat" trades with net ~ -$0.0002 each (BE-ratchet signature).
+    bot.client.history_positions.return_value = {
+        "positionList": [
+            {"positionId": f"P{i}", "symbol": "BTCUSDT", "side": "SELL",
+             "qty": "0.0019", "avgOpenPrice": "60000",
+             "ctime": now_ms - (3 - i) * 30_000,
+             "mtime": now_ms - (2 - i) * 30_000,
+             # realized loss almost exactly offset by fee/rebate → net ≈ 0
+             "realizedPNL": "-0.18", "fee": "0.1798", "funding": "0"}
+            for i in range(3)
+        ],
+        "total": 3,
+    }
+    bot._update_streak_state()
+
+    # No streak should fire — these are flat, not losses.
+    assert "BTCUSDT" not in bot.streak_pause_until, \
+        "flat trades must not trigger streak pause"
+    assert "BTCUSDT" not in bot.mini_cooldown_until, \
+        "flat trades must not trigger mini-cooldown"
+    assert bot.consec_losses.get("BTCUSDT", 0) == 0, \
+        "consec_losses should stay 0 on flat trades"
+    assert len(bot.recent_losses.get("BTCUSDT", [])) == 0
+
+
+def test_real_losses_still_trigger_streak():
+    """Genuine losses (well past the flat threshold) still fire the
+    streak counter. Tests the threshold is calibrated correctly — only
+    near-zero trades are exempt."""
+    reset_state()
+    cfg = fresh_cfg()
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    now_ms = int(time.time() * 1000)
+    # Three GENUINE losses — full SL hit, not BE-ratchet exit.
+    bot.client.history_positions.return_value = {
+        "positionList": [
+            {"positionId": f"P{i}", "symbol": "BTCUSDT", "side": "BUY",
+             "qty": "0.001", "avgOpenPrice": "60000",
+             "ctime": now_ms - (3 - i) * 30_000,
+             "mtime": now_ms - (2 - i) * 30_000,
+             # Full SL (~ -1R loss): realized -0.30 + fee -0.05 = -0.35
+             "realizedPNL": "-0.30", "fee": "-0.05", "funding": "0"}
+            for i in range(3)
+        ],
+        "total": 3,
+    }
+    bot._update_streak_state()
+
+    # Real losses should accumulate consec_losses + trip streak pause at 3.
+    assert "BTCUSDT" in bot.streak_pause_until, \
+        "3 real losses should fire streak pause"
+
+
 def test_journal_endpoint_returns_recent_events():
     """GET /api/journal should return the most-recent journal entries
     as JSON, with limit + kind filters."""
@@ -3709,6 +3773,8 @@ def main() -> int:
         test_reset_streaks_endpoint_clears_in_memory_state,
         test_reset_streaks_requires_auth,
         test_reset_streaks_returns_503_when_no_bot,
+        test_flat_trades_dont_count_toward_streak,
+        test_real_losses_still_trigger_streak,
         test_journal_endpoint_returns_recent_events,
         test_journal_endpoint_handles_missing_file,
         test_journal_endpoint_requires_auth,

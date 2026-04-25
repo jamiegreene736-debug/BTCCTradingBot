@@ -412,6 +412,16 @@ class BitunixBot:
             trade_r = self._compute_trade_r(p, self.cfg.risk.stop_loss_pct)
             self.recent_trade_r.append(trade_r)
 
+            # Flat-trade detection. The BE ratchet at +1R favorable + price
+            # reversal frequently produces "near-zero" exits where realized
+            # loss ≈ fee/rebate offset → net within $0.001 of break-even.
+            # These aren't real losses (the bot did its job — locked the
+            # ratchet to BE — and the trade just didn't continue) and
+            # shouldn't count toward the streak / mini-cooldown counters.
+            # |trade_r| < FLAT_R_THRESHOLD = "essentially flat"
+            FLAT_R_THRESHOLD = 0.10   # within ±10% of one R = flat
+            is_flat = abs(trade_r) < FLAT_R_THRESHOLD
+
             # Journal exit. exit_reason is best-effort; without per-trade
             # closeReason from Bitunix we tag generically. Future improvement:
             # match positionId against state-recorded events to reconstruct
@@ -440,7 +450,18 @@ class BitunixBot:
             # Clear per-position state — the position is gone.
             self.position_max_favor.pop(pid_closed, None)
             self.partial_tp_done.discard(pid_closed)
-            if net > 0:
+            if is_flat:
+                # Flat (BE-ratchet-then-reversal pattern, or other near-zero
+                # exits): don't touch streak counters in either direction.
+                # Live data showed 6 of 14 "losses" were within $0.001 of
+                # break-even — essentially flat trades that triggered streak
+                # pauses inappropriately. Counting them defeats the
+                # purpose of streak protection (which is to catch genuine
+                # wrong-regime calls, not BE-ratchet-then-chop sequences).
+                log.info("FLAT trade %s: r=%.3f (within ±%.2f), "
+                         "skipping streak update", sym, trade_r,
+                         FLAT_R_THRESHOLD)
+            elif net > 0:
                 # Win resets the streak.
                 self.consec_losses[sym] = 0
             elif net < 0:
