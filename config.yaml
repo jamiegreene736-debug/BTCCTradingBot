@@ -20,19 +20,21 @@ trading:
   max_positions_per_symbol: 1   # never pyramid into the same trade
   max_same_direction: 2         # max concurrent LONGs (or SHORTs) — anti-correlation
   cooldown_seconds: 60          # min seconds between trades on same symbol
-  # Force-close stale positions only as a SAFETY NET, not as a primary exit.
-  # 15min was killing profitability — most TPs need 30+ min to hit. 4 hours
-  # leaves TP/SL to do its job; if a trade is still open after 4hr something
-  # is genuinely stuck. 0 disables entirely.
-  max_position_age_seconds: 14400
+  # Force-close stale positions. Trades that sit in a range for hours are
+  # dead capital paying funding fees. 90 min is the industry norm for 1m
+  # scalping — long enough that valid TP setups still resolve, short
+  # enough to free up slots and avoid range-bound dead trades.
+  max_position_age_seconds: 5400
 
 risk:
   # CONSERVATIVE stop loss — tight, in % of entry price.
   stop_loss_pct: 0.25    # 0.25% price move = full SL at leverage
   # TAKE PROFIT — R-multiple of SL distance.
-  # 5R is too aggressive for 1m + 15min time-exit (need 1.25% move within 15min).
-  # 2.5R = 0.625% target — much more reachable, still ~30% breakeven win rate.
-  take_profit_r: 2.5
+  # Tightened: 1.5R = 0.375% target = faster fills + more turnover. Requires
+  # ~40% win rate for breakeven (vs 30% at 2.5R) but closes in minutes
+  # instead of hours. Critical at high leverage where stale trades bleed
+  # funding fees and the SL ratchet is the real winner-protector.
+  take_profit_r: 1.5
   use_atr: false
   atr_multiplier_sl: 0.8
   atr_multiplier_tp: 4.0
