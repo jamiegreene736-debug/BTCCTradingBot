@@ -11,14 +11,17 @@ returns 503 with a clear message — we never serve sensitive data unauthed.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import secrets
 import time
 from base64 import b64decode
+from collections import deque
+from pathlib import Path
 from typing import Any
 
-from flask import Flask, Response, jsonify, request
+from flask import Flask, Response, jsonify, request, send_file
 
 from .client import BitunixClient, BitunixError
 from .config import Config
@@ -177,6 +180,77 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
             out["win_rate"] = {"wins": 0, "losses": 0, "total": 0, "rate": None}
 
         return jsonify(out)
+
+    @app.get("/api/journal")
+    def journal_recent() -> Response:
+        """Return recent trade-journal events as JSON.
+
+        Query params:
+          limit  — max events to return (default 50, capped at 1000)
+          kind   — filter to "entry" or "exit" (default: both)
+          since  — unix timestamp; only events after this time
+
+        The journal is the structured per-trade log that captures: signal
+        score, threshold used, conviction multiplier, indicator vote count,
+        per-factor breakdown (T/M/F/C), all reason tags, ATR%, ADX, spread,
+        depth, tape signals (CVD/aggression/activity), session weight,
+        adaptive_adj, recent-trade R-sum, entry/SL/TP, leverage. Plus
+        exit-side: hold time, max favorable R, net PnL, fees.
+        """
+        if bot is None or not hasattr(bot, "journal"):
+            return Response("journal not available (bot not wired)",
+                            status=503, mimetype="text/plain")
+        path = Path(bot.journal.path)
+        if not path.exists():
+            return jsonify({"events": [], "count": 0,
+                             "note": "no journal yet — bot hasn't traded since deploy"})
+
+        try:
+            limit = max(1, min(1000, int(request.args.get("limit", 50))))
+        except ValueError:
+            limit = 50
+        kind_filter = request.args.get("kind")  # "entry" | "exit" | None
+        try:
+            since = float(request.args.get("since", 0))
+        except ValueError:
+            since = 0
+
+        # Stream-parse and keep only the most recent N matching events.
+        buf: deque[dict[str, Any]] = deque(maxlen=limit)
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        ev = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if kind_filter and ev.get("kind") != kind_filter:
+                        continue
+                    if since and float(ev.get("ts") or 0) < since:
+                        continue
+                    buf.append(ev)
+        except Exception as e:
+            return Response(f"error reading journal: {e}",
+                            status=500, mimetype="text/plain")
+        return jsonify({"events": list(buf), "count": len(buf),
+                         "path": str(path)})
+
+    @app.get("/api/journal/download")
+    def journal_download() -> Response:
+        """Download the full trade-journal JSONL file. Useful for offline
+        analysis (jq, pandas, Excel)."""
+        if bot is None or not hasattr(bot, "journal"):
+            return Response("journal not available", status=503,
+                            mimetype="text/plain")
+        path = Path(bot.journal.path)
+        if not path.exists():
+            return Response("no journal yet", status=404,
+                            mimetype="text/plain")
+        return send_file(str(path), mimetype="application/x-ndjson",
+                         as_attachment=True, download_name="trades.jsonl")
 
     @app.post("/api/admin/reset-streaks")
     def reset_streaks() -> Response:

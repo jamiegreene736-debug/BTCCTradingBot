@@ -2151,6 +2151,132 @@ def test_reset_streaks_requires_auth():
     assert "BTCUSDT" in bot.streak_pause_until
 
 
+def test_journal_endpoint_returns_recent_events():
+    """GET /api/journal should return the most-recent journal entries
+    as JSON, with limit + kind filters."""
+    import tempfile
+    from bitunix_bot.journal import TradeJournal
+    reset_state()
+    cfg = fresh_cfg()
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    with tempfile.TemporaryDirectory() as tmp:
+        bot.journal = TradeJournal(Path(tmp) / "trades.jsonl")
+        # Seed 3 entries + 2 exits.
+        for i in range(3):
+            bot.journal.record_entry(
+                symbol=f"SYM{i}", side="BUY", client_id=f"cid{i}",
+                order_type="LIMIT", score=0.6 + i * 0.05,
+                threshold_used=0.50, conviction_mult=1.2,
+                indicator_count=12, pattern_score=1.5, reasons=["x"],
+                atr_pct=0.08, adx=25.0, spread_pct=0.01,
+                bid_depth=10.0, ask_depth=10.0,
+                aggression_10s=0.3, real_cvd=5.0, activity_mult=1.0,
+                session_weight=1.0, entry_price=100.0,
+                stop_loss=99.6, take_profit=101.0,
+                notional=100.0, leverage=25,
+            )
+        for i in range(2):
+            bot.journal.record_exit(
+                symbol=f"SYM{i}", position_id=f"P{i}", side="LONG",
+                entry_price=100.0, exit_price=101.0,
+                exit_reason="win", hold_time_sec=120.0,
+                max_favor_r=1.5, net_pnl=0.5, realized_pnl=0.6,
+                fee=-0.1, funding=0.0,
+            )
+
+        app = create_app(cfg, bot.client, bot=bot)
+        c = app.test_client()
+        auth = base64.b64encode(b"admin:test_pass").decode()
+        # Default: all kinds, limit 50.
+        r = c.get("/api/journal",
+                  headers={"Authorization": f"Basic {auth}"})
+        assert r.status_code == 200
+        body = r.get_json()
+        assert body["count"] == 5
+        kinds = [e["kind"] for e in body["events"]]
+        assert kinds.count("entry") == 3 and kinds.count("exit") == 2
+
+        # Filter to entries only.
+        r = c.get("/api/journal?kind=entry",
+                  headers={"Authorization": f"Basic {auth}"})
+        body = r.get_json()
+        assert body["count"] == 3
+        assert all(e["kind"] == "entry" for e in body["events"])
+
+        # Limit clamps to last 2.
+        r = c.get("/api/journal?limit=2",
+                  headers={"Authorization": f"Basic {auth}"})
+        body = r.get_json()
+        assert body["count"] == 2
+
+
+def test_journal_endpoint_handles_missing_file():
+    """When the journal hasn't been written yet, return empty list (not 404)."""
+    import tempfile
+    from bitunix_bot.journal import TradeJournal
+    reset_state()
+    cfg = fresh_cfg()
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    with tempfile.TemporaryDirectory() as tmp:
+        # Journal points at a path that doesn't exist yet.
+        bot.journal = TradeJournal(Path(tmp) / "subdir" / "trades.jsonl")
+        app = create_app(cfg, bot.client, bot=bot)
+        c = app.test_client()
+        auth = base64.b64encode(b"admin:test_pass").decode()
+        r = c.get("/api/journal",
+                  headers={"Authorization": f"Basic {auth}"})
+        assert r.status_code == 200
+        body = r.get_json()
+        assert body["count"] == 0
+        assert body["events"] == []
+
+
+def test_journal_endpoint_requires_auth():
+    """Journal endpoints must be auth-gated (same as everything else)."""
+    reset_state()
+    cfg = fresh_cfg()
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    app = create_app(cfg, bot.client, bot=bot)
+    c = app.test_client()
+    r = c.get("/api/journal")
+    assert r.status_code == 401
+    r = c.get("/api/journal/download")
+    assert r.status_code == 401
+
+
+def test_journal_download_returns_file():
+    """GET /api/journal/download should send the .jsonl file."""
+    import tempfile
+    from bitunix_bot.journal import TradeJournal
+    reset_state()
+    cfg = fresh_cfg()
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    with tempfile.TemporaryDirectory() as tmp:
+        bot.journal = TradeJournal(Path(tmp) / "trades.jsonl")
+        bot.journal.record_entry(
+            symbol="X", side="BUY", client_id="x", order_type="LIMIT",
+            score=0.5, threshold_used=0.5, conviction_mult=1.0,
+            indicator_count=10, pattern_score=1.0, reasons=[],
+            atr_pct=None, adx=None, spread_pct=None,
+            bid_depth=None, ask_depth=None,
+            aggression_10s=None, real_cvd=None, activity_mult=None,
+            session_weight=None, entry_price=100.0,
+            stop_loss=99.6, take_profit=101.0, notional=100.0, leverage=25,
+        )
+        app = create_app(cfg, bot.client, bot=bot)
+        c = app.test_client()
+        auth = base64.b64encode(b"admin:test_pass").decode()
+        r = c.get("/api/journal/download",
+                  headers={"Authorization": f"Basic {auth}"})
+        assert r.status_code == 200
+        assert b'"kind":"entry"' in r.data
+        assert b'"symbol":"X"' in r.data
+
+
 def test_reset_streaks_returns_503_when_no_bot():
     """When dashboard is constructed without a bot reference, reset is 503."""
     reset_state()
@@ -3583,6 +3709,10 @@ def main() -> int:
         test_reset_streaks_endpoint_clears_in_memory_state,
         test_reset_streaks_requires_auth,
         test_reset_streaks_returns_503_when_no_bot,
+        test_journal_endpoint_returns_recent_events,
+        test_journal_endpoint_handles_missing_file,
+        test_journal_endpoint_requires_auth,
+        test_journal_download_returns_file,
         test_factor_classification_routes_votes_correctly,
         test_factor_score_breakdown_dedups_within_group,
         test_factor_score_caps_at_one,
