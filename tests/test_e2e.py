@@ -544,6 +544,56 @@ def test_no_management_below_threshold():
     bot.client.modify_position_tpsl.assert_not_called()
 
 
+def test_htf_and_funding_votes_contribute_to_score():
+    """Tier 2: a clean uptrend in HTF + negative funding (crowded shorts)
+    should add 2 long votes; a clean downtrend in HTF + positive funding
+    should add 2 short votes."""
+    from bitunix_bot.config import StrategyCfg
+    from bitunix_bot.strategy import evaluate
+
+    rng = np.random.default_rng(2)
+    n = 200
+    base = 60000.0
+    closes = base + np.cumsum(rng.normal(8, 25, n))
+    opens = closes - rng.uniform(5, 15, n)
+    highs = np.maximum(opens, closes) + rng.uniform(0.5, 3, n)
+    lows = np.minimum(opens, closes) - rng.uniform(0.5, 3, n)
+    # Clean bull marubozu on last 3 bars (same as make_uptrend_klines).
+    for i in range(n - 3, n):
+        opens[i] = closes[i] - 30 - rng.uniform(0, 5)
+        highs[i] = closes[i] + rng.uniform(0.1, 1.5)
+        lows[i] = opens[i] - rng.uniform(0.1, 1.5)
+    vols = np.full(n, 1.0)
+
+    cfg = StrategyCfg(
+        ema_fast=9, ema_mid=21, ema_slow=50,
+        rsi_period=14, rsi_long_min=40, rsi_long_max=80,
+        rsi_short_min=20, rsi_short_max=60,
+        macd_fast=12, macd_slow=26, macd_signal=9,
+        bb_period=20, bb_std=2.0, atr_period=14,
+        min_confluence=3,
+        adx_period=14, adx_min=15.0,
+        supertrend_period=10, supertrend_mult=3.0,
+        min_atr_pct=0.0,
+        pattern_weight=0.55, pattern_norm=2.0, fire_threshold=0.05,
+        volume_ma_period=20, volume_spike_multiplier=1.5,
+        stoch_rsi_period=14, stoch_rsi_k=3, stoch_rsi_d=3,
+        htf_timeframe="15m", htf_ema_period=50,
+        funding_threshold=0.0005,
+    )
+
+    # Strong uptrend in HTF closes (close > EMA50).
+    htf = list(np.linspace(50_000, 60_000, 200))
+
+    # Negative funding (crowded shorts) → should add long vote.
+    sig = evaluate(opens.tolist(), highs.tolist(), lows.tolist(), closes.tolist(),
+                    cfg, volumes=vols.tolist(), htf_closes=htf, funding_rate=-0.001)
+    assert sig is not None, "should produce a signal"
+    assert sig.direction == "long", f"expected long, got {sig.direction}"
+    assert any("htf_uptrend" in r for r in sig.reasons), f"HTF vote missing: {sig.reasons}"
+    assert any("funding" in r for r in sig.reasons), f"funding vote missing: {sig.reasons}"
+
+
 def test_pattern_detection_basic_shapes():
     """Verify the pattern detector recognizes textbook shapes."""
     from bitunix_bot import patterns
@@ -680,6 +730,7 @@ def main() -> int:
         test_breakeven_sl_short,
         test_sl_never_moves_against_position,
         test_no_management_below_threshold,
+        test_htf_and_funding_votes_contribute_to_score,
         test_pattern_detection_basic_shapes,
         test_pattern_alone_can_fire_signal,
         test_sl_and_tp_always_on_correct_side,

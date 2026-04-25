@@ -167,6 +167,22 @@ class BitunixClient:
         data = self._get("/api/v1/futures/market/trading_pairs")
         return data.get("data") or []
 
+    def funding_rate(self, symbol: str) -> dict[str, Any]:
+        """Returns dict with: symbol, markPrice, lastPrice, fundingRate,
+        fundingInterval (hours), nextFundingTime (ms).
+
+        fundingRate is per interval (typically 8h on Bitunix). Positive =
+        longs pay shorts (crowded longs); negative = shorts pay longs.
+
+        Note: the spec docs show `data` as a list but the live API returns
+        it as a dict. We handle both shapes for safety.
+        """
+        data = self._get("/api/v1/futures/market/funding_rate", {"symbol": symbol})
+        d = data.get("data")
+        if isinstance(d, list):
+            return d[0] if d else {}
+        return d or {}
+
     # ------------------------------------------------------------------ positions
 
     def pending_positions(self, symbol: str | None = None) -> list[dict[str, Any]]:

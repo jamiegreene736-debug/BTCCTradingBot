@@ -77,6 +77,12 @@ class StrategyCfg:
     stoch_rsi_period: int = 14
     stoch_rsi_k: int = 3
     stoch_rsi_d: int = 3
+    # Higher-timeframe trend (multi-timeframe) — votes for direction of HTF trend.
+    htf_timeframe: str = "15m"
+    htf_ema_period: int = 50
+    # Funding rate (perp futures) — vote against crowded positioning.
+    # Bitunix's fundingRate is per-interval (typically 8h). 0.0005 = 0.05%/8h.
+    funding_threshold: float = 0.0005
     # Dead-market filter: skip if ATR/price < this (no point trading when
     # the market can't move enough to clear fees + reach TP within hours).
     min_atr_pct: float = 0.08    # 0.08% = 8 bps

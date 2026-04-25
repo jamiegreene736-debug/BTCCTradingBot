@@ -81,6 +81,14 @@ strategy:
   stoch_rsi_period: 14
   stoch_rsi_k: 3
   stoch_rsi_d: 3
+  # Higher-timeframe trend confirmation — vote for direction of the HTF trend.
+  # Compares last close of HTF candles against EMA on that timeframe.
+  htf_timeframe: 15m
+  htf_ema_period: 50
+  # Funding rate (perp futures) — contrarian: high positive funding = crowded
+  # longs = vote SHORT (taking the unfavored side). Bitunix returns per-interval
+  # rate (typically 8h), so 0.0005 = 0.05%/8h = elevated crowded-longs zone.
+  funding_threshold: 0.0005
   # Dead-market filter REMOVED. Set to 0 to disable (kept for backward compat).
   min_atr_pct: 0.0
   # Pattern recognition + indicators are the entire decision.

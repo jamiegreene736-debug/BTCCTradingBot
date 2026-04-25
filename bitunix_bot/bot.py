@@ -68,6 +68,11 @@ class BitunixBot:
         # Per-symbol state for cooldown + bar-dedupe.
         self.last_action_at: dict[str, int] = {}    # unix sec
         self.last_bar_ts: dict[str, int] = {}       # unix sec/ms
+        # HTF kline cache: symbol -> (fetched_unix_ts, closes list).
+        # Refreshed at most once per HTF_CACHE_SECONDS to keep API calls down.
+        self.htf_cache: dict[str, tuple[int, list[float]]] = {}
+        # Funding rate cache: symbol -> (fetched_unix_ts, rate).
+        self.funding_cache: dict[str, tuple[int, float]] = {}
         self.stop_flag = False
         self.state = get_state()
 
@@ -164,6 +169,40 @@ class BitunixBot:
     def _on_sig(self, *_: Any) -> None:
         self.stop_flag = True
 
+    # ------------------------------------------------------------------ data fetchers
+
+    _HTF_CACHE_SECONDS = 60          # HTF bars update slowly; 1 min is plenty
+    _FUNDING_CACHE_SECONDS = 300     # funding rate updates every 8h on Bitunix
+
+    def _get_htf_closes(self, symbol: str) -> list[float] | None:
+        now = int(time.time())
+        cached = self.htf_cache.get(symbol)
+        if cached and (now - cached[0]) < self._HTF_CACHE_SECONDS:
+            return cached[1]
+        try:
+            rows = self.client.klines(symbol, self.cfg.strategy.htf_timeframe, limit=100)
+            rows = sorted(rows, key=lambda r: int(r.get("time") or 0))
+            closes = [float(r["close"]) for r in rows]
+            self.htf_cache[symbol] = (now, closes)
+            return closes
+        except Exception as e:
+            log.debug("HTF kline fetch failed for %s: %s", symbol, e)
+            return None
+
+    def _get_funding_rate(self, symbol: str) -> float | None:
+        now = int(time.time())
+        cached = self.funding_cache.get(symbol)
+        if cached and (now - cached[0]) < self._FUNDING_CACHE_SECONDS:
+            return cached[1]
+        try:
+            data = self.client.funding_rate(symbol)
+            rate = float(data.get("fundingRate") or 0)
+            self.funding_cache[symbol] = (now, rate)
+            return rate
+        except Exception as e:
+            log.debug("Funding rate fetch failed for %s: %s", symbol, e)
+            return None
+
     # ------------------------------------------------------------------ tick
 
     def _tick(self) -> None:
@@ -256,13 +295,19 @@ class BitunixBot:
             closes = [float(r["close"]) for r in rows]
             # Volume — Bitunix returns base coin volume per bar.
             volumes = [float(r.get("baseVol") or r.get("quoteVol") or 0) for r in rows]
+            # Tier-2 inputs (cached): higher-timeframe trend + funding rate.
+            htf_closes = self._get_htf_closes(sym)
+            funding = self._get_funding_rate(sym)
 
             # Signal.
-            sig = evaluate(opens, highs, lows, closes, self.cfg.strategy, volumes=volumes)
+            sig = evaluate(
+                opens, highs, lows, closes, self.cfg.strategy,
+                volumes=volumes, htf_closes=htf_closes, funding_rate=funding,
+            )
             if sig is None:
                 continue
             sig_text = (f"{sym} {sig.direction.upper()} score={sig.score:.2f} "
-                        f"(pat={sig.pattern_score:.1f},ind={sig.indicator_score}/10) @ "
+                        f"(pat={sig.pattern_score:.1f},ind={sig.indicator_score}/12) @ "
                         f"{sig.price:.4f} ({', '.join(sig.reasons)})")
             log.info("Signal: %s", sig_text)
             self.state.record_signal(sig_text)

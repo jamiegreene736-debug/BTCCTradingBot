@@ -16,7 +16,7 @@ Architecture:
 
   Fire if combined >= fire_threshold for one direction AND that side wins.
 
-INDICATOR RULES (counted, non-pattern half — 10 votes):
+INDICATOR RULES (counted, non-pattern half — 12 votes):
   1.  EMA stack (fast > mid > slow for long; reverse for short)
   2.  Close cross of EMA fast (bar-to-bar)
   3.  RSI in long/short window
@@ -27,6 +27,8 @@ INDICATOR RULES (counted, non-pattern half — 10 votes):
   8.  Stoch RSI cross (more sensitive than raw RSI)
   9.  Volume spike (votes for whichever side wins; like ADX)
   10. ADX trend strength (votes for whichever side wins)
+  11. HTF (higher-timeframe) trend — close vs EMA on htf_timeframe
+  12. Funding rate (contrarian — vote against crowded positioning)
 
 PATTERNS: 23 classical candlestick patterns from bitunix_bot.patterns,
 weighted 0.4–1.5 by historical reliability. See patterns.py.
@@ -77,6 +79,8 @@ def evaluate(
     closes: list[float],
     cfg: StrategyCfg,
     volumes: list[float] | None = None,
+    htf_closes: list[float] | None = None,
+    funding_rate: float | None = None,
 ) -> Signal | None:
     if len(closes) < max(cfg.ema_slow, cfg.macd_slow, cfg.bb_period, cfg.atr_period) + 5:
         return None
@@ -199,9 +203,27 @@ def evaluate(
         elif len(short_reasons) > len(long_reasons):
             short_reasons.append(f"adx({a_now:.0f})")
 
+    # 11. Higher-timeframe trend confirmation. Don't trade against the HTF trend.
+    if htf_closes is not None and len(htf_closes) >= cfg.htf_ema_period + 1:
+        htf_arr = np.array(htf_closes, dtype=float)
+        htf_ema = ema(htf_arr, cfg.htf_ema_period)
+        if not np.isnan(htf_ema[-1]):
+            if htf_arr[-1] > htf_ema[-1]:
+                long_reasons.append(f"htf_uptrend({cfg.htf_timeframe})")
+            elif htf_arr[-1] < htf_ema[-1]:
+                short_reasons.append(f"htf_downtrend({cfg.htf_timeframe})")
+
+    # 12. Funding rate — contrarian. High positive funding (crowded longs)
+    # votes SHORT; high negative funding (crowded shorts) votes LONG.
+    if funding_rate is not None and abs(funding_rate) >= cfg.funding_threshold:
+        if funding_rate > 0:
+            short_reasons.append(f"funding+{funding_rate*100:.3f}%")
+        else:
+            long_reasons.append(f"funding{funding_rate*100:.3f}%")
+
     indicator_long = len(long_reasons)
     indicator_short = len(short_reasons)
-    INDICATOR_MAX = 10
+    INDICATOR_MAX = 12
 
     # ------------------------------------------------------------------ patterns
     hits = patterns.detect(o, h, l, c)
