@@ -39,6 +39,14 @@ INDICATOR RULES (counted, non-pattern half — 21 votes):
   20. MFI (volume-weighted RSI window)
   21. TTM Squeeze (BB inside Keltner = compression; vote on release direction)
   22. BTC-leader (alts vote with BTC's 1m EMA trend; passed in by bot)
+  23. CVD trend (Cumulative Volume Delta direction agrees with price)
+
+COMBO-BONUS LAYER (extra vote when 3+ co-fire on the same side):
+  - trend_pullback:   ema_stack + ema_cross + (vol_spike OR mfi)
+  - squeeze_breakout: squeeze + vol_spike + supertrend
+  - smc_reversal:     (FVG OR liquidity_sweep) + divergence + S/R
+  - bb_extreme_revert: BB-position + RSI-divergence + S/R
+  - crowd_contrarian: funding (opposite side) + divergence + vol_spike
 
 GLOBAL MULTIPLIERS:
   - session_weight: 0.7 dead hours, 1.0 normal, 1.2 high-edge overlaps.
@@ -60,6 +68,7 @@ from typing import Literal
 import numpy as np
 
 from . import chart_patterns
+from . import combos as combos_mod
 from . import divergence as div_mod
 from . import levels as levels_mod
 from . import patterns
@@ -67,7 +76,7 @@ from . import smc as smc_mod
 from .config import StrategyCfg
 from .indicators import adx as adx_fn
 from .indicators import atr as atr_fn
-from .indicators import bollinger, ema, keltner_channels, macd, mfi, obv, rsi
+from .indicators import bollinger, cvd, ema, keltner_channels, macd, mfi, obv, rsi
 from .indicators import stoch_rsi as stoch_rsi_fn
 from .indicators import supertrend as supertrend_fn
 from .indicators import volume_ma as volume_ma_fn
@@ -273,10 +282,12 @@ def evaluate(
     #     bearish: price HH but RSI LH. Hidden divergences = continuation.
     # 16. MACD divergence — same logic against MACD line.
     # 17. OBV divergence — same logic against on-balance volume.
-    # All three computed in one pass via div_mod.detect_divergences.
+    # All three (and CVD when available) computed in one pass.
     obv_v = obv(c, v) if v.sum() > 0 else np.zeros(len(c))
+    cvd_v = cvd(h, l, c, v) if v.sum() > 0 else None
     div_hits = div_mod.detect_divergences(c, h, l, rsi_v, macd_l, obv_v,
-                                           pivot_lookback=cfg.swing_lookback)
+                                           pivot_lookback=cfg.swing_lookback,
+                                           cvd_v=cvd_v)
     seen_div = set()
     for d in div_hits:
         # One vote per oscillator+side to avoid double-counting hidden+regular.
@@ -338,9 +349,34 @@ def evaluate(
     elif btc_trend == -1:
         short_reasons.append("btc_leader_down")
 
+    # 23. CVD trend confirmation — Cumulative Volume Delta agreement.
+    # If CVD's recent direction matches the price direction, it confirms
+    # genuine buying/selling pressure behind the move. Divergences are
+    # already covered by vote 15-17 group (CVD added there too); this
+    # vote is the simpler "CVD agrees with price" confirmation.
+    if cvd_v is not None and len(cvd_v) >= 20:
+        cvd_recent = cvd_v[-1] - cvd_v[-20]   # last 20-bar net delta
+        price_change = c[i] - c[max(0, i - 20)]
+        if cvd_recent > 0 and price_change > 0:
+            long_reasons.append(f"cvd_up({cvd_recent:.0f})")
+        elif cvd_recent < 0 and price_change < 0:
+            short_reasons.append(f"cvd_down({cvd_recent:.0f})")
+
+    # ----------------- COMBO-BONUS LAYER -----------------
+    # Award an extra vote when 3+ specific high-quality reasons co-fire.
+    # See combos.py for the recipe definitions. Each combo fires at most
+    # once per side per evaluation.
+    combo_hits = combos_mod.detect(long_reasons, short_reasons)
+    for combo in combo_hits:
+        tag = f"CMB:{combo.name}"
+        if combo.direction == "bullish":
+            long_reasons.append(tag)
+        else:
+            short_reasons.append(tag)
+
     indicator_long = len(long_reasons)
     indicator_short = len(short_reasons)
-    INDICATOR_MAX = 22
+    INDICATOR_MAX = 23
 
     # ------------------------------------------------------------------ patterns
     candle_hits = patterns.detect(o, h, l, c)

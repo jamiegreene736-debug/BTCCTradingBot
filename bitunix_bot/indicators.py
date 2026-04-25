@@ -189,6 +189,41 @@ def adx(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) 
     return out
 
 
+def cvd(
+    high: np.ndarray,
+    low: np.ndarray,
+    close: np.ndarray,
+    volumes: np.ndarray,
+) -> np.ndarray:
+    """Cumulative Volume Delta — kline body-position approximation.
+
+    Without per-trade taker/maker data (which Bitunix's kline doesn't
+    expose), we estimate buyer vs seller pressure from where the close
+    sits within the bar's range:
+
+      buyer_pct  = (close - low) / (high - low)
+      seller_pct = (high - close) / (high - low)
+      bar_delta  = volume × (buyer_pct - seller_pct)
+      CVD        = cumsum(bar_delta)
+
+    Different from OBV: OBV signs by close-vs-prev-close direction, which
+    treats every up-bar as +volume even if the close was a fakeout. CVD
+    by body position is more nuanced — a doji with tiny upper wick gets
+    a small positive delta; a hammer (close near high after deep wick)
+    gets a strongly positive delta. Better for detecting hidden pressure.
+    """
+    n = len(close)
+    delta = np.zeros(n)
+    for i in range(n):
+        rng = high[i] - low[i]
+        if rng <= 0:
+            continue
+        buyer = (close[i] - low[i]) / rng
+        seller = (high[i] - close[i]) / rng
+        delta[i] = volumes[i] * (buyer - seller)
+    return np.cumsum(delta)
+
+
 def obv(close: np.ndarray, volumes: np.ndarray) -> np.ndarray:
     """On-Balance Volume — cumulative volume signed by direction.
 

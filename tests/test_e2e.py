@@ -1153,6 +1153,63 @@ def test_adaptive_tp_tightens_with_age_and_respects_floor():
     assert abs(r - 0.7) < 0.01, f"with low fees, floor=0.7R, got {r}"
 
 
+def test_cvd_indicator_signs_by_body_position():
+    """CVD should be POSITIVE when bars close near the high (buyer-led),
+    negative when they close near the low (seller-led)."""
+    from bitunix_bot.indicators import cvd
+    n = 10
+    # All bars: range = 1.0, close near high, volume = 100 → CVD strongly positive.
+    highs = np.full(n, 100.5)
+    lows = np.full(n, 99.5)
+    closes = np.full(n, 100.4)  # close near top of range
+    vols = np.full(n, 100.0)
+    out = cvd(highs, lows, closes, vols)
+    assert out[-1] > 0, f"close-near-high should produce positive CVD, got {out[-1]}"
+
+    # Inverse: close near low → strongly negative CVD.
+    closes = np.full(n, 99.6)
+    out = cvd(highs, lows, closes, vols)
+    assert out[-1] < 0, f"close-near-low should produce negative CVD, got {out[-1]}"
+
+
+def test_combo_recipe_fires_on_matching_reasons():
+    from bitunix_bot import combos as cb
+    # trend_pullback bullish needs: ema_stack_up + cross_above_ema_fast + (vol_spike OR mfi)
+    long_reasons = ["ema_stack_up", "cross_above_ema_fast", "vol_spike(2.5x)", "rsi(52)"]
+    short_reasons: list = []
+    hits = cb.detect(long_reasons, short_reasons)
+    names = {(h.name, h.direction) for h in hits}
+    assert ("trend_pullback", "bullish") in names, f"expected trend_pullback bullish, got {names}"
+
+    # If volume spike absent AND mfi absent, the combo should NOT fire.
+    long_reasons2 = ["ema_stack_up", "cross_above_ema_fast", "rsi(52)"]
+    hits2 = cb.detect(long_reasons2, short_reasons)
+    names2 = {(h.name, h.direction) for h in hits2}
+    assert ("trend_pullback", "bullish") not in names2, \
+        f"trend_pullback should NOT fire without vol_spike or mfi: {names2}"
+
+
+def test_combo_smc_reversal_requires_three_independent_components():
+    from bitunix_bot import combos as cb
+    # Bearish SMC reversal: (FVG_bear OR sweep_bear) + (any DIV bearish) + sr_reject
+    short_reasons = [
+        "SMC:liquidity_sweep_bearish",
+        "DIV:rsi_bearish_div",
+        "sr_reject_resistance(77400,×3)",
+    ]
+    hits = cb.detect([], short_reasons)
+    assert any(h.name == "smc_reversal" and h.direction == "bearish" for h in hits)
+
+    # Drop the S/R reject — combo should not fire.
+    short_reasons2 = [
+        "SMC:liquidity_sweep_bearish",
+        "DIV:rsi_bearish_div",
+        "ema_stack_down",  # not S/R
+    ]
+    hits2 = cb.detect([], short_reasons2)
+    assert not any(h.name == "smc_reversal" for h in hits2)
+
+
 def test_sl_and_tp_always_on_correct_side():
     """Critical: SL must be BELOW entry for longs and ABOVE for shorts.
     Inverted SL = catastrophic loss. Verify across both directions."""
@@ -1224,6 +1281,9 @@ def main() -> int:
         test_skip_events_dedupe_within_window,
         test_capped_signals_emit_skip_not_signal,
         test_adaptive_tp_tightens_with_age_and_respects_floor,
+        test_cvd_indicator_signs_by_body_position,
+        test_combo_recipe_fires_on_matching_reasons,
+        test_combo_smc_reversal_requires_three_independent_components,
         test_sl_and_tp_always_on_correct_side,
     ]
     passed = failed = 0

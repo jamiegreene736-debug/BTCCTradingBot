@@ -71,13 +71,17 @@ def detect_divergences(
     macd_line: np.ndarray,
     obv_v: np.ndarray,
     pivot_lookback: int = 5,
+    cvd_v: np.ndarray | None = None,
 ) -> list[Divergence]:
     """Run all divergence detectors. Returns hits at the most recent confirmed
     pivot — note that pivots are confirmed only `pivot_lookback` bars after
     they form, so this is a slightly-lagging indicator by design (no false
     early signals)."""
     out: list[Divergence] = []
-    for osc_name, osc_v in (("rsi", rsi_v), ("macd", macd_line), ("obv", obv_v)):
+    oscs = [("rsi", rsi_v), ("macd", macd_line), ("obv", obv_v)]
+    if cvd_v is not None:
+        oscs.append(("cvd", cvd_v))
+    for osc_name, osc_v in oscs:
         # Bullish: price LL but oscillator HL
         low_pivots = _last_two_pivots(lows, "low", pivot_lookback)
         if low_pivots:
