@@ -2097,18 +2097,21 @@ def test_fire_threshold_lowers_in_trending_regime():
 
 
 def test_fire_threshold_raises_in_ranging_regime():
-    """ADX < 18 should increase the effective fire threshold by 0.08."""
+    """ADX < 22 should increase the effective fire threshold by 0.08
+    (band tightened from <18 to <22 to catch weak-trend chop)."""
     from bitunix_bot.strategy import _effective_fire_threshold
     assert abs(_effective_fire_threshold(15.0, 0.50) - 0.58) < 1e-9
     # Very low ADX still bumps by 0.08 (no further scaling).
     assert abs(_effective_fire_threshold(5.0, 0.50) - 0.58) < 1e-9
+    # ADX 20 (was previously "neutral") now triggers ranging.
+    assert abs(_effective_fire_threshold(20.0, 0.50) - 0.58) < 1e-9
 
 
 def test_fire_threshold_neutral_in_mid_regime():
-    """ADX in [18, 28] should leave the threshold unchanged."""
+    """ADX in [22, 28] should leave the threshold unchanged."""
     from bitunix_bot.strategy import _effective_fire_threshold
+    assert _effective_fire_threshold(25.0, 0.50) == 0.50
     assert _effective_fire_threshold(22.0, 0.50) == 0.50
-    assert _effective_fire_threshold(18.0, 0.50) == 0.50
     assert _effective_fire_threshold(28.0, 0.50) == 0.50
     # NaN ADX (e.g., during warmup) → keep base.
     import math

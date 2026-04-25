@@ -124,9 +124,16 @@ def _effective_fire_threshold(adx_val: float, base_threshold: float) -> float:
 
     Lowers the bar in trending markets (ADX > 28) so high-quality trend-
     aligned signals — which already get the +4% per-vote regime boost —
-    fire more readily. Raises the bar in chop (ADX < 18) where most
+    fire more readily. Raises the bar in chop (ADX < 22) where most
     scalpers bleed; forces stronger pattern + divergence confluence.
     Returns base_threshold when ADX is mid-range or unavailable.
+
+    Ranging band tightened from <18 to <22 after observing live drawdown
+    sessions where BTC was clearly chopping (multi-hour consolidation,
+    weak directional moves) but ADX sat in the 18-25 "neutral" zone, so
+    the bot kept firing marginal signals at the base threshold and
+    bleeding fees. <22 covers genuine chop AND weak-trend conditions
+    where 1m signals are statistically unreliable.
 
     Empirical scalping research consistently shows that pure-confluence
     strategies perform best when selectivity matches the market regime.
@@ -134,7 +141,7 @@ def _effective_fire_threshold(adx_val: float, base_threshold: float) -> float:
     if not np.isnan(adx_val):
         if adx_val > 28:
             return max(0.0, base_threshold - 0.05)
-        if adx_val < 18:
+        if adx_val < 22:
             return min(1.0, base_threshold + 0.08)
     return base_threshold
 
