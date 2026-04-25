@@ -123,6 +123,18 @@ class RiskCfg:
     stale_exit_enabled: bool = True
     stale_exit_min: float = 6.0          # minutes
     stale_exit_max_favor_r: float = 0.5  # if max_favor below this, exit
+    # Tape-driven exit. DISABLED by default after live data showed it firing
+    # on microstructure noise within 10–15 seconds of entry — closing trades
+    # at 25-50% of full SL distance instead of letting them develop or hit
+    # SL fairly. Aggression naturally swings in 10s windows; the ±0.50
+    # threshold catches normal noise, not real regime flips.
+    #
+    # Set to True only if (a) you've seen the journal data, (b) tape_feed is
+    # reliably providing data, and (c) you've increased the threshold or
+    # added a min_hold_seconds guard that protects against sub-30s exits.
+    tape_exit_enabled: bool = False
+    tape_exit_threshold: float = 0.50    # contrary aggression magnitude
+    tape_exit_min_hold_secs: int = 30    # don't fire before this many seconds
 
 
 @dataclass

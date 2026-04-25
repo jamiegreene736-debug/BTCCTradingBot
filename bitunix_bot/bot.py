@@ -1138,35 +1138,45 @@ class BitunixBot:
                                         symbol, e)
                             # Fall through to normal management.
 
-                # Tape-driven exit — pre-BE positions get flattened when the
-                # tape flips strongly against us. Pro-desk rule: if the regime
-                # that birthed the entry has shifted, flip with it. Don't wait
-                # for SL to catch the move.
+                # Tape-driven exit — DISABLED by default after live data
+                # showed it firing within 10-15 seconds of entry on
+                # microstructure noise, closing trades at 25-50% of full
+                # SL distance instead of letting them develop. Aggression
+                # naturally swings in 10s windows; the ±0.50 threshold
+                # catches normal noise, not real regime flips.
                 #
-                # Conditions:
-                #   - r_favor < 1.0 (haven't reached break-even ratchet yet)
-                #   - tape aggression (10s) is strongly contrary
-                # We don't apply this AFTER +1R because by then the SL is at
-                # break-even or trailing — the trade already paid for itself
-                # and we let it run. This is purely "cut losers fast" alpha.
-                if r_favor < 1.0 and self.tape_feed is not None:
-                    agg = self.tape_feed.get_aggression_ratio(symbol, window_secs=10)
-                    if agg is not None:
-                        flipped = ((is_long and agg <= -0.50)
-                                   or (not is_long and agg >= 0.50))
-                        if flipped:
-                            try:
-                                self.client.flash_close_position(pid)
-                                log.info("TAPE EXIT %s %s: flow flipped (agg=%+.2f, r=%.2f)",
-                                         symbol, "LONG" if is_long else "SHORT",
-                                         agg, r_favor)
-                                self.state.record_order(
-                                    f"{symbol} TAPE_EXIT positionId={pid} "
-                                    f"agg={agg:+.2f} r={r_favor:.2f}"
-                                )
-                                continue   # skip SL/TP management for closed pos
-                            except BitunixError as e:
-                                log.warning("Tape exit failed for %s: %s",
+                # Re-enable via cfg.risk.tape_exit_enabled=True only after
+                # you've reviewed the journal and tuned threshold +
+                # min_hold_secs guard. The min-hold prevents sub-30s
+                # exits where the tape barely settled after the maker fill.
+                if (rk.tape_exit_enabled
+                        and r_favor < 1.0
+                        and self.tape_feed is not None):
+                    # Min hold gate — let the entry settle before measuring flow.
+                    ctime_ms_te = int(p.get("ctime") or 0)
+                    age_s_te = (time.time() * 1000 - ctime_ms_te) / 1000.0 \
+                               if ctime_ms_te else 0
+                    min_hold = float(getattr(rk, "tape_exit_min_hold_secs", 30))
+                    threshold = float(getattr(rk, "tape_exit_threshold", 0.50))
+                    if age_s_te >= min_hold:
+                        agg = self.tape_feed.get_aggression_ratio(symbol, window_secs=10)
+                        if agg is not None:
+                            flipped = ((is_long and agg <= -threshold)
+                                       or (not is_long and agg >= threshold))
+                            if flipped:
+                                try:
+                                    self.client.flash_close_position(pid)
+                                    log.info("TAPE EXIT %s %s: flow flipped "
+                                             "(agg=%+.2f, r=%.2f, age=%.0fs)",
+                                             symbol, "LONG" if is_long else "SHORT",
+                                             agg, r_favor, age_s_te)
+                                    self.state.record_order(
+                                        f"{symbol} TAPE_EXIT positionId={pid} "
+                                        f"agg={agg:+.2f} r={r_favor:.2f}"
+                                    )
+                                    continue   # skip SL/TP management for closed pos
+                                except BitunixError as e:
+                                    log.warning("Tape exit failed for %s: %s",
                                             symbol, e)
                                 # Fall through to normal SL management.
 

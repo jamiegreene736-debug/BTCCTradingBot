@@ -3712,10 +3712,20 @@ def test_correlation_sizing_unknown_symbol_defaults_to_full():
 
 def test_tape_exit_flattens_pre_BE_long_on_strong_sell_flow():
     """If a long position hasn't reached +1R yet AND tape flips to ≥75/25
-    sell-side, flash_close_position must fire — don't wait for SL."""
+    sell-side, flash_close_position must fire — don't wait for SL.
+
+    Tape-exit is OPT-IN now (default disabled after live data showed it
+    firing on microstructure noise). This test enables it explicitly to
+    verify the legacy behavior still works when configured on."""
     bot, orig_sl, orig_tp = _setup_bot_with_open_position(
         side="BUY", entry=100_000.0, current_price=100_100.0,  # +0.4R, pre-BE
     )
+    # Opt in to tape exit + use 0s min hold so the test position fires.
+    bot.cfg.risk.tape_exit_enabled = True
+    bot.cfg.risk.tape_exit_min_hold_secs = 0
+    # Bump position age past the (default 30s) min hold by backdating ctime.
+    pos = bot.client.pending_positions.return_value[0]
+    pos["ctime"] = int(time.time() * 1000) - 60_000  # 60s old
 
     class FakeTape:
         def get_aggression_ratio(self, sym, window_secs=10, min_count=5):
@@ -3735,6 +3745,59 @@ def test_tape_exit_flattens_pre_BE_long_on_strong_sell_flow():
     orders = [e for e in bot.state.snapshot()["events"] if e["kind"] == "order"]
     assert any("TAPE_EXIT" in e["text"] for e in orders), \
         f"expected TAPE_EXIT order event; got {[e['text'] for e in orders]}"
+
+
+def test_tape_exit_disabled_by_default_does_not_fire():
+    """tape_exit_enabled=False (the new default) must keep the position
+    open even when the tape flips strongly contrary. Prevents the
+    sub-30-second tape-exit bleed observed in live data."""
+    bot, _, _ = _setup_bot_with_open_position(
+        side="BUY", entry=100_000.0, current_price=100_100.0,  # +0.4R, pre-BE
+    )
+    # Default config — tape_exit_enabled is False.
+    assert bot.cfg.risk.tape_exit_enabled is False, \
+        "default must be disabled after live drawdown analysis"
+
+    class FakeTape:
+        def get_aggression_ratio(self, sym, window_secs=10, min_count=5):
+            return -0.95   # extreme contrary
+        def get_cvd(self, sym, window_secs=60, min_count=5):
+            return None
+        def get_activity_multiplier(self, sym, **kw):
+            return None
+        def get_price_change_pct(self, sym, window_secs=10, min_count=5):
+            return None
+    bot.tape_feed = FakeTape()
+    bot._tick()
+    bot.client.flash_close_position.assert_not_called()
+
+
+def test_tape_exit_min_hold_blocks_too_early():
+    """Even with tape_exit_enabled=True, a position younger than
+    tape_exit_min_hold_secs must NOT be flattened — the entry needs time
+    to settle before measuring flow."""
+    bot, _, _ = _setup_bot_with_open_position(
+        side="BUY", entry=100_000.0, current_price=100_100.0,
+    )
+    bot.cfg.risk.tape_exit_enabled = True
+    bot.cfg.risk.tape_exit_min_hold_secs = 30
+    # Position only 5 seconds old.
+    pos = bot.client.pending_positions.return_value[0]
+    pos["ctime"] = int(time.time() * 1000) - 5_000
+
+    class FakeTape:
+        def get_aggression_ratio(self, sym, window_secs=10, min_count=5):
+            return -0.85
+        def get_cvd(self, sym, window_secs=60, min_count=5):
+            return None
+        def get_activity_multiplier(self, sym, **kw):
+            return None
+        def get_price_change_pct(self, sym, window_secs=10, min_count=5):
+            return None
+    bot.tape_feed = FakeTape()
+    bot._tick()
+    # Min-hold guard must block the tape-exit even though everything else qualifies.
+    bot.client.flash_close_position.assert_not_called()
 
 
 def test_tape_exit_skipped_for_post_BE_position():
@@ -3943,6 +4006,8 @@ def main() -> int:
         test_correlation_sizing_alts_get_smaller_notional,
         test_correlation_sizing_unknown_symbol_defaults_to_full,
         test_tape_exit_flattens_pre_BE_long_on_strong_sell_flow,
+        test_tape_exit_disabled_by_default_does_not_fire,
+        test_tape_exit_min_hold_blocks_too_early,
         test_tape_exit_skipped_for_post_BE_position,
         test_tape_exit_skipped_when_tape_neutral,
         test_tradetape_lifecycle_in_bot,
