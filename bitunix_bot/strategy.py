@@ -1,35 +1,40 @@
-"""Signal generation — pure-technical confluence.
+"""Signal generation — pattern-weighted technical confluence.
 
-Inputs: rolling candles.
-Output: a Signal(direction, confluence_score, atr) or None.
+The user's view: "trading using technicals" means primarily candlestick chart
+reading. So pattern recognition gets the dominant weight (default 0.55), and
+indicators are confirmation.
 
-Architecture: hard gates first, then confluence count.
+Architecture:
 
-HARD GATE:
-  ADX > adx_min  — if false, NO signal regardless of anything else.
-                   This is how freqtrade strategies actually wire ADX
-                   (see Strategy005, FSupertrendStrategy). Without it,
-                   pure noise can still hit confluence on lagging
-                   indicators alone.
+  HARD GATES (no signal at all if either fails):
+    1. ADX > adx_min          (no trades in chop)
+    2. ATR/price > min_atr_pct (no trades in dead markets)
 
-CONFLUENCE RULES (require min_confluence to agree):
-  1. EMA trend:    ema_fast > ema_mid > ema_slow            (trend stack)
-  2. Close cross:  close crossed above ema_fast             (entry trigger)
-  3. RSI:          rsi in [rsi_long_min, rsi_long_max]      (momentum window)
-  4. MACD:         macd line > signal AND hist > prev hist  (rising momentum)
-  5. Bollinger:    close > bb_mid                           (above basis)
-  6. Supertrend:   direction = +1 (or -1 short)             (regime filter)
+  SCORING (combined directional score):
 
-Recommended min_confluence is 3-of-6 for aggressive, 4-of-6 for selective.
+    indicator_score = (count of indicator rules agreeing) / 6           # 0-1
+    pattern_score   = min(1, sum(pattern strengths) / pattern_norm)     # 0-1
+    combined        = pattern_weight * pattern + (1-pw) * indicator     # 0-1
+
+  Fire if combined >= fire_threshold for one direction AND that side wins.
+
+CONFLUENCE INDICATOR RULES (the non-pattern half):
+  1. EMA stack (fast > mid > slow for long; reverse for short)
+  2. Close cross of EMA fast (bar-to-bar)
+  3. RSI in long/short window
+  4. MACD line vs signal AND histogram rising
+  5. Bollinger basis (close above/below mid)
+  6. Supertrend direction
 """
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 import numpy as np
 
+from . import patterns
 from .config import StrategyCfg
 from .indicators import adx as adx_fn
 from .indicators import atr as atr_fn
@@ -44,18 +49,21 @@ Direction = Literal["long", "short"]
 @dataclass
 class Signal:
     direction: Direction
-    score: int            # how many rules agreed
-    reasons: list[str]
-    price: float          # close of last bar
-    atr: float            # for ATR-based SL sizing
+    score: float                       # combined 0-1
+    indicator_score: int               # raw indicator confluence count
+    pattern_score: float               # raw pattern strength sum
+    reasons: list[str]                 # human-readable mix of indicators + patterns
+    pattern_hits: list[str] = field(default_factory=list)
+    price: float = 0.0
+    atr: float = 0.0
 
     @property
     def side_code(self) -> str:
-        # Bitunix: "BUY" / "SELL".
         return "BUY" if self.direction == "long" else "SELL"
 
 
 def evaluate(
+    opens: list[float],
     highs: list[float],
     lows: list[float],
     closes: list[float],
@@ -64,10 +72,12 @@ def evaluate(
     if len(closes) < max(cfg.ema_slow, cfg.macd_slow, cfg.bb_period, cfg.atr_period) + 5:
         return None
 
+    o = np.array(opens, dtype=float)
     h = np.array(highs, dtype=float)
     l = np.array(lows, dtype=float)
     c = np.array(closes, dtype=float)
 
+    # ------------------------------------------------------------------ indicators
     ema_f = ema(c, cfg.ema_fast)
     ema_m = ema(c, cfg.ema_mid)
     ema_s = ema(c, cfg.ema_slow)
@@ -81,13 +91,11 @@ def evaluate(
     i = len(c) - 1
     p = c[i]
 
-    # HARD GATE 1: no trades in chop (ADX-based).
+    # ------------------------------------------------------------------ hard gates
     a_now = adx_v[i] if i < len(adx_v) else np.nan
     if np.isnan(a_now) or a_now < cfg.adx_min:
         return None
 
-    # HARD GATE 2: no trades in dead markets (ATR/price too low to ever clear
-    # fees + reach TP within reasonable time). 0.08% default.
     atr_now = atr_v[i] if i < len(atr_v) else np.nan
     if np.isnan(atr_now) or p <= 0:
         return None
@@ -95,56 +103,97 @@ def evaluate(
     if atr_pct < cfg.min_atr_pct:
         return None
 
-    long_reasons, short_reasons = [f"adx({a_now:.0f})"], [f"adx({a_now:.0f})"]
+    # ------------------------------------------------------------------ indicators
+    long_reasons: list[str] = []
+    short_reasons: list[str] = []
 
-    # 1. EMA trend.
+    # 1. EMA stack
     if ema_f[i] > ema_m[i] > ema_s[i]:
         long_reasons.append("ema_stack_up")
     if ema_f[i] < ema_m[i] < ema_s[i]:
         short_reasons.append("ema_stack_down")
 
-    # 2. Close cross of ema_fast.
+    # 2. Close cross of ema_fast
     if i >= 1:
         if c[i - 1] <= ema_f[i - 1] and c[i] > ema_f[i]:
             long_reasons.append("cross_above_ema_fast")
         if c[i - 1] >= ema_f[i - 1] and c[i] < ema_f[i]:
             short_reasons.append("cross_below_ema_fast")
 
-    # 3. RSI window.
+    # 3. RSI window
     r = rsi_v[i]
     if not np.isnan(r):
         if cfg.rsi_long_min <= r <= cfg.rsi_long_max:
-            long_reasons.append(f"rsi_ok({r:.1f})")
+            long_reasons.append(f"rsi({r:.0f})")
         if cfg.rsi_short_min <= r <= cfg.rsi_short_max:
-            short_reasons.append(f"rsi_ok({r:.1f})")
+            short_reasons.append(f"rsi({r:.0f})")
 
-    # 4. MACD.
+    # 4. MACD
     if i >= 1 and not np.isnan(macd_h[i - 1]):
         if macd_l[i] > macd_s[i] and macd_h[i] > macd_h[i - 1]:
             long_reasons.append("macd_up")
         if macd_l[i] < macd_s[i] and macd_h[i] < macd_h[i - 1]:
             short_reasons.append("macd_down")
 
-    # 5. Bollinger basis.
+    # 5. Bollinger basis
     if not np.isnan(bb_mid[i]):
         if p > bb_mid[i]:
             long_reasons.append("above_bb_mid")
         if p < bb_mid[i]:
             short_reasons.append("below_bb_mid")
 
-    # 6. Supertrend regime.
+    # 6. Supertrend regime
     if i < len(st_dir) and not np.isnan(st_dir[i]):
         if st_dir[i] == 1:
             long_reasons.append("supertrend_up")
         elif st_dir[i] == -1:
             short_reasons.append("supertrend_down")
 
-    # ADX is a hard gate (see top), not counted in confluence.
-    long_score = len(long_reasons) - 1   # subtract the adx prefix
-    short_score = len(short_reasons) - 1
+    indicator_long = len(long_reasons)
+    indicator_short = len(short_reasons)
+    INDICATOR_MAX = 6
 
-    if long_score >= cfg.min_confluence and long_score > short_score:
-        return Signal("long", long_score, long_reasons, p, float(atr_v[i]) if not np.isnan(atr_v[i]) else 0.0)
-    if short_score >= cfg.min_confluence and short_score > long_score:
-        return Signal("short", short_score, short_reasons, p, float(atr_v[i]) if not np.isnan(atr_v[i]) else 0.0)
+    # ------------------------------------------------------------------ patterns
+    hits = patterns.detect(o, h, l, c)
+    pattern_long, pattern_short = patterns.score(hits)
+    pattern_long_n = min(1.0, pattern_long / cfg.pattern_norm)
+    pattern_short_n = min(1.0, pattern_short / cfg.pattern_norm)
+
+    # ------------------------------------------------------------------ combine
+    pw = cfg.pattern_weight
+    combined_long = pw * pattern_long_n + (1 - pw) * (indicator_long / INDICATOR_MAX)
+    combined_short = pw * pattern_short_n + (1 - pw) * (indicator_short / INDICATOR_MAX)
+
+    pat_long_names = [p.name for p in hits if p.direction == "bullish"]
+    pat_short_names = [p.name for p in hits if p.direction == "bearish"]
+    pat_neutral_names = [p.name for p in hits if p.direction == "neutral"]
+
+    def _build(direction: Direction) -> Signal:
+        is_long = direction == "long"
+        score_combined = combined_long if is_long else combined_short
+        ind_score = indicator_long if is_long else indicator_short
+        pat_score = pattern_long if is_long else pattern_short
+        ind_reasons = long_reasons if is_long else short_reasons
+        pat_names = pat_long_names if is_long else pat_short_names
+        all_reasons = (
+            [f"adx({a_now:.0f})", f"atr({atr_pct:.2f}%)"]
+            + [f"PAT:{n}" for n in pat_names]
+            + (["NEU:" + ",".join(pat_neutral_names)] if pat_neutral_names else [])
+            + ind_reasons
+        )
+        return Signal(
+            direction=direction,
+            score=score_combined,
+            indicator_score=ind_score,
+            pattern_score=pat_score,
+            reasons=all_reasons,
+            pattern_hits=pat_names,
+            price=float(p),
+            atr=float(atr_now),
+        )
+
+    if combined_long >= cfg.fire_threshold and combined_long > combined_short:
+        return _build("long")
+    if combined_short >= cfg.fire_threshold and combined_short > combined_long:
+        return _build("short")
     return None

@@ -62,6 +62,11 @@ strategy:
   supertrend_mult: 3.0
   # Dead-market filter (HARD GATE — not counted): skip if ATR/price < this %
   min_atr_pct: 0.08
+  # Pattern recognition is the heavy half of the decision (55% weight).
+  # combined = 0.55 * pattern_score + 0.45 * indicator_score; fire if ≥ 0.45
+  pattern_weight: 0.55
+  pattern_norm: 2.5      # raw pattern strength / norm = 0-1; 2.5 means 2-3 mid patterns saturate
+  fire_threshold: 0.45
   min_confluence: 4      # of 6 confluence rules; ADX is a hard gate (not counted).
                          # 3-of-6 = aggressive; 4-of-6 = selective; 5+ = rare
 

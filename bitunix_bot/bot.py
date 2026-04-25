@@ -245,15 +245,17 @@ class BitunixBot:
                 continue
             self.last_bar_ts[sym_u] = last_bar
 
+            opens = [float(r["open"]) for r in rows]
             highs = [float(r["high"]) for r in rows]
             lows = [float(r["low"]) for r in rows]
             closes = [float(r["close"]) for r in rows]
 
             # Signal.
-            sig = evaluate(highs, lows, closes, self.cfg.strategy)
+            sig = evaluate(opens, highs, lows, closes, self.cfg.strategy)
             if sig is None:
                 continue
-            sig_text = (f"{sym} {sig.direction.upper()} score={sig.score} @ "
+            sig_text = (f"{sym} {sig.direction.upper()} score={sig.score:.2f} "
+                        f"(pat={sig.pattern_score:.1f},ind={sig.indicator_score}/6) @ "
                         f"{sig.price:.4f} ({', '.join(sig.reasons)})")
             log.info("Signal: %s", sig_text)
             self.state.record_signal(sig_text)

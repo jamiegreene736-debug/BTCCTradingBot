@@ -44,15 +44,23 @@ from bitunix_bot.state import BotState, get as get_state      # noqa: E402
 # ----------------------------------------------------------------- helpers
 
 def make_uptrend_klines(n: int = 250, base: float = 60000.0, drift: float = 12.0) -> list[dict]:
-    """A synthetic uptrend of n minute bars ending now."""
+    """Synthetic uptrend with the LAST 3 bars forced to be clean bullish
+    marubozu-style candles (no rejection wicks) so the pattern detector
+    yields a deterministic bullish signal direction."""
     rng = np.random.default_rng(42)
     closes = base + np.cumsum(rng.normal(drift, 25, n))
-    highs = closes + rng.uniform(2, 30, n)
-    lows = closes - rng.uniform(2, 30, n)
+    opens = closes - rng.uniform(5, 20, n)
+    highs = np.maximum(opens, closes) + rng.uniform(0.5, 3, n)
+    lows = np.minimum(opens, closes) - rng.uniform(0.5, 3, n)
+    # Last 3 bars: clean bull marubozu — open near low, close near high, big body.
+    for i in range(n - 3, n):
+        opens[i] = closes[i] - 30 - rng.uniform(0, 5)
+        highs[i] = closes[i] + rng.uniform(0.1, 1.5)
+        lows[i] = opens[i] - rng.uniform(0.1, 1.5)
     now = int(time.time() * 1000)
     return [
         {
-            "open": float(closes[i] - 5),
+            "open": float(opens[i]),
             "high": float(highs[i]),
             "low": float(lows[i]),
             "close": float(closes[i]),
@@ -434,6 +442,91 @@ def test_dashboard_routes_and_auth():
     assert "account" in j
 
 
+def test_pattern_detection_basic_shapes():
+    """Verify the pattern detector recognizes textbook shapes."""
+    from bitunix_bot import patterns
+
+    # Bullish engulfing on a 2-bar dataset: small bear -> big bull engulfing.
+    o = np.array([100.0, 99.0])
+    h = np.array([100.5, 101.0])
+    l = np.array([99.0, 98.8])
+    c = np.array([99.2, 100.8])
+    hits = patterns.detect(o, h, l, c)
+    names = [p.name for p in hits]
+    assert "bullish_engulfing" in names, f"expected bullish_engulfing in {names}"
+    bull, bear = patterns.score(hits)
+    assert bull > bear, f"bull score {bull} should beat bear {bear}"
+
+    # Bearish engulfing.
+    o = np.array([99.0, 100.8])
+    h = np.array([100.5, 101.0])
+    l = np.array([98.8, 98.5])
+    c = np.array([100.5, 99.0])
+    names = [p.name for p in patterns.detect(o, h, l, c)]
+    assert "bearish_engulfing" in names, f"expected bearish_engulfing in {names}"
+
+    # Hammer (small body, long lower wick) preceded by downtrend bars.
+    n = 20
+    o = np.linspace(100, 95, n)  # downtrend
+    c = o - 0.2
+    h = c + 0.3
+    l = o - 0.3
+    # Last candle = hammer: small body, long lower wick.
+    o[-1] = 95.0; c[-1] = 95.05; h[-1] = 95.1; l[-1] = 94.0
+    names = [p.name for p in patterns.detect(o, h, l, c)]
+    assert "hammer" in names, f"expected hammer in {names}"
+
+    # Doji: open ≈ close, wide range.
+    o = np.array([100.0, 100.0, 100.0])
+    c = np.array([100.0, 100.0, 100.05])
+    h = np.array([100.5, 100.5, 100.6])
+    l = np.array([99.5, 99.5, 99.4])
+    names = [p.name for p in patterns.detect(o, h, l, c)]
+    assert "doji" in names, f"expected doji in {names}"
+
+
+def test_pattern_alone_can_fire_signal():
+    """A strong pattern with mediocre indicators should still fire because
+    pattern_weight is 0.55 — so a normalized pattern score of ~1.0 alone
+    contributes 0.55, above the default 0.45 fire threshold."""
+    from bitunix_bot.config import StrategyCfg
+    from bitunix_bot.strategy import evaluate
+
+    # Build a clean uptrend with a fresh bullish engulfing on the last bar.
+    rng = np.random.default_rng(3)
+    n = 200
+    base = 100.0
+    closes = base + np.cumsum(rng.normal(0.05, 0.3, n))
+    opens = closes - rng.uniform(0.05, 0.2, n)
+    highs = np.maximum(opens, closes) + rng.uniform(0.02, 0.1, n)
+    lows = np.minimum(opens, closes) - rng.uniform(0.02, 0.1, n)
+    # Force last 2 bars to a bullish engulfing.
+    opens[-2], closes[-2] = closes[-3] + 0.05, closes[-3] - 0.4
+    highs[-2] = opens[-2] + 0.05
+    lows[-2] = closes[-2] - 0.05
+    opens[-1], closes[-1] = closes[-2] - 0.05, opens[-2] + 0.6
+    highs[-1] = closes[-1] + 0.05
+    lows[-1] = opens[-1] - 0.05
+
+    cfg = StrategyCfg(
+        ema_fast=9, ema_mid=21, ema_slow=50,
+        rsi_period=14, rsi_long_min=40, rsi_long_max=80,
+        rsi_short_min=20, rsi_short_max=60,
+        macd_fast=12, macd_slow=26, macd_signal=9,
+        bb_period=20, bb_std=2.0, atr_period=14,
+        min_confluence=4,
+        adx_period=14, adx_min=15.0,        # loose ADX so the gate doesn't block
+        supertrend_period=10, supertrend_mult=3.0,
+        min_atr_pct=0.0,
+        pattern_weight=0.55, pattern_norm=2.5, fire_threshold=0.45,
+    )
+    sig = evaluate(opens.tolist(), highs.tolist(), lows.tolist(), closes.tolist(), cfg)
+    assert sig is not None, "engulfing + uptrend should fire a signal"
+    assert sig.direction == "long", f"expected long, got {sig.direction}"
+    assert sig.pattern_score > 0, "pattern_score should be > 0"
+    assert any("PAT:" in r for r in sig.reasons), f"reasons missing pattern tags: {sig.reasons}"
+
+
 def test_sl_and_tp_always_on_correct_side():
     """Critical: SL must be BELOW entry for longs and ABOVE for shorts.
     Inverted SL = catastrophic loss. Verify across both directions."""
@@ -446,14 +539,16 @@ def test_sl_and_tp_always_on_correct_side():
     rc = RiskCfg(stop_loss_pct=0.25, take_profit_r=5.0, use_atr=False,
                  atr_multiplier_sl=0.8, atr_multiplier_tp=4.0)
 
-    long_sig = Signal("long", 5, ["x"], price=60000.0, atr=100.0)
+    long_sig = Signal(direction="long", score=0.7, indicator_score=5,
+                       pattern_score=2.0, reasons=["x"], price=60000.0, atr=100.0)
     plan = build_order(long_sig, free_margin=1000, trading=tc, risk=rc,
                        min_volume=0.0001, volume_step=0.0001, digits=1)
     assert plan and plan.side == "BUY"
     assert plan.stop_loss < plan.price < plan.take_profit, \
         f"long SL/TP wrong: SL={plan.stop_loss} entry={plan.price} TP={plan.take_profit}"
 
-    short_sig = Signal("short", 5, ["x"], price=60000.0, atr=100.0)
+    short_sig = Signal(direction="short", score=0.7, indicator_score=5,
+                        pattern_score=2.0, reasons=["x"], price=60000.0, atr=100.0)
     plan = build_order(short_sig, free_margin=1000, trading=tc, risk=rc,
                        min_volume=0.0001, volume_step=0.0001, digits=1)
     assert plan and plan.side == "SELL"
@@ -479,6 +574,8 @@ def main() -> int:
         test_paper_mode_with_zero_margin_simulates_anyway,
         test_live_mode_actually_calls_place_order,
         test_dashboard_routes_and_auth,
+        test_pattern_detection_basic_shapes,
+        test_pattern_alone_can_fire_signal,
         test_sl_and_tp_always_on_correct_side,
     ]
     passed = failed = 0

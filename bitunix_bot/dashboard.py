@@ -88,6 +88,8 @@ def create_app(cfg: Config, client: BitunixClient) -> Flask:
                 "max_open_positions": cfg.trading.max_open_positions,
                 "cooldown_seconds": cfg.trading.cooldown_seconds,
                 "min_confluence": cfg.strategy.min_confluence,
+                "pattern_weight": cfg.strategy.pattern_weight,
+                "fire_threshold": cfg.strategy.fire_threshold,
             },
             "bot": state.snapshot(),
             "now": int(time.time()),
@@ -212,10 +214,12 @@ function renderHeader(s) {
   const cfg = s.config, b = s.bot;
   const modePill = cfg.mode === 'live' ? `<span class="pill live">LIVE</span>` : `<span class="pill paper">PAPER</span>`;
   const syms = (cfg.symbols || []).join(', ');
+  const patPct = Math.round((cfg.pattern_weight || 0) * 100);
   document.getElementById('header').innerHTML =
     modePill +
     `<span class="pill muted">${syms} · ${cfg.timeframe} · ${cfg.leverage}x</span>` +
-    `<span class="pill muted">SL ${cfg.stop_loss_pct}% / TP ${cfg.take_profit_r}R · conf ${cfg.min_confluence}/5</span>` +
+    `<span class="pill muted">SL ${cfg.stop_loss_pct}% / TP ${cfg.take_profit_r}R</span>` +
+    `<span class="pill muted">${patPct}% candle patterns + ${100-patPct}% indicators · fire ≥ ${cfg.fire_threshold}</span>` +
     `<span class="pill muted">max ${cfg.max_open_positions} open · ${cfg.cooldown_seconds}s cooldown</span>` +
     `<span class="pill muted">ticks ${b.tick_count} · signals ${b.signal_count} · orders ${b.order_count} · errors ${b.error_count}</span>` +
     `<span class="pill muted">last tick ${sec(b.last_tick_at)}</span>`;
