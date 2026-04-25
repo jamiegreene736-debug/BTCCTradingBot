@@ -16,7 +16,7 @@ Architecture:
 
   Fire if combined >= fire_threshold for one direction AND that side wins.
 
-INDICATOR RULES (counted, non-pattern half — 13 votes):
+INDICATOR RULES (counted, non-pattern half — 14 votes):
   1.  EMA stack (fast > mid > slow for long; reverse for short)
   2.  Close cross of EMA fast (bar-to-bar)
   3.  RSI in long/short window
@@ -30,6 +30,7 @@ INDICATOR RULES (counted, non-pattern half — 13 votes):
   11. HTF (higher-timeframe) trend — close vs EMA on htf_timeframe
   12. Funding rate (contrarian — vote against crowded positioning)
   13. Support/Resistance bounce/rejection (swing-detected levels)
+  14. Order book imbalance (live WebSocket depth feed)
 
 PATTERNS (combined into pattern_score):
   - 23 candlestick patterns (1-3 bar) — see patterns.py
@@ -88,6 +89,7 @@ def evaluate(
     volumes: list[float] | None = None,
     htf_closes: list[float] | None = None,
     funding_rate: float | None = None,
+    ob_imbalance: float | None = None,
 ) -> Signal | None:
     if len(closes) < max(cfg.ema_slow, cfg.macd_slow, cfg.bb_period, cfg.atr_period) + 5:
         return None
@@ -242,9 +244,18 @@ def evaluate(
     if sr_short:
         short_reasons.append(sr_short)
 
+    # 14. Order book imbalance (top N levels via WebSocket depth feed).
+    # imbalance = (bid_vol - ask_vol) / (bid_vol + ask_vol). Strongly positive
+    # = bid pressure → vote LONG. Strongly negative = ask pressure → vote SHORT.
+    if ob_imbalance is not None:
+        if ob_imbalance >= cfg.ob_imbalance_threshold:
+            long_reasons.append(f"ob_imb+{ob_imbalance:.2f}")
+        elif ob_imbalance <= -cfg.ob_imbalance_threshold:
+            short_reasons.append(f"ob_imb{ob_imbalance:.2f}")
+
     indicator_long = len(long_reasons)
     indicator_short = len(short_reasons)
-    INDICATOR_MAX = 13
+    INDICATOR_MAX = 14
 
     # ------------------------------------------------------------------ patterns
     candle_hits = patterns.detect(o, h, l, c)

@@ -743,6 +743,86 @@ def test_sr_detection_finds_real_levels():
     assert support_levels[0].touches >= 2
 
 
+def test_orderbook_imbalance_compute():
+    """Manually populate the OB and verify imbalance math."""
+    from bitunix_bot.orderbook import Book, OrderBookFeed
+    feed = OrderBookFeed(symbols=["BTCUSDT"], depth_levels=3)
+    # Seed a book with much more bid volume than ask.
+    with feed._lock:
+        b = feed._books["BTCUSDT"]
+        b.bids = [(60000.0, 5.0), (59999.0, 4.0), (59998.0, 3.0)]   # bid total = 12
+        b.asks = [(60001.0, 1.0), (60002.0, 1.0), (60003.0, 2.0)]   # ask total = 4
+        b.last_update = time.time()
+    imb = feed.get_imbalance("BTCUSDT")
+    assert imb is not None
+    # (12 - 4) / (12 + 4) = 0.5
+    assert abs(imb - 0.5) < 0.001, f"expected 0.5 got {imb}"
+
+    # Now flip: ask-heavy.
+    with feed._lock:
+        b = feed._books["BTCUSDT"]
+        b.bids = [(60000.0, 1.0), (59999.0, 1.0), (59998.0, 1.0)]   # 3
+        b.asks = [(60001.0, 4.0), (60002.0, 5.0), (60003.0, 6.0)]   # 15
+        b.last_update = time.time()
+    imb = feed.get_imbalance("BTCUSDT")
+    # (3 - 15) / (3 + 15) = -0.667
+    assert abs(imb - (-0.667)) < 0.01, f"expected ≈ -0.67 got {imb}"
+
+
+def test_orderbook_parser_handles_multiple_formats():
+    from bitunix_bot.orderbook import OrderBookFeed
+
+    # Format 1: bids/asks as lists of [price, size] pairs.
+    msg = {"symbol": "BTCUSDT", "data": {
+        "bids": [["60000", "1.5"], ["59999", "2.0"]],
+        "asks": [["60001", "1.0"], ["60002", "0.5"]],
+    }}
+    bids, asks = OrderBookFeed._extract_book(msg)
+    assert bids == [(60000.0, 1.5), (59999.0, 2.0)]
+    assert asks == [(60001.0, 1.0), (60002.0, 0.5)]
+
+    # Format 2: short keys b/a + dict-style levels.
+    msg = {"s": "ETHUSDT", "b": [{"px": "2000", "sz": "10"}], "a": [{"price": "2001", "size": "5"}]}
+    bids, asks = OrderBookFeed._extract_book(msg)
+    assert bids == [(2000.0, 10.0)]
+    assert asks == [(2001.0, 5.0)]
+
+
+def test_imbalance_vote_in_strategy():
+    """Strong bid-side imbalance should add a long vote."""
+    from bitunix_bot.config import StrategyCfg
+    from bitunix_bot.strategy import evaluate
+
+    rng = np.random.default_rng(7)
+    n = 200
+    closes = 100 + np.cumsum(rng.normal(0.05, 0.3, n))
+    opens = closes - rng.uniform(0.05, 0.2, n)
+    highs = np.maximum(opens, closes) + rng.uniform(0.02, 0.1, n)
+    lows = np.minimum(opens, closes) - rng.uniform(0.02, 0.1, n)
+    cfg = StrategyCfg(
+        ema_fast=9, ema_mid=21, ema_slow=50,
+        rsi_period=14, rsi_long_min=30, rsi_long_max=80,
+        rsi_short_min=20, rsi_short_max=70,
+        macd_fast=12, macd_slow=26, macd_signal=9,
+        bb_period=20, bb_std=2.0, atr_period=14,
+        min_confluence=1,
+        adx_period=14, adx_min=15.0,
+        supertrend_period=10, supertrend_mult=3.0,
+        min_atr_pct=0.0,
+        pattern_weight=0.55, pattern_norm=2.0, fire_threshold=0.05,
+        volume_ma_period=20, volume_spike_multiplier=1.5,
+        stoch_rsi_period=14, stoch_rsi_k=3, stoch_rsi_d=3,
+        htf_timeframe="15m", htf_ema_period=50,
+        funding_threshold=0.0005,
+        swing_lookback=5, sr_cluster_tol_pct=0.3, sr_min_touches=2, sr_proximity_pct=0.3,
+        ob_depth_levels=10, ob_imbalance_threshold=0.30,
+    )
+    sig = evaluate(opens.tolist(), highs.tolist(), lows.tolist(), closes.tolist(),
+                    cfg, ob_imbalance=0.55)  # strong bid pressure
+    if sig:
+        assert any("ob_imb" in r for r in sig.reasons), f"reasons: {sig.reasons}"
+
+
 def test_sl_and_tp_always_on_correct_side():
     """Critical: SL must be BELOW entry for longs and ABOVE for shorts.
     Inverted SL = catastrophic loss. Verify across both directions."""
@@ -800,6 +880,9 @@ def main() -> int:
         test_double_bottom_detection,
         test_chart_pattern_score_aggregation,
         test_sr_detection_finds_real_levels,
+        test_orderbook_imbalance_compute,
+        test_orderbook_parser_handles_multiple_formats,
+        test_imbalance_vote_in_strategy,
         test_sl_and_tp_always_on_correct_side,
     ]
     passed = failed = 0

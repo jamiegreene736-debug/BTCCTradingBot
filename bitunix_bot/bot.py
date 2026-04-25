@@ -22,6 +22,7 @@ from typing import Any
 
 from .client import BitunixClient, BitunixError
 from .config import Config
+from .orderbook import OrderBookFeed
 from .risk import OrderPlan, build_order
 from .state import get as get_state
 from .strategy import evaluate
@@ -73,6 +74,8 @@ class BitunixBot:
         self.htf_cache: dict[str, tuple[int, list[float]]] = {}
         # Funding rate cache: symbol -> (fetched_unix_ts, rate).
         self.funding_cache: dict[str, tuple[int, float]] = {}
+        # Live order-book feed (WebSocket). Started in start() / run_forever().
+        self.ob_feed: OrderBookFeed | None = None
         self.stop_flag = False
         self.state = get_state()
 
@@ -151,6 +154,13 @@ class BitunixBot:
 
     def run_forever(self) -> None:
         """Loop without installing signal handlers (safe in a worker thread)."""
+        # Start the order-book feed if not already running.
+        if self.ob_feed is None:
+            self.ob_feed = OrderBookFeed(
+                symbols=self.cfg.trading.symbols,
+                depth_levels=self.cfg.strategy.ob_depth_levels,
+            )
+            self.ob_feed.start()
         while not self.stop_flag:
             try:
                 self._tick()
@@ -164,6 +174,8 @@ class BitunixBot:
                 if self.stop_flag:
                     break
                 time.sleep(1)
+        if self.ob_feed:
+            self.ob_feed.stop()
         log.info("Bot stopped")
 
     def _on_sig(self, *_: Any) -> None:
@@ -298,16 +310,19 @@ class BitunixBot:
             # Tier-2 inputs (cached): higher-timeframe trend + funding rate.
             htf_closes = self._get_htf_closes(sym)
             funding = self._get_funding_rate(sym)
+            # Tier-3 input (live WebSocket): top-N order book imbalance.
+            ob_imb = self.ob_feed.get_imbalance(sym) if self.ob_feed else None
 
             # Signal.
             sig = evaluate(
                 opens, highs, lows, closes, self.cfg.strategy,
                 volumes=volumes, htf_closes=htf_closes, funding_rate=funding,
+                ob_imbalance=ob_imb,
             )
             if sig is None:
                 continue
             sig_text = (f"{sym} {sig.direction.upper()} score={sig.score:.2f} "
-                        f"(pat={sig.pattern_score:.1f},ind={sig.indicator_score}/13) @ "
+                        f"(pat={sig.pattern_score:.1f},ind={sig.indicator_score}/14) @ "
                         f"{sig.price:.4f} ({', '.join(sig.reasons)})")
             log.info("Signal: %s", sig_text)
             self.state.record_signal(sig_text)

@@ -98,6 +98,11 @@ strategy:
   sr_cluster_tol_pct: 0.3
   sr_min_touches: 2
   sr_proximity_pct: 0.3
+  # Order book imbalance — live WebSocket depth feed, top-N bid/ask volume.
+  # imbalance = (bid_vol - ask_vol) / total. >threshold → bid pressure (long);
+  # <-threshold → ask pressure (short).
+  ob_depth_levels: 10
+  ob_imbalance_threshold: 0.30
   # Dead-market filter REMOVED. Set to 0 to disable (kept for backward compat).
   min_atr_pct: 0.0
   # Pattern recognition + indicators are the entire decision.

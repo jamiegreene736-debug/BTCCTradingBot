@@ -88,6 +88,9 @@ class StrategyCfg:
     sr_cluster_tol_pct: float = 0.3    # swings within 0.3% cluster into one level
     sr_min_touches: int = 2            # minimum swings to qualify as a "real" level
     sr_proximity_pct: float = 0.3      # how close current price must be to fire
+    # Order book imbalance (live WebSocket).
+    ob_depth_levels: int = 10          # top-N levels to sum on each side
+    ob_imbalance_threshold: float = 0.30  # |(bid - ask) / (bid + ask)| above this fires
     # Dead-market filter: skip if ATR/price < this (no point trading when
     # the market can't move enough to clear fees + reach TP within hours).
     min_atr_pct: float = 0.08    # 0.08% = 8 bps
