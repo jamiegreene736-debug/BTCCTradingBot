@@ -1730,8 +1730,9 @@ def test_tradetape_window_filtering():
     # Old buy (90s ago, outside 60s window) + recent sell.
     feed._ingest(Trade(ts=now - 90, price=60000, qty=10.0, is_buy=True), "BTCUSDT")
     feed._ingest(Trade(ts=now - 5, price=60000, qty=2.0, is_buy=False), "BTCUSDT")
-    cvd_60 = feed.get_cvd("BTCUSDT", window_secs=60)
-    cvd_120 = feed.get_cvd("BTCUSDT", window_secs=120)
+    # min_count=1 so the math (not the sample-size guard) is what we test here.
+    cvd_60 = feed.get_cvd("BTCUSDT", window_secs=60, min_count=1)
+    cvd_120 = feed.get_cvd("BTCUSDT", window_secs=120, min_count=1)
     assert abs(cvd_60 - (-2.0)) < 1e-9, f"60s window should only see -2.0, got {cvd_60}"
     assert abs(cvd_120 - 8.0) < 1e-9, f"120s window should see +8.0, got {cvd_120}"
 
@@ -1752,11 +1753,17 @@ def test_tradetape_aggression_ratio_bounded():
         feed2._ingest(Trade(ts=now - i, price=60000, qty=1.0, is_buy=False), "BTCUSDT")
     assert feed2.get_aggression_ratio("BTCUSDT", window_secs=10) == -1.0
 
-    # Balanced → ratio = 0.0
+    # Balanced → ratio = 0.0 (use min_count=1 to test the math, not the guard).
     feed3 = TradeFeed(symbols=["BTCUSDT"])
     for i in range(4):
         feed3._ingest(Trade(ts=now - i, price=60000, qty=1.0, is_buy=(i % 2 == 0)), "BTCUSDT")
-    assert feed3.get_aggression_ratio("BTCUSDT", window_secs=10) == 0.0
+    assert feed3.get_aggression_ratio("BTCUSDT", window_secs=10, min_count=1) == 0.0
+
+    # Sample-size guard — fewer than min_count returns None, not noise.
+    feed4 = TradeFeed(symbols=["BTCUSDT"])
+    feed4._ingest(Trade(ts=now, price=60000, qty=1.0, is_buy=True), "BTCUSDT")
+    assert feed4.get_aggression_ratio("BTCUSDT", window_secs=10) is None, \
+        "1 trade should fall below default min_count=5 and return None"
 
 
 def test_tradetape_print_rate_and_aggressor_size():
@@ -1806,6 +1813,258 @@ def test_tradetape_handles_seconds_and_ms_timestamps():
     assert t1 and t2
     assert abs(t1[0].ts - t2[0].ts) < 1.0, \
         f"sec={t1[0].ts}, ms-converted={t2[0].ts} should match"
+
+
+def test_tradetape_activity_multiplier_clamps():
+    """Activity multiplier should clamp to [0.85, 1.10] and read None on cold feed."""
+    from bitunix_bot.tradetape import TradeFeed, Trade
+    feed = TradeFeed(symbols=["BTCUSDT"])
+    now = time.time()
+    # Cold feed — both windows below thresholds, returns None.
+    assert feed.get_activity_multiplier("BTCUSDT") is None
+
+    # 50 trades spread across 5min baseline = 10/min = 0.167/sec baseline.
+    # Then 30 trades in last 10s = 3/sec recent → 18x baseline → clamps to 1.10.
+    for i in range(50):
+        feed._ingest(Trade(ts=now - 250 + i*5, price=60000, qty=1.0, is_buy=True), "BTCUSDT")
+    for i in range(30):
+        feed._ingest(Trade(ts=now - 9 + i*0.3, price=60000, qty=1.0, is_buy=True), "BTCUSDT")
+    mult = feed.get_activity_multiplier("BTCUSDT")
+    assert mult is not None
+    assert mult == 1.10, f"high-surge should clamp to 1.10, got {mult}"
+
+    # And dampening case: lots of baseline, none recent.
+    feed2 = TradeFeed(symbols=["BTCUSDT"])
+    for i in range(50):
+        feed2._ingest(Trade(ts=now - 250 + i*5, price=60000, qty=1.0, is_buy=True), "BTCUSDT")
+    # No recent trades at all in last 10s — returns None (insufficient sample).
+    assert feed2.get_activity_multiplier("BTCUSDT") is None
+    # 3 recent trades in 10s vs 50 in 300s = 0.3/s vs 0.167/s = 1.8x → clamps to 1.10.
+    feed2._ingest(Trade(ts=now - 1, price=60000, qty=1.0, is_buy=True), "BTCUSDT")
+    feed2._ingest(Trade(ts=now - 2, price=60000, qty=1.0, is_buy=True), "BTCUSDT")
+    feed2._ingest(Trade(ts=now - 3, price=60000, qty=1.0, is_buy=True), "BTCUSDT")
+    mult2 = feed2.get_activity_multiplier("BTCUSDT")
+    assert mult2 is not None and 0.85 <= mult2 <= 1.10
+
+
+def test_strategy_real_cvd_replaces_proxy_when_provided():
+    """When real_cvd is passed, vote #23 fires with cvd_real tag (not cvd_proxy)."""
+    from bitunix_bot.config import StrategyCfg
+    from bitunix_bot.strategy import evaluate
+    rng = np.random.default_rng(7)
+    n = 200
+    closes = 100 + np.cumsum(rng.normal(0.05, 0.3, n))
+    opens = closes - rng.uniform(0.05, 0.2, n)
+    highs = np.maximum(opens, closes) + rng.uniform(0.02, 0.1, n)
+    lows = np.minimum(opens, closes) - rng.uniform(0.02, 0.1, n)
+    cfg = StrategyCfg(
+        ema_fast=9, ema_mid=21, ema_slow=50,
+        rsi_period=14, rsi_long_min=30, rsi_long_max=80,
+        rsi_short_min=20, rsi_short_max=70,
+        macd_fast=12, macd_slow=26, macd_signal=9,
+        bb_period=20, bb_std=2.0, atr_period=14,
+        adx_period=14, adx_min=15.0,
+        supertrend_period=10, supertrend_mult=3.0,
+        pattern_weight=0.55, pattern_norm=2.0, fire_threshold=0.05,
+    )
+    sig = evaluate(opens.tolist(), highs.tolist(), lows.tolist(), closes.tolist(),
+                    cfg, real_cvd=12.5)  # positive → bullish flow vote
+    assert sig is not None
+    assert any("cvd_real" in r for r in sig.reasons), \
+        f"expected cvd_real tag when real_cvd provided; got {sig.reasons}"
+    # And no cvd_proxy tag when real CVD took priority.
+    assert not any("cvd_proxy" in r for r in sig.reasons), \
+        f"cvd_proxy should not fire when real_cvd is provided"
+
+
+def test_strategy_aggression_burst_fires_above_threshold():
+    """Vote #24 fires when |aggression_10s| >= 0.40, doesn't fire below."""
+    from bitunix_bot.config import StrategyCfg
+    from bitunix_bot.strategy import evaluate
+    rng = np.random.default_rng(7)
+    n = 200
+    closes = 100 + np.cumsum(rng.normal(0.05, 0.3, n))
+    opens = closes - rng.uniform(0.05, 0.2, n)
+    highs = np.maximum(opens, closes) + rng.uniform(0.02, 0.1, n)
+    lows = np.minimum(opens, closes) - rng.uniform(0.02, 0.1, n)
+    cfg = StrategyCfg(
+        ema_fast=9, ema_mid=21, ema_slow=50,
+        rsi_period=14, rsi_long_min=30, rsi_long_max=80,
+        rsi_short_min=20, rsi_short_max=70,
+        macd_fast=12, macd_slow=26, macd_signal=9,
+        bb_period=20, bb_std=2.0, atr_period=14,
+        adx_period=14, adx_min=15.0,
+        supertrend_period=10, supertrend_mult=3.0,
+        pattern_weight=0.55, pattern_norm=2.0, fire_threshold=0.05,
+    )
+    # Strong buy flow → long agg vote.
+    sig_strong = evaluate(opens.tolist(), highs.tolist(), lows.tolist(),
+                           closes.tolist(), cfg, aggression_10s=0.55)
+    assert sig_strong is not None
+    assert any(r.startswith("agg+") for r in sig_strong.reasons), \
+        f"expected agg+ vote at 0.55; got {sig_strong.reasons}"
+
+    # Below threshold (0.30) → no agg vote.
+    sig_weak = evaluate(opens.tolist(), highs.tolist(), lows.tolist(),
+                         closes.tolist(), cfg, aggression_10s=0.30)
+    if sig_weak is not None:
+        assert not any(r.startswith("agg+") or r.startswith("agg-")
+                       for r in sig_weak.reasons), \
+            f"agg vote should NOT fire at 0.30; got {sig_weak.reasons}"
+
+    # Strong sell flow → short agg vote.
+    sig_short = evaluate(opens.tolist(), highs.tolist(), lows.tolist(),
+                          closes.tolist(), cfg, aggression_10s=-0.55)
+    if sig_short is not None and sig_short.direction == "short":
+        assert any(r.startswith("agg-") for r in sig_short.reasons), \
+            f"expected agg- vote at -0.55; got {sig_short.reasons}"
+
+
+def test_strategy_activity_multiplier_scales_combined_score():
+    """Activity multiplier directly scales combined_score (combined ∝ mult)."""
+    from bitunix_bot.config import StrategyCfg
+    from bitunix_bot.strategy import evaluate
+    rng = np.random.default_rng(42)
+    n = 250
+    closes = 60000.0 + np.cumsum(rng.normal(12, 25, n))
+    opens = closes - rng.uniform(5, 20, n)
+    highs = np.maximum(opens, closes) + rng.uniform(0.5, 3, n)
+    lows = np.minimum(opens, closes) - rng.uniform(0.5, 3, n)
+    for k in range(n - 3, n):
+        opens[k] = closes[k] - 30
+        highs[k] = closes[k] + 0.5
+        lows[k] = opens[k] - 0.5
+    cfg = StrategyCfg(
+        ema_fast=9, ema_mid=21, ema_slow=50,
+        rsi_period=14, rsi_long_min=40, rsi_long_max=80,
+        rsi_short_min=20, rsi_short_max=60,
+        macd_fast=12, macd_slow=26, macd_signal=9,
+        bb_period=20, bb_std=2.0, atr_period=14,
+        adx_period=14, adx_min=15.0,
+        supertrend_period=10, supertrend_mult=3.0,
+        pattern_weight=0.55, pattern_norm=2.0, fire_threshold=0.05,
+    )
+    base = evaluate(opens.tolist(), highs.tolist(), lows.tolist(),
+                     closes.tolist(), cfg, activity_mult=1.0)
+    boosted = evaluate(opens.tolist(), highs.tolist(), lows.tolist(),
+                        closes.tolist(), cfg, activity_mult=1.10)
+    dampened = evaluate(opens.tolist(), highs.tolist(), lows.tolist(),
+                         closes.tolist(), cfg, activity_mult=0.85)
+    # All should fire (well above threshold), but scores must scale.
+    assert base is not None and boosted is not None and dampened is not None
+    assert boosted.score > base.score > dampened.score, \
+        f"score should scale with activity_mult: dampened={dampened.score} " \
+        f"base={base.score} boosted={boosted.score}"
+    # Within numerical tolerance, should equal base * mult.
+    assert abs(boosted.score - base.score * 1.10) < 1e-6, \
+        f"boosted ({boosted.score}) ≠ base * 1.10 ({base.score * 1.10})"
+    assert abs(dampened.score - base.score * 0.85) < 1e-6
+
+
+def _bot_with_tape_and_signal():
+    """Helper: live-mode bot wired with a controllable fake tape feed and
+    a synthetic uptrend that yields a long signal. Returns (bot, fake_tape)."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.trading.symbols = ["BTCUSDT"]
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+
+    class FakeTape:
+        def __init__(self):
+            self.aggression = 0.0
+            self.cvd = None
+            self.activity = None
+        def get_aggression_ratio(self, sym, window_secs=10, min_count=5):
+            return self.aggression
+        def get_cvd(self, sym, window_secs=60, min_count=5):
+            return self.cvd
+        def get_activity_multiplier(self, sym, **kw):
+            return self.activity
+
+    tape = FakeTape()
+    bot.tape_feed = tape
+    bot._resolve_symbol_meta()
+    return bot, tape
+
+
+def test_tape_veto_blocks_long_against_strong_sell_flow():
+    """If 10s tape aggression ≤ -0.50, a LONG signal must be skipped."""
+    bot, tape = _bot_with_tape_and_signal()
+    tape.aggression = -0.65   # 82/18 sell-side, hostile to long
+    bot._tick()
+
+    # Should not have placed any order.
+    bot.client.place_order.assert_not_called()
+    # Should record a tape veto skip.
+    skips = [e for e in bot.state.snapshot()["events"] if e["kind"] == "skip"]
+    assert any("tape veto" in s["text"] for s in skips), \
+        f"expected tape veto skip; got {[s['text'] for s in skips]}"
+
+
+def test_tape_veto_blocks_short_against_strong_buy_flow():
+    """If 10s tape aggression ≥ +0.50, a SHORT signal must be skipped."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.trading.symbols = ["BTCUSDT"]
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+
+    # Synthesize a clean DOWNTREND that should produce a short signal.
+    rng = np.random.default_rng(11)
+    n = 250
+    closes = 60000.0 - np.cumsum(rng.normal(12, 25, n))
+    opens = closes + rng.uniform(5, 20, n)
+    highs = np.maximum(opens, closes) + rng.uniform(0.5, 3, n)
+    lows = np.minimum(opens, closes) - rng.uniform(0.5, 3, n)
+    # Last 3 bars: clean bear marubozu.
+    for k in range(n - 3, n):
+        opens[k] = closes[k] + 30
+        highs[k] = opens[k] + 0.5
+        lows[k] = closes[k] - 0.5
+    now = int(time.time() * 1000)
+    klines = [{"open": float(opens[i]), "high": float(highs[i]), "low": float(lows[i]),
+                "close": float(closes[i]), "time": now - (n-i)*60_000,
+                "baseVol": "1.0", "quoteVol": "60000", "type": "1m"} for i in range(n)]
+    bot.client.klines.side_effect = lambda *a, **kw: klines
+
+    class FakeTape:
+        def get_aggression_ratio(self, sym, window_secs=10, min_count=5):
+            return 0.65   # 82/18 buy-side, hostile to short
+        def get_cvd(self, sym, window_secs=60, min_count=5):
+            return None
+        def get_activity_multiplier(self, sym, **kw):
+            return None
+    bot.tape_feed = FakeTape()
+    bot._resolve_symbol_meta()
+    bot._tick()
+
+    bot.client.place_order.assert_not_called()
+    skips = [e for e in bot.state.snapshot()["events"] if e["kind"] == "skip"]
+    assert any("tape veto" in s["text"] for s in skips)
+
+
+def test_tape_veto_respects_neutral_flow():
+    """Neutral or mildly-directional flow should NOT veto."""
+    bot, tape = _bot_with_tape_and_signal()
+    tape.aggression = 0.10  # mostly balanced — should not veto
+    bot._tick()
+    # Long signal should fire and place_order should be called.
+    assert bot.client.place_order.called, \
+        "neutral flow must not veto; bot should still place the order"
+
+
+def test_tape_veto_skipped_when_no_data():
+    """When tape feed returns None for aggression, veto should NOT fire
+    (graceful degradation when tape is cold or feed is offline)."""
+    bot, tape = _bot_with_tape_and_signal()
+    tape.aggression = None
+    bot._tick()
+    assert bot.client.place_order.called, \
+        "no-tape-data should not block trades — graceful degrade"
 
 
 def test_tradetape_lifecycle_in_bot():
@@ -1896,6 +2155,14 @@ def main() -> int:
         test_tradetape_large_print_count,
         test_tradetape_returns_none_when_empty,
         test_tradetape_handles_seconds_and_ms_timestamps,
+        test_tradetape_activity_multiplier_clamps,
+        test_strategy_real_cvd_replaces_proxy_when_provided,
+        test_strategy_aggression_burst_fires_above_threshold,
+        test_strategy_activity_multiplier_scales_combined_score,
+        test_tape_veto_blocks_long_against_strong_sell_flow,
+        test_tape_veto_blocks_short_against_strong_buy_flow,
+        test_tape_veto_respects_neutral_flow,
+        test_tape_veto_skipped_when_no_data,
         test_tradetape_lifecycle_in_bot,
     ]
     passed = failed = 0

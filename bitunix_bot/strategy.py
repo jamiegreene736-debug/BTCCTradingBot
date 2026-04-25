@@ -16,7 +16,7 @@ Architecture:
 
   Fire if combined >= fire_threshold for one direction AND that side wins.
 
-INDICATOR RULES (counted, non-pattern half — 21 votes):
+INDICATOR RULES (counted, non-pattern half — 24 votes):
   1.  EMA stack (fast > mid > slow for long; reverse for short)
   2.  Close cross of EMA fast (bar-to-bar)
   3.  RSI in long/short window
@@ -39,7 +39,10 @@ INDICATOR RULES (counted, non-pattern half — 21 votes):
   20. MFI (volume-weighted RSI window)
   21. TTM Squeeze (BB inside Keltner = compression; vote on release direction)
   22. BTC-leader (alts vote with BTC's 1m EMA trend; passed in by bot)
-  23. CVD trend (Cumulative Volume Delta direction agrees with price)
+  23. CVD trend — REAL CVD from trade tape (sum of buy/sell aggressor volume
+      over 60s) when available; falls back to candle-CVD proxy when offline.
+  24. Aggression burst — 10s tape aggression ratio ≥0.40 magnitude. Catches
+      momentum surges that happen BETWEEN bar closes (tape-only signal).
 
 COMBO-BONUS LAYER (extra vote when 3+ co-fire on the same side):
   - trend_pullback:   ema_stack + ema_cross + (vol_spike OR mfi)
@@ -121,6 +124,9 @@ def evaluate(
     ob_imbalance: float | None = None,
     btc_trend: int | None = None,    # +1 BTC up, -1 BTC down, 0/None unknown
     session_weight: float | None = None,  # 0.0–1.5; reweights combined score
+    real_cvd: float | None = None,        # tape-derived 60s CVD (base-coin units)
+    aggression_10s: float | None = None,  # tape-derived 10s aggression in [-1,+1]
+    activity_mult: float | None = None,   # tape-derived score multiplier (~0.85–1.10)
 ) -> Signal | None:
     if len(closes) < max(cfg.ema_slow, cfg.macd_slow, cfg.bb_period, cfg.atr_period) + 5:
         return None
@@ -355,18 +361,35 @@ def evaluate(
     elif btc_trend == -1:
         short_reasons.append("btc_leader_down")
 
-    # 23. CVD trend confirmation — Cumulative Volume Delta agreement.
-    # If CVD's recent direction matches the price direction, it confirms
-    # genuine buying/selling pressure behind the move. Divergences are
-    # already covered by vote 15-17 group (CVD added there too); this
-    # vote is the simpler "CVD agrees with price" confirmation.
-    if cvd_v is not None and len(cvd_v) >= 20:
+    # 23. CVD trend confirmation. Prefer REAL CVD from the trade-tape feed
+    # (sum of buy/sell aggressor volume) when available — that's true order
+    # flow, the alpha that 1m candles can't capture. Fall back to the
+    # candle-derived CVD proxy (`cvd_v`) when the tape feed is offline or
+    # too cold to read. Real CVD is direction-only; the candle proxy
+    # additionally requires price agreement to fire.
+    if real_cvd is not None and abs(real_cvd) > 0:
+        if real_cvd > 0:
+            long_reasons.append(f"cvd_real+{real_cvd:.2f}")
+        else:
+            short_reasons.append(f"cvd_real{real_cvd:.2f}")
+    elif cvd_v is not None and len(cvd_v) >= 20:
         cvd_recent = cvd_v[-1] - cvd_v[-20]   # last 20-bar net delta
         price_change = c[i] - c[max(0, i - 20)]
         if cvd_recent > 0 and price_change > 0:
-            long_reasons.append(f"cvd_up({cvd_recent:.0f})")
+            long_reasons.append(f"cvd_proxy+({cvd_recent:.0f})")
         elif cvd_recent < 0 and price_change < 0:
-            short_reasons.append(f"cvd_down({cvd_recent:.0f})")
+            short_reasons.append(f"cvd_proxy({cvd_recent:.0f})")
+
+    # 24. Aggression burst — short-window (10s) flow lopsidedness from the
+    # trade tape. Strong directional aggression (≥70/30 split) is real-time
+    # momentum that the candle-based indicators can't see because it
+    # happens BETWEEN bar closes. Especially valuable on 1m where a single
+    # bar can hide a major directional surge or reversal in its body.
+    if aggression_10s is not None:
+        if aggression_10s >= 0.40:        # ≥70/30 buy-side
+            long_reasons.append(f"agg+{aggression_10s:.2f}")
+        elif aggression_10s <= -0.40:     # ≥70/30 sell-side
+            short_reasons.append(f"agg{aggression_10s:.2f}")
 
     # ----------------- COMBO-BONUS LAYER -----------------
     # Award an extra vote when 3+ specific high-quality reasons co-fire.
@@ -382,7 +405,7 @@ def evaluate(
 
     indicator_long = len(long_reasons)
     indicator_short = len(short_reasons)
-    INDICATOR_MAX = 23
+    INDICATOR_MAX = 24
 
     # ------------------------------------------------------------------ patterns
     candle_hits = patterns.detect(o, h, l, c)
@@ -408,7 +431,7 @@ def evaluate(
     if not np.isnan(a_for_regime):
         TREND_TAGS = ("ema_stack_", "supertrend_", "htf_", "btc_leader_",
                       "macd_up", "macd_down", "CMB:trend_pullback",
-                      "CMB:squeeze_breakout")
+                      "CMB:squeeze_breakout", "cvd_real", "cvd_proxy")
         REV_TAGS = ("DIV:", "sr_bounce_", "sr_reject_", "SMC:fvg_",
                     "SMC:liquidity_sweep_", "CMB:smc_reversal",
                     "CMB:bb_extreme_revert")
@@ -431,6 +454,14 @@ def evaluate(
     if session_weight is not None and session_weight > 0:
         combined_long *= session_weight
         combined_short *= session_weight
+
+    # Activity multiplier — derived from trade-tape print rate. Surge in
+    # tape activity = real conviction (boost slightly); below-baseline =
+    # market asleep (dampen more, asymmetric clamp 0.85–1.10). Stacks with
+    # session_weight so dead-hour + low-activity gets meaningful suppression.
+    if activity_mult is not None and activity_mult > 0:
+        combined_long *= activity_mult
+        combined_short *= activity_mult
 
     pat_long_names = [p.name for p in candle_hits if p.direction == "bullish"]
     pat_short_names = [p.name for p in candle_hits if p.direction == "bearish"]

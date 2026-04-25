@@ -127,22 +127,29 @@ class TradeFeed:
             recent.reverse()
             return recent
 
-    def get_cvd(self, symbol: str, window_secs: float = 60.0) -> float | None:
+    def get_cvd(
+        self, symbol: str, window_secs: float = 60.0, min_count: int = 5
+    ) -> float | None:
         """Cumulative volume delta over the last `window_secs`.
 
         Positive  = net buy aggression (more volume hitting the ask)
         Negative  = net sell aggression
-        None      = no data / stale feed.
+        None      = no data / stale feed / insufficient sample.
 
         Returned in BASE-COIN units (BTC, ETH, etc.) — consumers can
         convert to USD by multiplying by current price if needed.
+
+        `min_count` guards against firing on tiny samples (1-2 trades
+        right after WS connect would otherwise produce noisy signals).
         """
         recent = self._recent(symbol, window_secs)
-        if not recent:
+        if len(recent) < min_count:
             return None
         return sum(t.qty if t.is_buy else -t.qty for t in recent)
 
-    def get_aggression_ratio(self, symbol: str, window_secs: float = 10.0) -> float | None:
+    def get_aggression_ratio(
+        self, symbol: str, window_secs: float = 10.0, min_count: int = 5
+    ) -> float | None:
         """Buy/sell aggression ratio in [-1, +1] over short window.
 
         +1.0 = 100% buyer-initiated flow
@@ -150,10 +157,11 @@ class TradeFeed:
          0.0 = balanced
 
         Use a SHORT window (10s default) — this captures momentum bursts
-        that happen between bar closes.
+        that happen between bar closes. `min_count` ensures we don't read
+        a 1-trade sample as a perfect ±1.0 signal.
         """
         recent = self._recent(symbol, window_secs)
-        if not recent:
+        if len(recent) < min_count:
             return None
         buy_sz = sum(t.qty for t in recent if t.is_buy)
         sell_sz = sum(t.qty for t in recent if not t.is_buy)
@@ -161,6 +169,38 @@ class TradeFeed:
         if total <= 0:
             return None
         return (buy_sz - sell_sz) / total
+
+    def get_activity_multiplier(
+        self,
+        symbol: str,
+        recent_window: float = 10.0,
+        baseline_window: float = 300.0,
+        clamp_min: float = 0.85,
+        clamp_max: float = 1.10,
+    ) -> float | None:
+        """Activity-surge factor for use as a score multiplier.
+
+        Compares current print rate (recent_window) to baseline (5-min
+        trailing). Above-baseline = real conviction, boost; below-baseline
+        = market asleep, dampen.
+
+        Asymmetric clamp [0.85, 1.10] by default — we dampen more
+        aggressively than we boost. Boosting too much in low-quality
+        regimes is a way to overtrade; dampening protects against
+        firing on dead-market noise.
+
+        Returns None if either window has insufficient data.
+        """
+        recent_count = len(self._recent(symbol, recent_window))
+        baseline_count = len(self._recent(symbol, baseline_window))
+        if recent_count < 3 or baseline_count < 30:
+            return None
+        recent_rate = recent_count / recent_window
+        baseline_rate = baseline_count / baseline_window
+        if baseline_rate <= 0:
+            return None
+        raw = recent_rate / baseline_rate
+        return max(clamp_min, min(clamp_max, raw))
 
     def get_print_rate(self, symbol: str, window_secs: float = 10.0) -> float | None:
         """Trades per second over the window. Spikes = activity surge.
