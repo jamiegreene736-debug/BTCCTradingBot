@@ -102,6 +102,7 @@ def create_app(cfg: Config, client: BitunixClient) -> Flask:
                 "min_confluence": cfg.strategy.min_confluence,
                 "pattern_weight": cfg.strategy.pattern_weight,
                 "fire_threshold": cfg.strategy.fire_threshold,
+                "stop_loss_pct": cfg.risk.stop_loss_pct,
             },
             "bot": state.snapshot(),
             "now": int(time.time()),
@@ -320,11 +321,14 @@ function renderOpen(s) {
     const upnl = Number(p.unrealizedPNL || 0);
     const priceDelta = qty > 0 ? (upnl / qty) : 0;
     const mark = sideUp ? entry + priceDelta : entry - priceDelta;
-    // R-multiple favorable, measured against original SL distance from entry.
-    const slPx = Number(p.slPrice || 0);
-    const slDist = slPx ? Math.abs(entry - slPx) : 0;
+    // R-multiple measured against the ORIGINAL SL distance (entry × cfg pct),
+    // not the current ratcheted SL distance. After a break-even SL ratchet,
+    // the live SL is much closer to entry; using it would inflate R wildly
+    // (e.g. +5R when the trade is actually at +1R favorable).
+    const slPctCfg = Number((s.config && s.config.stop_loss_pct) || 0);
+    const origSlDist = (entry > 0 && slPctCfg > 0) ? entry * slPctCfg / 100 : 0;
     const favor = sideUp ? (mark - entry) : (entry - mark);
-    const r = slDist > 0 ? (favor / slDist) : null;
+    const r = origSlDist > 0 ? (favor / origSlDist) : null;
     // Age since opened.
     const age = p.ctime ? (now - Number(p.ctime)) : null;
     const sl = p.slPrice ? fmt(p.slPrice, 4) : '<span class="small">—</span>';
