@@ -41,11 +41,13 @@ risk:
   # CONSERVATIVE stop loss — tight, in % of entry price.
   stop_loss_pct: 0.25    # 0.25% price move = full SL at leverage
   # TAKE PROFIT — R-multiple of SL distance.
-  # Tightened: 1.5R = 0.375% target = faster fills + more turnover. Requires
-  # ~40% win rate for breakeven (vs 30% at 2.5R) but closes in minutes
-  # instead of hours. Critical at high leverage where stale trades bleed
-  # funding fees and the SL ratchet is the real winner-protector.
-  take_profit_r: 1.5
+  # Set to 2.5R after live-trade analysis showed 1.5R required 75% win rate
+  # to break even after fees (0.22% notional round-trip eats most of the win).
+  # 2.5R drops breakeven to ~54% — actually achievable. The adaptive_tp
+  # ladder already tightens over time (5-min: 2.5R, 10-min: 2.0R, 20-min:
+  # 1.5R, 40+min: ~1R floor), so we get the upside of a moonshot target
+  # on hot signals while flat trades still settle for fee-floor profits.
+  take_profit_r: 2.5
   use_atr: false
   atr_multiplier_sl: 0.8
   atr_multiplier_tp: 4.0
