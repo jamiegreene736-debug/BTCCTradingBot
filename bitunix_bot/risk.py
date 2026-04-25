@@ -1,9 +1,11 @@
-"""Risk manager — conservative SL, aggressive TP, leverage-aware sizing.
+"""Risk manager — fee-aware SL, aggressive TP, leverage-aware sizing.
 
 The user wants:
-  * extremely conservative stop loss       -> tight % (e.g. 0.25% of price)
-  * fairly aggressive take profit          -> multiple R (default 5R)
-  * extremely high leverage                -> amplifies position exposure
+  * fee-aware stop loss                    -> tight % of price (e.g. 0.40%
+                                              chosen to balance noise tolerance
+                                              vs fee-as-pct-of-risk)
+  * fairly aggressive take profit          -> multiple R (default 2.5R)
+  * pro-scalper leverage                   -> 25x sweet spot
   * % risk per trade                       -> caps loss as % of free margin
 
 Sizing math:

@@ -44,7 +44,7 @@ class TradingCfg:
     max_daily_dd_pct: float = 8.0
     # Pre-trade spread filter — refuse entries when (ask-bid)/mid exceeds
     # this %. Wide spread means single-tick adverse fills eat large chunks
-    # of the 0.25% SL budget.
+    # of the SL budget on entry.
     max_entry_spread_pct: float = 0.05
     # Post-only (maker) entries: place LIMIT orders at top-of-book with
     # POST_ONLY effect to qualify for maker fees (~0.02% vs 0.06% taker).
