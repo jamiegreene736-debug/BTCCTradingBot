@@ -565,9 +565,16 @@ class BitunixBot:
             # streak_loss_limit consecutive losses recently.
             paused_until = self.streak_pause_until.get(sym_u, 0)
             if paused_until and now < paused_until:
+                # Report the trigger (running counter is reset to 0 when the
+                # pause fires, so reading consec_losses here would always show
+                # 0 and confuse log readers). Derive how long ago the pause
+                # started from the pause's expiry time.
+                pause_started_at = paused_until - self.cfg.trading.streak_loss_pause_seconds
+                trigger_age_min = max(0, (now - pause_started_at) // 60)
                 self.state.record_skip(
                     f"{sym}: streak-paused for {(paused_until - now) // 60}m more "
-                    f"({self.consec_losses.get(sym_u, 0)} consecutive losses)"
+                    f"({self.cfg.trading.streak_loss_limit}-loss streak hit "
+                    f"{trigger_age_min}m ago)"
                 )
                 continue
 
