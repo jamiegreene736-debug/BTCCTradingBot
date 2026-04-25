@@ -44,6 +44,13 @@ trading:
   # At 50x with 0.25% SL, a 0.05% adverse spread eats 20% of risk budget
   # on entry alone. Wide spreads = bad time to enter.
   max_entry_spread_pct: 0.05
+  # Post-only maker entries: place a LIMIT order at top-of-book with
+  # POST_ONLY effect, save ~0.04% per round-trip in fees vs taker market.
+  # If the order doesn't fill in post_only_timeout_secs (because price ran
+  # away from us), cancel and place MARKET as fallback so we don't miss
+  # the move.
+  use_post_only_entries: true
+  post_only_timeout_secs: 8
 
 risk:
   # CONSERVATIVE stop loss — tight, in % of entry price.

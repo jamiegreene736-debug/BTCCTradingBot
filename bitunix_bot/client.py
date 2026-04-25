@@ -313,3 +313,14 @@ class BitunixClient:
             "/api/v1/futures/trade/flash_close_position",
             {"positionId": position_id},
         )
+
+    def cancel_order(self, symbol: str, order_id: str) -> dict[str, Any]:
+        """Cancel a single futures order by orderId.
+
+        POST /api/v1/futures/trade/cancel_orders. Bitunix takes a list
+        shape even for single cancellation; we pass a one-element orderList.
+        """
+        return self._post(
+            "/api/v1/futures/trade/cancel_orders",
+            {"symbol": symbol, "orderList": [{"orderId": str(order_id)}]},
+        )

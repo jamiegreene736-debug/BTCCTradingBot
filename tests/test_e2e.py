@@ -1377,6 +1377,283 @@ def test_sl_and_tp_always_on_correct_side():
         f"short SL/TP wrong: SL={plan.stop_loss} entry={plan.price} TP={plan.take_profit}"
 
 
+# ----------------------------------------------------------------- post-only maker entries
+
+
+class _FakeOBFeed:
+    """Connected OB feed stub with configurable top-of-book and spread."""
+    def __init__(self, bid: float = 60_000.0, ask: float = 60_002.0,
+                 spread_pct: float = 0.003, connected: bool = True):
+        self._bid = bid
+        self._ask = ask
+        self._spread_pct = spread_pct
+        self._connected = connected
+
+    def is_connected(self) -> bool:
+        return self._connected
+
+    def get_imbalance(self, sym, max_age_secs=30):
+        return None
+
+    def get_top_of_book(self, sym, max_age_secs=30):
+        return (self._bid, self._ask)
+
+    def get_spread_pct(self, sym):
+        return self._spread_pct
+
+
+def test_post_only_entry_places_limit_at_top_of_book():
+    """In live mode with a connected OB feed, the bot's first entry attempt
+    should be LIMIT POST_ONLY at top-of-book bid (long) — not market."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.trading.use_post_only_entries = True
+    cfg.trading.symbols = ["BTCUSDT"]
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+    bot.ob_feed = _FakeOBFeed(bid=60_000.0, ask=60_002.0)
+    bot._resolve_symbol_meta()
+    bot._tick()
+
+    # place_order called with order_type=LIMIT.
+    assert bot.client.place_order.called, "expected limit order placed"
+    kw = bot.client.place_order.call_args.kwargs
+    assert kw["order_type"] == "LIMIT", f"expected LIMIT, got {kw.get('order_type')}"
+    assert kw["side"] == "BUY", f"expected BUY (long), got {kw.get('side')}"
+    # Long → place at best bid (becomes a maker).
+    assert float(kw["price"]) == 60_000.0, f"expected limit at bid 60000, got {kw['price']}"
+    # POST_ONLY clientId tag.
+    assert str(kw["client_id"]).endswith("-PO"), f"clientId should end with -PO: {kw['client_id']}"
+    # SL/TP attached natively to the entry.
+    assert kw.get("sl_price") and kw.get("tp_price"), f"SL/TP missing: {kw}"
+    # Pending-limits tracking populated.
+    assert "BTCUSDT" in bot.pending_limits
+
+
+def test_post_only_falls_back_to_market_when_ob_feed_disconnected():
+    """If the OB feed isn't connected, post-only is skipped and we go straight
+    to MARKET — never place a limit blindly without a known book."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.trading.use_post_only_entries = True
+    cfg.trading.symbols = ["BTCUSDT"]
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+    bot.ob_feed = _FakeOBFeed(connected=False)
+    bot._resolve_symbol_meta()
+    bot._tick()
+
+    assert bot.client.place_order.called
+    kw = bot.client.place_order.call_args.kwargs
+    assert kw["order_type"] == "MARKET", f"expected MARKET fallback, got {kw.get('order_type')}"
+    assert "BTCUSDT" not in bot.pending_limits, "no pending limit when going straight to market"
+
+
+def test_post_only_timeout_cancels_and_falls_back_to_market():
+    """A pending post-only limit older than post_only_timeout_secs without
+    a corresponding open position must be cancelled, with a MARKET fallback
+    placed in its stead."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.trading.symbols = ["BTCUSDT"]
+    cfg.trading.post_only_timeout_secs = 8
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+    bot._resolve_symbol_meta()
+
+    # Pre-seed a stale pending limit (placed 30s ago, well past the 8s timeout).
+    from bitunix_bot.risk import OrderPlan
+    plan = OrderPlan(side="BUY", volume=0.001, price=60_000.0,
+                     stop_loss=59_850.0, take_profit=60_375.0,
+                     leverage=50, notes="test")
+    bot.pending_limits["BTCUSDT"] = {
+        "symbol": "BTCUSDT",
+        "order_id": "OLD_LIMIT",
+        "place_ts": int(time.time()) - 30,
+        "plan": plan,
+        "order_text": "LIVE BTCUSDT BUY qty=0.001 entry~60000.0 SL=59850.0 TP=60375.0 lev=50x",
+        "limit_px": 60_000.0,
+    }
+    bot.client.cancel_order.return_value = {"code": 0, "msg": "ok"}
+    bot.client.pending_positions.return_value = []  # not filled
+    bot._tick()
+
+    # Limit was cancelled by id.
+    bot.client.cancel_order.assert_called_once()
+    cancel_kw = bot.client.cancel_order.call_args.kwargs
+    assert cancel_kw["order_id"] == "OLD_LIMIT", \
+        f"cancel must target the stale limit; got {cancel_kw}"
+
+    # And a MARKET fallback was placed (the bot's market-entry path uses
+    # order_type=MARKET).
+    market_calls = [c for c in bot.client.place_order.call_args_list
+                    if c.kwargs.get("order_type") == "MARKET"]
+    assert market_calls, (
+        f"expected MARKET fallback after timeout; calls: "
+        f"{[c.kwargs for c in bot.client.place_order.call_args_list]}"
+    )
+
+    # Pending tracking cleared after the fallback.
+    assert "BTCUSDT" not in bot.pending_limits
+
+    # Cooldown set so the per-symbol loop later in this tick doesn't try yet
+    # another entry on the same symbol.
+    assert bot.last_action_at.get("BTCUSDT", 0) > 0, \
+        "cooldown should be set on market fallback to block immediate re-entry"
+
+
+def test_post_only_fill_clears_pending_tracking():
+    """When a position now exists for the symbol of a tracked pending limit,
+    treat it as filled and clear tracking (no cancel, no fallback)."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.trading.symbols = ["BTCUSDT"]
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+
+    from bitunix_bot.risk import OrderPlan
+    plan = OrderPlan(side="BUY", volume=0.001, price=60_000.0,
+                     stop_loss=59_850.0, take_profit=60_375.0,
+                     leverage=50, notes="test")
+    bot.pending_limits["BTCUSDT"] = {
+        "symbol": "BTCUSDT", "order_id": "FILLED_LIMIT",
+        "place_ts": int(time.time()),  # fresh — not timed out
+        "plan": plan,
+        "order_text": "...",
+        "limit_px": 60_000.0,
+    }
+    # Position now exists for BTC → simulates the limit having filled.
+    bot.client.pending_positions.return_value = [{
+        "positionId": "P1", "symbol": "BTCUSDT", "qty": "0.001",
+        "side": "BUY", "leverage": 50,
+        "ctime": int(time.time() * 1000),
+        "avgOpenPrice": "60000.0", "unrealizedPNL": "0",
+    }]
+    # _manage_open_positions reads pending_tpsl — return empty list to skip cleanly.
+    bot.client.pending_tpsl.return_value = []
+    bot._resolve_symbol_meta()
+    bot._tick()
+
+    assert "BTCUSDT" not in bot.pending_limits, "tracking should be cleared on fill"
+    bot.client.cancel_order.assert_not_called()  # no cancel — it filled
+    # State should record the fill confirmation in the activity feed.
+    orders = [e for e in bot.state.snapshot()["events"] if e["kind"] == "order"]
+    assert any("MAKER FILLED" in e["text"] for e in orders), \
+        f"expected MAKER FILLED order event, got {[e['text'] for e in orders]}"
+
+
+def test_pending_limits_count_toward_global_cap():
+    """A pending post-only limit must occupy a slot in max_open_positions —
+    otherwise we'd oversize while waiting for the limit to fill."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.trading.max_open_positions = 1
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+    bot.ob_feed = _FakeOBFeed()  # connected so post-only path is the default
+
+    # Pre-seed a fresh pending limit on BTC that should fully occupy the cap.
+    from bitunix_bot.risk import OrderPlan
+    plan = OrderPlan(side="BUY", volume=0.001, price=60_000.0,
+                     stop_loss=59_850.0, take_profit=60_375.0,
+                     leverage=50, notes="test")
+    bot.pending_limits["BTCUSDT"] = {
+        "symbol": "BTCUSDT", "order_id": "L_HOLD",
+        "place_ts": int(time.time()), "plan": plan,
+        "order_text": "...", "limit_px": 60_000.0,
+    }
+    bot.client.pending_positions.return_value = []
+    bot._resolve_symbol_meta()
+    bot._tick()
+
+    # No new place_order call should happen — the global cap (1) is fully
+    # occupied by the pending limit.
+    assert not bot.client.place_order.called, (
+        f"global cap should block new entries while a limit pending; "
+        f"calls={[c.kwargs for c in bot.client.place_order.call_args_list]}"
+    )
+
+
+def test_pending_limits_count_toward_same_direction_cap():
+    """A pending LONG limit + an existing LONG position should saturate
+    max_same_direction=2, blocking further LONG entries on other symbols."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.trading.max_open_positions = 4
+    cfg.trading.max_same_direction = 2
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+    bot.ob_feed = _FakeOBFeed()
+
+    # 1 actual LONG already open on BTC.
+    bot.client.pending_positions.return_value = [{
+        "positionId": "P1", "symbol": "BTCUSDT", "qty": "0.01",
+        "side": "BUY", "leverage": 50, "ctime": int(time.time() * 1000),
+        "avgOpenPrice": "60000.0", "unrealizedPNL": "0",
+    }]
+    bot.client.pending_tpsl.return_value = []
+    # 1 pending LONG limit on ETH → effective LONG count = 2 (saturated).
+    from bitunix_bot.risk import OrderPlan
+    plan = OrderPlan(side="BUY", volume=0.01, price=3_000.0,
+                     stop_loss=2_992.5, take_profit=3_018.75,
+                     leverage=50, notes="test")
+    bot.pending_limits["ETHUSDT"] = {
+        "symbol": "ETHUSDT", "order_id": "L_ETH",
+        "place_ts": int(time.time()), "plan": plan,
+        "order_text": "...", "limit_px": 3_000.0,
+    }
+    bot._resolve_symbol_meta()
+    bot._tick()
+
+    # SOL/XRP would otherwise long the uptrend — but same-direction cap should
+    # now block them. Expect at least one same-direction skip in events.
+    skips = [e for e in bot.state.snapshot()["events"] if e["kind"] == "skip"]
+    assert any("same-direction" in s["text"] for s in skips), \
+        f"expected same-direction skip; got skips={[s['text'] for s in skips]}"
+    # And no new place_order calls were made (existing LONG + pending LONG saturate).
+    new_orders = [c for c in bot.client.place_order.call_args_list
+                  if c.kwargs.get("trade_side") == "OPEN"]
+    assert not new_orders, (
+        f"saturated direction cap should block new LONG entries; "
+        f"calls={[c.kwargs for c in new_orders]}"
+    )
+
+
+def test_post_only_paper_mode_still_uses_paper_path():
+    """Paper mode should not engage the post-only flow at all — it just
+    records the simulated order and returns. No place_order, no pending
+    limits tracked."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "paper"
+    cfg.trading.use_post_only_entries = True
+    cfg.trading.symbols = ["BTCUSDT"]
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+    bot.ob_feed = _FakeOBFeed()
+    bot._resolve_symbol_meta()
+    bot._tick()
+
+    bot.client.place_order.assert_not_called()  # paper never sends real orders
+    assert not bot.pending_limits, "paper should not track pending limits"
+    # Paper mode should still record the simulated order in the activity feed.
+    orders = [e for e in bot.state.snapshot()["events"] if e["kind"] == "order"]
+    assert orders, "paper mode should still emit a simulated order event"
+
+
 # ----------------------------------------------------------------- runner
 
 def main() -> int:
@@ -1428,6 +1705,13 @@ def main() -> int:
         test_partial_tp_fires_at_1r_and_only_once,
         test_regime_weighting_boosts_aligned_signals,
         test_sl_and_tp_always_on_correct_side,
+        test_post_only_entry_places_limit_at_top_of_book,
+        test_post_only_falls_back_to_market_when_ob_feed_disconnected,
+        test_post_only_timeout_cancels_and_falls_back_to_market,
+        test_post_only_fill_clears_pending_tracking,
+        test_pending_limits_count_toward_global_cap,
+        test_pending_limits_count_toward_same_direction_cap,
+        test_post_only_paper_mode_still_uses_paper_path,
     ]
     passed = failed = 0
     for t in tests:

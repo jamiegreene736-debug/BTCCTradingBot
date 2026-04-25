@@ -89,6 +89,11 @@ class BitunixBot:
         # Partial-TP tracking: positionId set of those that already had
         # the +1R partial close fired. Prevents double-firing.
         self.partial_tp_done: set[str] = set()
+        # Post-only entry tracking: symbol_u -> dict with order_id, place_ts, plan.
+        # When a limit hits and a position appears, entry is removed. When the
+        # timeout expires without a fill, the limit is cancelled and a market
+        # fallback is placed.
+        self.pending_limits: dict[str, dict[str, Any]] = {}
         # Live order-book feed (WebSocket). Started in start() / run_forever().
         self.ob_feed: OrderBookFeed | None = None
         self.stop_flag = False
@@ -382,6 +387,13 @@ class BitunixBot:
         # 1. Snapshot global state once per tick.
         all_open = [p for p in self.client.pending_positions() if float(p.get("qty") or 0) != 0]
 
+        # 1b. Sweep post-only pending limits BEFORE position management:
+        #   - if a position now exists for the symbol → entry filled, clear tracking
+        #   - if timeout exceeded → cancel the limit and place market fallback
+        # Runs only in live mode (paper mode never tracks pending limits).
+        if self.cfg.is_live:
+            self._check_pending_limits(all_open)
+
         # Time-based exit: force-close stale positions, but only if the
         # position is at a loss when time_exit_only_if_losing=True. Winners
         # past max-age stay alive under the SL ratchet — proven signals
@@ -429,6 +441,18 @@ class BitunixBot:
                 long_count += 1
             elif side == "SELL" or side == "SHORT":
                 short_count += 1
+
+        # Include pending post-only limits in cap math — they're "almost"
+        # positions. Without this, a tick that just placed a maker limit would
+        # think it has free slots and place ANOTHER order before the limit fills.
+        for sym_pl, info in self.pending_limits.items():
+            per_sym_count[sym_pl] = per_sym_count.get(sym_pl, 0) + 1
+            side_pl = str(info["plan"].side).upper()
+            if side_pl == "BUY":
+                long_count += 1
+            elif side_pl == "SELL":
+                short_count += 1
+        n_open += len(self.pending_limits)
 
         self.state.record_tick(None, len(all_open))
 
@@ -831,10 +855,77 @@ class BitunixBot:
         if not self.cfg.is_live:
             self.state.record_order(order_text + " (paper)")
             return True
-        # Deterministic clientId per (symbol, minute, side) so a network
-        # retry within the same minute hits Bitunix's natural duplicate-id
-        # rejection and we can't accidentally double-up. After the minute
-        # rolls over, the next signal naturally has a different bucket.
+
+        # Try post-only maker entry first (saves ~0.04% per round-trip in fees).
+        # If the OB feed isn't ready or post-only is rejected, fall through to
+        # market. The pending limit is tracked; _check_pending_limits will
+        # cancel + market-fallback if it doesn't fill within timeout.
+        if (self.cfg.trading.use_post_only_entries
+                and self.ob_feed
+                and self.ob_feed.is_connected()):
+            if self._try_post_only(symbol, plan, order_text):
+                return True
+            log.info("Post-only path failed/skipped for %s; using market", symbol)
+
+        return self._place_market(symbol, plan, order_text)
+
+    def _try_post_only(self, symbol: str, plan: OrderPlan, order_text: str) -> bool:
+        """Attempt a POST_ONLY limit entry at top-of-book. Returns True if
+        successfully placed (tracked for timeout sweep), False on any failure
+        so caller can fall through to market."""
+        sym_u = symbol.upper()
+        tob = self.ob_feed.get_top_of_book(sym_u)
+        if not tob:
+            return False
+        bid, ask = tob
+        is_long = plan.side == "BUY"
+        meta = self.metas.get(symbol, _DEFAULT_META)
+        # Long → place at best bid (rest on the book as a maker).
+        # Short → place at best ask.
+        limit_px = round(bid if is_long else ask, meta.price_precision)
+        # If our chosen price would already be a taker (rare race), bail to market.
+        if (is_long and limit_px > ask) or ((not is_long) and limit_px < bid):
+            return False
+        minute_bucket = int(time.time()) // 60
+        client_id = f"bot-{symbol}-{minute_bucket}-{plan.side}-PO"
+        try:
+            resp = self.client.place_order(
+                symbol=symbol,
+                side=plan.side,
+                qty=str(plan.volume),
+                order_type="LIMIT",
+                price=str(limit_px),
+                trade_side="OPEN",
+                tp_price=str(plan.take_profit),
+                sl_price=str(plan.stop_loss),
+                client_id=client_id,
+            )
+            order_id = resp.get("orderId")
+            if not order_id:
+                return False
+            self.pending_limits[sym_u] = {
+                "symbol": symbol,
+                "order_id": str(order_id),
+                "place_ts": int(time.time()),
+                "plan": plan,
+                "order_text": order_text,
+                "limit_px": limit_px,
+            }
+            log.info("MAKER %s LIMIT @ %s POST_ONLY orderId=%s", symbol, limit_px, order_id)
+            self.state.record_order(
+                f"{symbol} MAKER {plan.side} qty={plan.volume} @ {limit_px} (POST_ONLY)"
+            )
+            return True
+        except BitunixError as e:
+            # POST_ONLY rejection (would-cross), validation, etc — fall through.
+            log.info("Post-only rejected for %s: %s — falling back to market", symbol, e.msg)
+            return False
+        except Exception as e:
+            log.warning("Post-only network error for %s: %s", symbol, e)
+            return False
+
+    def _place_market(self, symbol: str, plan: OrderPlan, order_text: str) -> bool:
+        """Market entry with deterministic clientId and full error handling."""
         minute_bucket = int(time.time()) // 60
         client_id = f"bot-{symbol}-{minute_bucket}-{plan.side}"
         try:
@@ -856,10 +947,46 @@ class BitunixBot:
             self.state.record_error(f"{symbol} order rejected: {e.code} {e.msg}")
             return False
         except Exception as e:
-            # Network timeout / DNS / SSL — we don't know if Bitunix accepted
-            # the order. Don't retry next tick blindly: the per-symbol cap
-            # check in _tick (against fresh pending_positions) will handle the
-            # case where Bitunix DID place the order. Mark as error for visibility.
             log.error("place_order network/unknown failure for %s: %s", symbol, e)
             self.state.record_error(f"{symbol} order failure (unknown state): {e}")
             return False
+
+    def _check_pending_limits(self, all_open_positions: list[dict[str, Any]]) -> None:
+        """Sweep pending post-only limit entries:
+          - if a position now exists for the symbol → entry filled, clear tracking
+          - if timeout exceeded → cancel limit + place market fallback
+        """
+        if not self.pending_limits:
+            return
+        now = int(time.time())
+        timeout = self.cfg.trading.post_only_timeout_secs
+        open_by_sym = {str(p.get("symbol", "")).upper() for p in all_open_positions}
+        for sym_u, info in list(self.pending_limits.items()):
+            # Filled? A position now exists for this symbol.
+            if sym_u in open_by_sym:
+                log.info("MAKER fill confirmed for %s (orderId=%s)", sym_u, info["order_id"])
+                self.state.record_order(f"{sym_u} MAKER FILLED orderId={info['order_id']}")
+                del self.pending_limits[sym_u]
+                continue
+            # Timed out → cancel + market fallback.
+            age = now - info["place_ts"]
+            if age >= timeout:
+                try:
+                    self.client.cancel_order(symbol=info["symbol"], order_id=info["order_id"])
+                except Exception as e:
+                    log.warning("Cancel pending limit for %s failed: %s", sym_u, e)
+                log.info("MAKER timeout %s after %ds; falling back to MARKET", sym_u, age)
+                self.state.record_skip(
+                    f"{sym_u}: post-only didn't fill in {age}s, market fallback"
+                )
+                # Remove BEFORE placing market so we don't double-track.
+                plan = info["plan"]
+                order_text = info["order_text"]
+                del self.pending_limits[sym_u]
+                placed = self._place_market(info["symbol"], plan, order_text)
+                # Refresh cooldown so the per-symbol loop later in this tick
+                # doesn't immediately try another entry on the same symbol.
+                # Without this, the symbol would re-fire (the original pending
+                # limit was just cleared from cap-tracking).
+                if placed:
+                    self.last_action_at[sym_u] = now

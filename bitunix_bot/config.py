@@ -46,6 +46,12 @@ class TradingCfg:
     # this %. Wide spread means single-tick adverse fills eat large chunks
     # of the 0.25% SL budget.
     max_entry_spread_pct: float = 0.05
+    # Post-only (maker) entries: place LIMIT orders at top-of-book with
+    # POST_ONLY effect to qualify for maker fees (~0.02% vs 0.06% taker).
+    # If the order doesn't fill within post_only_timeout_secs, cancel it
+    # and fall back to a market order. Saves ~0.04% per round-trip.
+    use_post_only_entries: bool = True
+    post_only_timeout_secs: int = 8
 
 
 @dataclass
