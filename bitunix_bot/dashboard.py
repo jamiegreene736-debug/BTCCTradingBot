@@ -225,7 +225,8 @@ function renderOpen(s) {
   const t = document.getElementById('open-positions');
   const rows = s.open_positions || [];
   t.querySelector('thead').innerHTML = `<tr><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Mark</th><th>uPnL</th><th>Lev</th><th>Mode</th><th>Liq</th></tr>`;
-  if (!rows.length) { t.querySelector('tbody').innerHTML = `<tr><td colspan="9" class="small">No open positions.</td></tr>`; return; }
+  if (s.open_positions_error) { t.querySelector('tbody').innerHTML = `<tr><td colspan="9" class="ev-error">API error: ${s.open_positions_error}</td></tr>`; return; }
+  if (!rows.length) { t.querySelector('tbody').innerHTML = `<tr><td colspan="9" class="small">No open positions (paper mode never opens real ones — see Recent activity for paper trades).</td></tr>`; return; }
   t.querySelector('tbody').innerHTML = rows.map(p => `
     <tr>
       <td>${p.symbol||''}</td>
@@ -258,7 +259,8 @@ function renderHistPos(s) {
   const t = document.getElementById('hist-pos');
   const rows = s.history_positions || [];
   t.querySelector('thead').innerHTML = `<tr><th>Closed</th><th>Symbol</th><th>Side</th><th>Qty</th><th>Entry</th><th>Close</th><th>Realized PnL</th><th>Fee</th><th>Lev</th></tr>`;
-  if (!rows.length) { t.querySelector('tbody').innerHTML = `<tr><td colspan="9" class="small">No closed positions yet.</td></tr>`; return; }
+  if (s.history_positions_error) { t.querySelector('tbody').innerHTML = `<tr><td colspan="9" class="ev-error">API error: ${s.history_positions_error}</td></tr>`; return; }
+  if (!rows.length) { t.querySelector('tbody').innerHTML = `<tr><td colspan="9" class="small">No closed positions yet (paper mode never reaches Bitunix).</td></tr>`; return; }
   t.querySelector('tbody').innerHTML = rows.map(p => `
     <tr>
       <td>${tsfmt(p.mtime)}</td>
@@ -278,7 +280,8 @@ function renderHistOrd(s) {
   const t = document.getElementById('hist-ord');
   const rows = s.history_orders || [];
   t.querySelector('thead').innerHTML = `<tr><th>Placed</th><th>Symbol</th><th>Side</th><th>Type</th><th>Qty</th><th>Price</th><th>Status</th><th>SL</th><th>TP</th><th>Realized</th></tr>`;
-  if (!rows.length) { t.querySelector('tbody').innerHTML = `<tr><td colspan="10" class="small">No orders yet.</td></tr>`; return; }
+  if (s.history_orders_error) { t.querySelector('tbody').innerHTML = `<tr><td colspan="10" class="ev-error">API error: ${s.history_orders_error}</td></tr>`; return; }
+  if (!rows.length) { t.querySelector('tbody').innerHTML = `<tr><td colspan="10" class="small">No orders yet (paper mode never reaches Bitunix).</td></tr>`; return; }
   t.querySelector('tbody').innerHTML = rows.map(o => `
     <tr>
       <td>${tsfmt(o.ctime)}</td>

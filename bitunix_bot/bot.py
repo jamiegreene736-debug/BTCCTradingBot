@@ -256,8 +256,13 @@ class BitunixBot:
                     return
             free_margin = float(cached_acct.get("available") or 0)
             if free_margin <= 0:
-                self.state.record_skip(f"{sym}: no available margin")
-                return  # no point checking other symbols
+                if not self.cfg.is_live:
+                    # Paper mode: pretend we have $1k so the dashboard shows
+                    # what the bot WOULD do regardless of real balance.
+                    free_margin = 1000.0
+                else:
+                    self.state.record_skip(f"{sym}: no available margin")
+                    return  # no point checking other symbols in live mode
 
             meta = self.metas.get(sym, _DEFAULT_META)
             plan = build_order(
