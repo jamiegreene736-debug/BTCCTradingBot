@@ -69,15 +69,22 @@ trading:
   post_only_timeout_secs: 8
 
 risk:
-  # CONSERVATIVE stop loss — tight, in % of entry price.
-  stop_loss_pct: 0.25    # 0.25% price move = full SL at leverage
+  # STOP LOSS — % of entry price.
+  # Widened from 0.25% → 0.40% as a structural fee reduction. Math:
+  #   notional = risk / sl_pct, fee = fee_pct × notional.
+  #   Halving sl_pct doubles notional, doubling fees per trade.
+  #   Going from 0.25% → 0.40% SL cuts notional from $184 → $115 on $46
+  #   account at 1% risk, dropping per-trade fees from $0.31 → $0.15.
+  #   Round-trip fee as % of risk budget: was 67%, now 33%. Big win.
+  # Also: 0.25% was inside typical 1m ATR for ETH/SOL/XRP, getting stopped
+  # out on bar-internal noise. 0.40% sits cleanly outside chop bands.
+  stop_loss_pct: 0.40
   # TAKE PROFIT — R-multiple of SL distance.
-  # Set to 2.5R after live-trade analysis showed 1.5R required 75% win rate
-  # to break even after fees (0.22% notional round-trip eats most of the win).
-  # 2.5R drops breakeven to ~54% — actually achievable. The adaptive_tp
-  # ladder already tightens over time (5-min: 2.5R, 10-min: 2.0R, 20-min:
-  # 1.5R, 40+min: ~1R floor), so we get the upside of a moonshot target
-  # on hot signals while flat trades still settle for fee-floor profits.
+  # 2.5R kept (drops breakeven from ~75% at 1.5R to ~38% at 0.40%×2.5R after
+  # maker fees). With wider SL the TP target in price terms becomes 1.00%
+  # (was 0.625%) — still well within typical 1m directional moves on alts.
+  # Adaptive TP ladder still tightens over time (5/10/20/40-min tiers) so
+  # flat trades settle at the 0.7R fee-aware floor rather than time-exiting.
   take_profit_r: 2.5
   use_atr: false
   atr_multiplier_sl: 0.8
@@ -94,11 +101,14 @@ risk:
   breakeven_buffer_pct: 0.05    # tiny cushion above entry to cover round-trip fees
   trailing_activate_r: 1.5
   trailing_distance_r: 0.5
-  # Round-trip fee + slippage estimate as % of notional (Bitunix taker × 2 ≈
-  # 0.12% + 0.05% slippage). The bot guarantees TP will always be at least
-  # adaptive_tp_floor_r × SL distance which exceeds this fee buffer, so a
-  # winning trade ALWAYS nets profit after fees.
-  round_trip_fee_pct: 0.17
+  # Round-trip fee + slippage estimate as % of notional. With maker entries
+  # (post-only LIMIT at top of book) most fills are maker (~0.04% per side
+  # vs ~0.06% taker), some fall back to market. Blended estimate:
+  #   0.7 × maker_round_trip + 0.3 × taker_round_trip + slippage
+  #   ≈ 0.7 × 0.10% + 0.3 × 0.13% + 0.04% ≈ 0.15%
+  # The bot guarantees TP will always be at least adaptive_tp_floor_r × SL
+  # distance which exceeds this fee buffer, so winning trades ALWAYS net.
+  round_trip_fee_pct: 0.15
   # Adaptive TP — as a position ages without hitting the original target,
   # tighten the TP progressively. We always aim for profit (TP stays above
   # fee floor), but accept smaller wins on flat trades rather than letting

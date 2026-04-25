@@ -467,12 +467,18 @@ def test_dashboard_routes_and_auth():
 def _setup_bot_with_open_position(side: str, entry: float, current_price: float,
                                    qty: float = 0.01, original_sl: float | None = None,
                                    original_tp: float | None = None,
+                                   stop_loss_pct: float = 0.25,
                                    breakeven_at_r=1.0, trailing_activate_r=1.5,
                                    trailing_distance_r=0.5, buffer_pct=0.05):
-    """Helper: build a live-mode bot with one open position and the given TPSL state."""
+    """Helper: build a live-mode bot with one open position and the given TPSL state.
+
+    `stop_loss_pct` is pinned (default 0.25) so SL-ratchet tests aren't
+    coupled to whatever production config is set to — they test the logic
+    at fixed reference numbers."""
     reset_state()
     cfg = fresh_cfg()
     cfg.mode = "live"
+    cfg.risk.stop_loss_pct = stop_loss_pct
     cfg.risk.breakeven_at_r = breakeven_at_r
     cfg.risk.breakeven_buffer_pct = buffer_pct
     cfg.risk.trailing_activate_r = trailing_activate_r
