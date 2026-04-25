@@ -3004,6 +3004,40 @@ def test_mini_cooldown_does_not_fire_for_isolated_loss():
     assert "BTCUSDT" not in bot.mini_cooldown_until
 
 
+def test_journal_entry_mechanism_fields():
+    """Entry record must include entry_mechanism + limit_price + tob_bid/ask
+    + dynamic_timeout_secs so adverse-selection patterns can be analyzed."""
+    import tempfile
+    import json
+    from bitunix_bot.journal import TradeJournal
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "trades.jsonl"
+        j = TradeJournal(path)
+        j.record_entry(
+            symbol="BTCUSDT", side="BUY", client_id="bot-BTCUSDT-1-BUY-PO",
+            order_type="LIMIT", score=0.65, threshold_used=0.50,
+            conviction_mult=1.30, indicator_count=12, pattern_score=1.5,
+            reasons=["x"], atr_pct=0.04, adx=25.0, spread_pct=0.012,
+            bid_depth=12.0, ask_depth=10.0,
+            aggression_10s=0.20, real_cvd=2.0, activity_mult=1.0,
+            session_weight=1.0, entry_price=60000.0,
+            stop_loss=59760.0, take_profit=60600.0,
+            notional=100.0, leverage=25,
+            # New fields:
+            entry_mechanism="MAKER_LIMIT_POST_ONLY",
+            limit_price=59999.5,
+            tob_bid=59999.5,
+            tob_ask=60000.5,
+            dynamic_timeout_secs=8,
+        )
+        rec = json.loads(path.read_text().strip())
+        assert rec["entry_mechanism"] == "MAKER_LIMIT_POST_ONLY"
+        assert rec["limit_price"] == 59999.5
+        assert rec["tob_bid"] == 59999.5
+        assert rec["tob_ask"] == 60000.5
+        assert rec["dynamic_timeout_secs"] == 8
+
+
 def test_journal_writes_entry_and_exit():
     """TradeJournal should append JSONL events for entry + exit."""
     import tempfile
@@ -4030,6 +4064,7 @@ def main() -> int:
         test_mini_cooldown_fires_on_two_losses_in_window,
         test_mini_cooldown_blocks_new_entries,
         test_mini_cooldown_does_not_fire_for_isolated_loss,
+        test_journal_entry_mechanism_fields,
         test_journal_writes_entry_and_exit,
         test_journal_handles_missing_dir_gracefully,
         test_fire_threshold_lowers_in_trending_regime,

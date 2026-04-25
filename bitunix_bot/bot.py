@@ -982,13 +982,34 @@ class BitunixBot:
                 # connected), clientId omits "-PO". We use the same minute
                 # bucket they did.
                 minute_bucket = int(time.time()) // 60
-                cid_suffix = "-PO" if sym_u in self.pending_limits else ""
+                pl_info = self.pending_limits.get(sym_u)
+                if pl_info is not None:
+                    entry_mechanism = "MAKER_LIMIT_POST_ONLY"
+                    limit_price_used = pl_info.get("limit_px")
+                    dynamic_timeout = pl_info.get("timeout_secs")
+                    tob_bid_at_entry = pl_info.get("tob_bid")
+                    tob_ask_at_entry = pl_info.get("tob_ask")
+                    cid_suffix = "-PO"
+                    order_type_logged = "LIMIT"
+                else:
+                    entry_mechanism = "MARKET"
+                    limit_price_used = None
+                    dynamic_timeout = None
+                    # Fall back to current top-of-book snapshot if the OB
+                    # feed is connected (entry just happened so this is
+                    # within ~1 tick of the order's market context).
+                    tob_now = (self.ob_feed.get_top_of_book(sym)
+                               if self.ob_feed else None)
+                    tob_bid_at_entry = tob_now[0] if tob_now else None
+                    tob_ask_at_entry = tob_now[1] if tob_now else None
+                    cid_suffix = ""
+                    order_type_logged = "MARKET"
                 client_id_journal = f"bot-{sym}-{minute_bucket}-{plan.side}{cid_suffix}"
                 self.journal.record_entry(
                     symbol=sym,
                     side=plan.side,
                     client_id=client_id_journal,
-                    order_type=("LIMIT" if sym_u in self.pending_limits else "MARKET"),
+                    order_type=order_type_logged,
                     score=sig.score,
                     threshold_used=sig.fire_threshold_used,
                     conviction_mult=conviction_mult,
@@ -1011,6 +1032,11 @@ class BitunixBot:
                     adaptive_adj=adaptive_adj,
                     recent_trade_r_sum=(sum(self.recent_trade_r)
                                         if len(self.recent_trade_r) > 0 else None),
+                    entry_mechanism=entry_mechanism,
+                    limit_price=limit_price_used,
+                    tob_bid=tob_bid_at_entry,
+                    tob_ask=tob_ask_at_entry,
+                    dynamic_timeout_secs=dynamic_timeout,
                     entry_price=plan.price,
                     stop_loss=plan.stop_loss,
                     take_profit=plan.take_profit,
@@ -1437,6 +1463,11 @@ class BitunixBot:
                 "order_text": order_text,
                 "limit_px": limit_px,
                 "timeout_secs": timeout_secs,
+                # Top-of-book snapshot at placement — feeds the journal so
+                # downstream analysis can spot adverse-selection patterns
+                # (limit always at the bid/ask side that price walks away from).
+                "tob_bid": float(bid),
+                "tob_ask": float(ask),
             }
             log.info("MAKER %s LIMIT @ %s POST_ONLY orderId=%s timeout=%ds",
                      symbol, limit_px, order_id, timeout_secs)

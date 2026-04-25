@@ -94,6 +94,11 @@ class TradeJournal:
         factor_context: float | None = None,
         adaptive_adj: float | None = None,
         recent_trade_r_sum: float | None = None,
+        entry_mechanism: str | None = None,
+        limit_price: float | None = None,
+        tob_bid: float | None = None,
+        tob_ask: float | None = None,
+        dynamic_timeout_secs: int | None = None,
     ) -> None:
         """Log all available signal + execution context at entry time.
 
@@ -127,6 +132,17 @@ class TradeJournal:
             "session_weight": session_weight,
             "adaptive_adj": adaptive_adj,
             "recent_trade_r_sum": recent_trade_r_sum,
+            # Execution-mechanism context — distinguishes MAKER_LIMIT_POST_ONLY
+            # (rests on book at top-of-book bid/ask) from MARKET (taker, taken
+            # immediately). limit_price is the actual limit-order price (None
+            # for market). tob_bid / tob_ask captured at order placement.
+            # dynamic_timeout_secs is the activity-scaled timeout assigned
+            # to the post-only order (4-12s clamped); None for market.
+            "entry_mechanism": entry_mechanism,
+            "limit_price": limit_price,
+            "tob_bid": tob_bid,
+            "tob_ask": tob_ask,
+            "dynamic_timeout_secs": dynamic_timeout_secs,
             "entry_price": entry_price,
             "stop_loss": stop_loss,
             "take_profit": take_profit,
