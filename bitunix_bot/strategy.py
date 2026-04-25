@@ -4,13 +4,16 @@ Inputs: rolling candles.
 Output: a Signal(direction, confluence_score, atr) or None.
 
 Rules (long side — short is mirror):
-  1. EMA trend:   ema_fast > ema_mid > ema_slow            (trend)
-  2. Close cross: close crossed above ema_fast             (entry trigger)
-  3. RSI:         rsi in [rsi_long_min, rsi_long_max]      (momentum window)
-  4. MACD:        macd line > signal AND hist > prev hist  (rising momentum)
-  5. Bollinger:   close > bb_mid (above basis, not hugging lower band)
+  1. EMA trend:    ema_fast > ema_mid > ema_slow             (trend stack)
+  2. Close cross:  close crossed above ema_fast              (entry trigger)
+  3. RSI:          rsi in [rsi_long_min, rsi_long_max]       (momentum window)
+  4. MACD:         macd line > signal AND hist > prev hist   (rising momentum)
+  5. Bollinger:    close > bb_mid                            (above basis)
+  6. ADX:          adx > adx_min                             (trend strength filter)
+  7. Supertrend:   supertrend direction = +1 (or -1 short)   (regime filter)
 
-Require `min_confluence` of these 5 rules to fire.
+Require `min_confluence` of these 7 rules to fire. ADX + Supertrend are the
+biggest whipsaw killers; recommended floor is 4-of-7 for live trading.
 """
 from __future__ import annotations
 
@@ -21,8 +24,10 @@ from typing import Literal
 import numpy as np
 
 from .config import StrategyCfg
+from .indicators import adx as adx_fn
 from .indicators import atr as atr_fn
 from .indicators import bollinger, ema, macd, rsi
+from .indicators import supertrend as supertrend_fn
 
 log = logging.getLogger(__name__)
 
@@ -63,6 +68,8 @@ def evaluate(
     macd_l, macd_s, macd_h = macd(c, cfg.macd_fast, cfg.macd_slow, cfg.macd_signal)
     bb_up, bb_mid, bb_lo = bollinger(c, cfg.bb_period, cfg.bb_std)
     atr_v = atr_fn(h, l, c, cfg.atr_period)
+    adx_v = adx_fn(h, l, c, cfg.adx_period)
+    _, st_dir = supertrend_fn(h, l, c, cfg.supertrend_period, cfg.supertrend_mult)
 
     i = len(c) - 1
     p = c[i]
@@ -103,6 +110,20 @@ def evaluate(
             long_reasons.append("above_bb_mid")
         if p < bb_mid[i]:
             short_reasons.append("below_bb_mid")
+
+    # 6. ADX — trend strength filter (single-sided: counts for whichever side
+    # is otherwise winning, since ADX is direction-agnostic).
+    a = adx_v[i] if i < len(adx_v) else np.nan
+    if not np.isnan(a) and a >= cfg.adx_min:
+        long_reasons.append(f"adx_strong({a:.0f})")
+        short_reasons.append(f"adx_strong({a:.0f})")
+
+    # 7. Supertrend regime.
+    if i < len(st_dir) and not np.isnan(st_dir[i]):
+        if st_dir[i] == 1:
+            long_reasons.append("supertrend_up")
+        elif st_dir[i] == -1:
+            short_reasons.append("supertrend_down")
 
     long_score = len(long_reasons)
     short_score = len(short_reasons)

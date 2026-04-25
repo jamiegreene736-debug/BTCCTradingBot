@@ -1,8 +1,13 @@
-"""Main trading loop.
+"""Main trading loop — multi-symbol, cooldown-aware, bar-deduped.
 
-One-position-at-a-time model: look for a confluence signal → place order with
-native tpPrice/slPrice attached (Bitunix enforces both server-side) → wait
-for the position to close → repeat. No fill-tracking state machine needed.
+Per tick:
+  1. Pull all open positions and the account once.
+  2. For each configured symbol:
+     - Skip if already holding (max_positions_per_symbol reached).
+     - Skip if cooldown window not elapsed.
+     - Skip if global max_open_positions reached.
+     - Skip if no fresh bar (last bar's timestamp unchanged since last eval).
+     - Otherwise: evaluate signal, build risk-sized order, place with native SL/TP.
 """
 from __future__ import annotations
 
@@ -47,6 +52,9 @@ class SymbolMeta:
     min_qty: float
 
 
+_DEFAULT_META = SymbolMeta(base_precision=0.001, price_precision=2, min_qty=0.001)
+
+
 class BitunixBot:
     def __init__(self, cfg: Config):
         self.cfg = cfg
@@ -55,7 +63,10 @@ class BitunixBot:
             cfg.creds.secret_key,
             margin_coin=cfg.trading.margin_coin,
         )
-        self.meta = SymbolMeta(base_precision=0.001, price_precision=1, min_qty=0.001)
+        self.metas: dict[str, SymbolMeta] = {}
+        # Per-symbol state for cooldown + bar-dedupe.
+        self.last_action_at: dict[str, int] = {}    # unix sec
+        self.last_bar_ts: dict[str, int] = {}       # unix sec/ms
         self.stop_flag = False
         self.state = get_state()
 
@@ -65,51 +76,58 @@ class BitunixBot:
         try:
             pairs = self.client.trading_pairs()
         except Exception as e:
-            log.warning("trading_pairs() failed: %s — using defaults", e)
+            log.warning("trading_pairs() failed: %s — using defaults for all", e)
+            for s in self.cfg.trading.symbols:
+                self.metas[s] = _DEFAULT_META
             return
-        s = self.cfg.trading.symbol
-        for row in pairs:
-            if str(row.get("symbol", "")).upper() != s.upper():
+
+        by_name = {str(r.get("symbol", "")).upper(): r for r in pairs}
+        for sym in self.cfg.trading.symbols:
+            row = by_name.get(sym.upper())
+            if not row:
+                log.warning("Symbol %s not in trading_pairs; using defaults", sym)
+                self.metas[sym] = _DEFAULT_META
                 continue
-            # Bitunix reports `basePrecision` and `quotePrecision` as decimal
-            # COUNTS (e.g. 4 means 4 decimals = step 0.0001), not step sizes.
-            # Treat small ints as decimal counts; pass through values already < 1.
             raw_base = row.get("basePrecision")
             if isinstance(raw_base, (int, float)) and raw_base >= 1:
                 base_step = 10 ** (-int(raw_base))
             else:
                 base_step = float(raw_base) if raw_base else 0.001
-            price_prec = int(row.get("quotePrecision") or row.get("pricePrecision") or 1)
+            price_prec = int(row.get("quotePrecision") or row.get("pricePrecision") or 2)
             min_qty = float(row.get("minTradeVolume") or base_step)
-            self.meta = SymbolMeta(base_step, price_prec, min_qty)
-            log.info("Symbol meta: step=%s priceDigits=%s minQty=%s (raw=%s)",
-                     base_step, price_prec, min_qty, row)
-            return
-        log.warning("Symbol %s not found in trading_pairs; using defaults", s)
+            self.metas[sym] = SymbolMeta(base_step, price_prec, min_qty)
+            log.info("Meta %s: step=%s priceDigits=%s minQty=%s maxLev=%s",
+                     sym, base_step, price_prec, min_qty, row.get("maxLeverage"))
 
     def _configure_account(self) -> None:
-        s = self.cfg.trading.symbol
-        # Best-effort: these may fail if already configured or scope-restricted.
-        attempts = [
-            (lambda: self.client.set_position_mode("ONE_WAY"), "position_mode=ONE_WAY"),
-            (lambda: self.client.set_margin_mode(s, self.cfg.trading.margin_mode),
-             f"margin_mode={self.cfg.trading.margin_mode}"),
-            (lambda: self.client.set_leverage(s, self.cfg.trading.leverage),
-             f"leverage={self.cfg.trading.leverage}x"),
-        ]
-        for fn, desc in attempts:
-            try:
-                fn()
-                log.info("Set %s", desc)
-            except BitunixError as e:
-                log.info("Skip %s: %s", desc, e.msg or e.code)
-            except Exception as e:
-                log.warning("Error setting %s: %s", desc, e)
+        # Position mode is global; set once.
+        try:
+            self.client.set_position_mode("ONE_WAY")
+            log.info("Set position_mode=ONE_WAY")
+        except BitunixError as e:
+            log.info("Skip position_mode: %s", e.msg or e.code)
+
+        # Margin mode + leverage are per symbol.
+        for sym in self.cfg.trading.symbols:
+            for fn, desc in [
+                (lambda s=sym: self.client.set_margin_mode(s, self.cfg.trading.margin_mode),
+                 f"{sym} margin_mode={self.cfg.trading.margin_mode}"),
+                (lambda s=sym: self.client.set_leverage(s, self.cfg.trading.leverage),
+                 f"{sym} leverage={self.cfg.trading.leverage}x"),
+            ]:
+                try:
+                    fn()
+                    log.info("Set %s", desc)
+                except BitunixError as e:
+                    log.info("Skip %s: %s", desc, e.msg or e.code)
+                except Exception as e:
+                    log.warning("Error setting %s: %s", desc, e)
 
     # ------------------------------------------------------------------ loop
 
     def start(self) -> None:
-        log.info("Starting Bitunix TraderBot in %s mode", self.cfg.mode.upper())
+        log.info("Starting Bitunix TraderBot in %s mode (symbols=%s)",
+                 self.cfg.mode.upper(), self.cfg.trading.symbols)
         self._resolve_symbol_meta()
         if self.cfg.is_live:
             self._configure_account()
@@ -143,76 +161,142 @@ class BitunixBot:
     # ------------------------------------------------------------------ tick
 
     def _tick(self) -> None:
-        sym = self.cfg.trading.symbol
+        # 1. Snapshot global state once per tick.
+        all_open = [p for p in self.client.pending_positions() if float(p.get("qty") or 0) != 0]
 
-        # 1. Skip if already holding a position on this symbol.
-        open_positions = [
-            p for p in self.client.pending_positions(symbol=sym)
-            if float(p.get("qty") or 0) != 0
-        ]
-        if open_positions:
-            log.debug("Holding %d open position(s); waiting for TP/SL", len(open_positions))
-            self.state.record_tick(None, 0)
+        # Time-based exit: force-close any position older than max_position_age_seconds.
+        max_age = self.cfg.trading.max_position_age_seconds
+        if max_age > 0 and self.cfg.is_live:
+            now_ms = int(time.time() * 1000)
+            still_open = []
+            for p in all_open:
+                ctime = int(p.get("ctime") or 0)
+                age_s = (now_ms - ctime) // 1000 if ctime else 0
+                if age_s >= max_age:
+                    pid = str(p.get("positionId") or "")
+                    sym = str(p.get("symbol") or "")
+                    log.info("Force-close stale position %s (%s) age=%ss", pid, sym, age_s)
+                    try:
+                        self.client.flash_close_position(pid)
+                        self.state.record_order(f"{sym} TIME_EXIT positionId={pid} age={age_s}s")
+                    except BitunixError as e:
+                        log.error("Force-close failed for %s: %s", pid, e)
+                        self.state.record_error(f"{sym} time-exit failed: {e.code} {e.msg}")
+                        still_open.append(p)
+                else:
+                    still_open.append(p)
+            all_open = still_open
+
+        n_open = len(all_open)
+        per_sym_count: dict[str, int] = {}
+        for p in all_open:
+            s = str(p.get("symbol", "")).upper()
+            per_sym_count[s] = per_sym_count.get(s, 0) + 1
+
+        self.state.record_tick(None, len(all_open))
+
+        if n_open >= self.cfg.trading.max_open_positions:
+            log.debug("Global cap reached (%d/%d open); waiting", n_open, self.cfg.trading.max_open_positions)
             return
 
-        # 2. Candles.
-        rows = self.client.klines(
-            sym, self.cfg.trading.timeframe, limit=self.cfg.loop.kline_lookback
-        )
-        if len(rows) < 30:
-            log.debug("Not enough klines yet (%d)", len(rows))
-            self.state.record_tick(None, len(rows))
-            return
-        rows = sorted(rows, key=lambda r: int(r.get("time") or 0))
-        highs = [float(r["high"]) for r in rows]
-        lows = [float(r["low"]) for r in rows]
-        closes = [float(r["close"]) for r in rows]
-        self.state.record_tick(closes[-1], len(rows))
+        # Account fetched lazily — only when we're about to size an order.
+        cached_acct: dict[str, Any] | None = None
 
-        # 3. Signal.
-        sig = evaluate(highs, lows, closes, self.cfg.strategy)
-        if sig is None:
-            log.debug("No signal (no confluence)")
-            return
-        log.info("Signal: %s score=%d reasons=%s @ %s",
-                 sig.direction, sig.score, sig.reasons, sig.price)
-        sig_text = f"{sig.direction.upper()} score={sig.score} @ {sig.price:.2f} ({', '.join(sig.reasons)})"
-        self.state.record_signal(sig_text)
+        now = int(time.time())
+        for sym in self.cfg.trading.symbols:
+            if self.stop_flag:
+                return
+            sym_u = sym.upper()
 
-        # 4. Risk plan.
-        acct = self.client.account()
-        free_margin = float(acct.get("available") or 0)
-        if free_margin <= 0:
-            log.warning("No available margin — skipping")
-            self.state.record_skip(f"no available margin (have {acct.get('available')!r})")
-            return
+            # Per-symbol cap.
+            if per_sym_count.get(sym_u, 0) >= self.cfg.trading.max_positions_per_symbol:
+                continue
 
-        plan = build_order(
-            sig,
-            free_margin=free_margin,
-            trading=self.cfg.trading,
-            risk=self.cfg.risk,
-            min_volume=self.meta.min_qty,
-            volume_step=self.meta.base_precision,
-            digits=self.meta.price_precision,
-        )
-        if plan is None:
-            log.info("Risk manager rejected the trade")
-            self.state.record_skip("risk manager rejected (volume below min)")
-            return
+            # Cooldown.
+            last = self.last_action_at.get(sym_u, 0)
+            if now - last < self.cfg.trading.cooldown_seconds:
+                continue
 
-        # 5. Execute.
-        self._execute(sym, plan)
+            # Klines.
+            try:
+                rows = self.client.klines(sym, self.cfg.trading.timeframe,
+                                          limit=self.cfg.loop.kline_lookback)
+            except BitunixError as e:
+                log.warning("%s klines failed: %s", sym, e)
+                continue
+            if len(rows) < 30:
+                continue
+            rows = sorted(rows, key=lambda r: int(r.get("time") or 0))
+            last_bar = int(rows[-1].get("time") or 0)
+            if last_bar and self.last_bar_ts.get(sym_u) == last_bar:
+                # No fresh bar since we last looked — don't re-fire on the same candle.
+                continue
+            self.last_bar_ts[sym_u] = last_bar
 
-    def _execute(self, symbol: str, plan: OrderPlan) -> None:
+            highs = [float(r["high"]) for r in rows]
+            lows = [float(r["low"]) for r in rows]
+            closes = [float(r["close"]) for r in rows]
+
+            # Signal.
+            sig = evaluate(highs, lows, closes, self.cfg.strategy)
+            if sig is None:
+                continue
+            sig_text = (f"{sym} {sig.direction.upper()} score={sig.score} @ "
+                        f"{sig.price:.4f} ({', '.join(sig.reasons)})")
+            log.info("Signal: %s", sig_text)
+            self.state.record_signal(sig_text)
+
+            # Risk plan.
+            if cached_acct is None:
+                try:
+                    cached_acct = self.client.account()
+                except Exception as e:
+                    log.error("account fetch failed: %s", e)
+                    self.state.record_error(f"account fetch failed: {e}")
+                    return
+            free_margin = float(cached_acct.get("available") or 0)
+            if free_margin <= 0:
+                self.state.record_skip(f"{sym}: no available margin")
+                return  # no point checking other symbols
+
+            meta = self.metas.get(sym, _DEFAULT_META)
+            plan = build_order(
+                sig,
+                free_margin=free_margin,
+                trading=self.cfg.trading,
+                risk=self.cfg.risk,
+                min_volume=meta.min_qty,
+                volume_step=meta.base_precision,
+                digits=meta.price_precision,
+            )
+            if plan is None:
+                self.state.record_skip(f"{sym}: risk manager rejected (volume below min)")
+                continue
+
+            # Execute.
+            placed = self._execute(sym, plan)
+            if placed:
+                self.last_action_at[sym_u] = now
+                per_sym_count[sym_u] = per_sym_count.get(sym_u, 0) + 1
+                n_open += 1
+                # Reduce optimistic free margin in cache so subsequent symbols
+                # don't oversize against the same dollars.
+                used_margin = (plan.volume * plan.price) / max(plan.leverage, 1)
+                cached_acct["available"] = str(max(0.0, free_margin - used_margin))
+                if n_open >= self.cfg.trading.max_open_positions:
+                    log.info("Hit global cap %d after placing %s; halting tick",
+                             n_open, sym)
+                    return
+
+    def _execute(self, symbol: str, plan: OrderPlan) -> bool:
         prefix = "LIVE" if self.cfg.is_live else "PAPER"
-        order_text = (f"{prefix} {plan.side} qty={plan.volume} "
+        order_text = (f"{prefix} {symbol} {plan.side} qty={plan.volume} "
                       f"entry~{plan.price} SL={plan.stop_loss} TP={plan.take_profit} "
                       f"lev={plan.leverage}x")
         log.info("ORDER %s [%s]", order_text, plan.notes)
         if not self.cfg.is_live:
             self.state.record_order(order_text + " (paper)")
-            return
+            return True
         try:
             resp = self.client.place_order(
                 symbol=symbol,
@@ -225,6 +309,8 @@ class BitunixBot:
             )
             log.info("Placed orderId=%s clientId=%s", resp.get("orderId"), resp.get("clientId"))
             self.state.record_order(f"{order_text} → orderId={resp.get('orderId')}")
+            return True
         except BitunixError as e:
             log.error("Order rejected: %s (payload=%s)", e, e.payload)
-            self.state.record_error(f"order rejected: {e.code} {e.msg}")
+            self.state.record_error(f"{symbol} order rejected: {e.code} {e.msg}")
+            return False

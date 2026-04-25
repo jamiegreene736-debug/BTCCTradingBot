@@ -18,12 +18,16 @@ class Credentials:
 
 @dataclass
 class TradingCfg:
-    symbol: str
+    symbols: list[str]               # universe to trade
     timeframe: str
     leverage: int
     margin_coin: str
-    margin_mode: str       # ISOLATION | CROSS
+    margin_mode: str                 # ISOLATION | CROSS
     risk_per_trade_pct: float
+    max_open_positions: int = 1      # global cap across all symbols
+    max_positions_per_symbol: int = 1
+    cooldown_seconds: int = 60       # min seconds between actions on same symbol
+    max_position_age_seconds: int = 0  # 0 = disabled; else force-close stale positions
 
 
 @dataclass
@@ -52,6 +56,12 @@ class StrategyCfg:
     bb_std: float
     atr_period: int
     min_confluence: int
+    # ADX trend-strength filter — counts for whichever side is otherwise winning.
+    adx_period: int = 14
+    adx_min: float = 22.0
+    # Supertrend regime filter — direction-aware.
+    supertrend_period: int = 10
+    supertrend_mult: float = 3.0
 
 
 @dataclass
@@ -92,10 +102,19 @@ def load(path: str | Path = "config.yaml", env_path: str | Path = ".env") -> Con
         secret_key=os.environ["BITUNIX_SECRET_KEY"],
     )
 
+    # Backwards-compat: accept singular `symbol` and lift to `symbols: [..]`.
+    trading_raw = dict(raw["trading"])
+    if "symbol" in trading_raw and "symbols" not in trading_raw:
+        trading_raw["symbols"] = [trading_raw.pop("symbol")]
+    elif "symbol" in trading_raw:
+        trading_raw.pop("symbol")
+    if isinstance(trading_raw.get("symbols"), str):
+        trading_raw["symbols"] = [trading_raw["symbols"]]
+
     return Config(
         mode=raw["mode"],
         creds=creds,
-        trading=TradingCfg(**raw["trading"]),
+        trading=TradingCfg(**trading_raw),
         risk=RiskCfg(**raw["risk"]),
         strategy=StrategyCfg(**raw["strategy"]),
         loop=LoopCfg(**raw["loop"]),

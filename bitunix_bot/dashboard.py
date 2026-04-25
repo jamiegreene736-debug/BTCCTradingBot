@@ -76,15 +76,18 @@ def create_app(cfg: Config, client: BitunixClient) -> Flask:
 
     @app.get("/api/state")
     def api_state() -> Response:
-        sym = cfg.trading.symbol
+        symbols = list(cfg.trading.symbols)
         out: dict[str, Any] = {
             "config": {
                 "mode": cfg.mode,
-                "symbol": sym,
+                "symbols": symbols,
                 "timeframe": cfg.trading.timeframe,
                 "leverage": cfg.trading.leverage,
                 "stop_loss_pct": cfg.risk.stop_loss_pct,
                 "take_profit_r": cfg.risk.take_profit_r,
+                "max_open_positions": cfg.trading.max_open_positions,
+                "cooldown_seconds": cfg.trading.cooldown_seconds,
+                "min_confluence": cfg.strategy.min_confluence,
             },
             "bot": state.snapshot(),
             "now": int(time.time()),
@@ -96,21 +99,22 @@ def create_app(cfg: Config, client: BitunixClient) -> Flask:
         except Exception as e:
             out["account_error"] = str(e)
 
+        # Pull positions / history across the whole universe (no symbol filter).
         try:
-            out["open_positions"] = client.pending_positions(symbol=sym)
+            out["open_positions"] = client.pending_positions()
         except Exception as e:
             out["open_positions_error"] = str(e)
             out["open_positions"] = []
 
         try:
-            hist = client.history_positions(symbol=sym, limit=20)
+            hist = client.history_positions(limit=30)
             out["history_positions"] = hist.get("positionList", [])
         except Exception as e:
             out["history_positions_error"] = str(e)
             out["history_positions"] = []
 
         try:
-            ord_hist = client.history_orders(symbol=sym, limit=20)
+            ord_hist = client.history_orders(limit=30)
             out["history_orders"] = ord_hist.get("orderList", [])
         except Exception as e:
             out["history_orders_error"] = str(e)
@@ -189,10 +193,12 @@ const pnl = v => { const n = Number(v||0); const cls = n>0?'pos':n<0?'neg':''; r
 function renderHeader(s) {
   const cfg = s.config, b = s.bot;
   const modePill = cfg.mode === 'live' ? `<span class="pill live">LIVE</span>` : `<span class="pill paper">PAPER</span>`;
+  const syms = (cfg.symbols || []).join(', ');
   document.getElementById('header').innerHTML =
     modePill +
-    `<span class="pill muted">${cfg.symbol} · ${cfg.timeframe} · ${cfg.leverage}x</span>` +
-    `<span class="pill muted">SL ${cfg.stop_loss_pct}% / TP ${cfg.take_profit_r}R</span>` +
+    `<span class="pill muted">${syms} · ${cfg.timeframe} · ${cfg.leverage}x</span>` +
+    `<span class="pill muted">SL ${cfg.stop_loss_pct}% / TP ${cfg.take_profit_r}R · conf ${cfg.min_confluence}/5</span>` +
+    `<span class="pill muted">max ${cfg.max_open_positions} open · ${cfg.cooldown_seconds}s cooldown</span>` +
     `<span class="pill muted">ticks ${b.tick_count} · signals ${b.signal_count} · orders ${b.order_count} · errors ${b.error_count}</span>` +
     `<span class="pill muted">last tick ${sec(b.last_tick_at)}</span>`;
 }
