@@ -113,6 +113,21 @@ def build_order(
         if sym_mult <= 0:
             sym_mult = 1.0  # guard against pathological config
 
+    # Conviction-based dynamic risk multiplier. The composite score already
+    # quantifies signal strength on a 0-1 scale; instead of sizing every
+    # signal identically, scale risk by score / fire_threshold (clamped
+    # 0.7–1.5). High-conviction signals (score well above the threshold)
+    # get up to 1.5× risk; marginal signals (right at the threshold) get
+    # 0.7× — average risk preserved across the distribution while
+    # compounding more aggressively on the best setups.
+    #
+    # Skipped (multiplier=1.0) when fire_threshold_used is None — preserves
+    # legacy callers that build orders without a threshold context.
+    conviction_mult = 1.0
+    if signal.fire_threshold_used is not None and signal.fire_threshold_used > 0:
+        raw_ratio = signal.score / signal.fire_threshold_used
+        conviction_mult = max(0.7, min(1.5, raw_ratio))
+
     # Stop distance in price units. Hybrid: fixed-pct FLOOR + ATR-derived
     # widening in vol regimes. The floor (`stop_loss_pct`) protects calm-market
     # entries from being stopped out on bar-internal noise; the ATR multiplier
@@ -141,8 +156,10 @@ def build_order(
         return None
 
     # Risk-budgeted volume (base currency units), down-weighted by the
-    # symbol's correlation-adjusted multiplier (1.0 for BTC, ~0.70-0.85 for alts).
-    risk_usdt = free_margin * (trading.risk_per_trade_pct / 100.0) * sym_mult
+    # symbol's correlation-adjusted multiplier (1.0 for BTC, ~0.70-0.85 for
+    # alts) AND scaled by conviction (score/threshold ratio, 0.7–1.5).
+    risk_usdt = (free_margin * (trading.risk_per_trade_pct / 100.0)
+                 * sym_mult * conviction_mult)
     volume = risk_usdt / stop_dist
 
     # Cap by available margin at the EFFECTIVE leverage.

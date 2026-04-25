@@ -16,7 +16,7 @@ Architecture:
 
   Fire if combined >= fire_threshold for one direction AND that side wins.
 
-INDICATOR RULES (counted, non-pattern half — 24 votes):
+INDICATOR RULES (counted, non-pattern half — 25 votes):
   1.  EMA stack (fast > mid > slow for long; reverse for short)
   2.  Close cross of EMA fast (bar-to-bar)
   3.  RSI in long/short window
@@ -43,6 +43,9 @@ INDICATOR RULES (counted, non-pattern half — 24 votes):
       over 60s) when available; falls back to candle-CVD proxy when offline.
   24. Aggression burst — 10s tape aggression ratio ≥0.40 magnitude. Catches
       momentum surges that happen BETWEEN bar closes (tape-only signal).
+  25. Absorption — extreme tape aggression (|ratio| ≥0.55) WITHOUT price
+      movement (|10s ΔP| <0.15%). Big players defending the level — votes
+      OPPOSITE the aggressive flow direction (classic exhaustion signal).
 
 COMBO-BONUS LAYER (extra vote when 3+ co-fire on the same side):
   - trend_pullback:   ema_stack + ema_cross + (vol_spike OR mfi)
@@ -106,10 +109,34 @@ class Signal:
     pattern_hits: list[str] = field(default_factory=list)
     price: float = 0.0
     atr: float = 0.0
+    # Effective fire threshold used to admit this signal — propagated to the
+    # risk manager so conviction-based sizing can scale risk by score/threshold.
+    # None when not set (legacy callers); build_order skips conviction-mult.
+    fire_threshold_used: float | None = None
 
     @property
     def side_code(self) -> str:
         return "BUY" if self.direction == "long" else "SELL"
+
+
+def _effective_fire_threshold(adx_val: float, base_threshold: float) -> float:
+    """Regime-adaptive fire threshold.
+
+    Lowers the bar in trending markets (ADX > 28) so high-quality trend-
+    aligned signals — which already get the +4% per-vote regime boost —
+    fire more readily. Raises the bar in chop (ADX < 18) where most
+    scalpers bleed; forces stronger pattern + divergence confluence.
+    Returns base_threshold when ADX is mid-range or unavailable.
+
+    Empirical scalping research consistently shows that pure-confluence
+    strategies perform best when selectivity matches the market regime.
+    """
+    if not np.isnan(adx_val):
+        if adx_val > 28:
+            return max(0.0, base_threshold - 0.05)
+        if adx_val < 18:
+            return min(1.0, base_threshold + 0.08)
+    return base_threshold
 
 
 def evaluate(
@@ -127,6 +154,7 @@ def evaluate(
     real_cvd: float | None = None,        # tape-derived 60s CVD (base-coin units)
     aggression_10s: float | None = None,  # tape-derived 10s aggression in [-1,+1]
     activity_mult: float | None = None,   # tape-derived score multiplier (~0.85–1.10)
+    price_change_10s_pct: float | None = None,  # tape-derived 10s price change %
 ) -> Signal | None:
     if len(closes) < max(cfg.ema_slow, cfg.macd_slow, cfg.bb_period, cfg.atr_period) + 5:
         return None
@@ -391,6 +419,22 @@ def evaluate(
         elif aggression_10s <= -0.40:     # ≥70/30 sell-side
             short_reasons.append(f"agg{aggression_10s:.2f}")
 
+    # 25. Absorption — extreme tape aggression (≥77/23 split) WITHOUT
+    # corresponding price movement (<0.15% in same 10s) means big players
+    # are absorbing the aggressive flow at a level. Classic exhaustion
+    # signal: aggressive buyers can't push price up = sellers defending
+    # = imminent reversal DOWN. (And mirror for buy absorption of sell flow.)
+    # Votes the OPPOSITE of the aggressive flow direction.
+    if (aggression_10s is not None and price_change_10s_pct is not None
+            and abs(aggression_10s) >= 0.55
+            and abs(price_change_10s_pct) < 0.15):
+        if aggression_10s > 0:
+            # Strong buy aggression absorbed at level → sellers defending → SHORT.
+            short_reasons.append(f"absorb(buyflow@{aggression_10s:+.2f})")
+        else:
+            # Strong sell aggression absorbed at level → buyers defending → LONG.
+            long_reasons.append(f"absorb(sellflow@{aggression_10s:+.2f})")
+
     # ----------------- COMBO-BONUS LAYER -----------------
     # Award an extra vote when 3+ specific high-quality reasons co-fire.
     # See combos.py for the recipe definitions. Each combo fires at most
@@ -405,7 +449,7 @@ def evaluate(
 
     indicator_long = len(long_reasons)
     indicator_short = len(short_reasons)
-    INDICATOR_MAX = 24
+    INDICATOR_MAX = 25
 
     # ------------------------------------------------------------------ patterns
     candle_hits = patterns.detect(o, h, l, c)
@@ -434,7 +478,7 @@ def evaluate(
                       "CMB:squeeze_breakout", "cvd_real", "cvd_proxy")
         REV_TAGS = ("DIV:", "sr_bounce_", "sr_reject_", "SMC:fvg_",
                     "SMC:liquidity_sweep_", "CMB:smc_reversal",
-                    "CMB:bb_extreme_revert")
+                    "CMB:bb_extreme_revert", "absorb")
         if a_for_regime > 28:
             # Trending: bump trend-aligned, dampen mean-reversion.
             t_long = sum(1 for r in long_reasons if any(t in r for t in TREND_TAGS))
@@ -495,8 +539,19 @@ def evaluate(
             atr=float(atr_now),
         )
 
-    if combined_long >= cfg.fire_threshold and combined_long > combined_short:
-        return _build("long")
-    if combined_short >= cfg.fire_threshold and combined_short > combined_long:
-        return _build("short")
+    # Regime-adaptive fire threshold — lower bar in trending markets,
+    # higher bar in chop. ADX is the same value already used for regime
+    # weighting above, so this composes cleanly: trend regimes both pump
+    # trend-tagged votes AND lower the bar; chop both dampens trend votes
+    # AND raises the bar.
+    eff_threshold = _effective_fire_threshold(a_for_regime, cfg.fire_threshold)
+
+    if combined_long >= eff_threshold and combined_long > combined_short:
+        sig = _build("long")
+        sig.fire_threshold_used = eff_threshold
+        return sig
+    if combined_short >= eff_threshold and combined_short > combined_long:
+        sig = _build("short")
+        sig.fire_threshold_used = eff_threshold
+        return sig
     return None

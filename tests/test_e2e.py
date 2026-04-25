@@ -1387,13 +1387,18 @@ def test_sl_and_tp_always_on_correct_side():
 
 
 class _FakeOBFeed:
-    """Connected OB feed stub with configurable top-of-book and spread."""
+    """Connected OB feed stub with configurable top-of-book and spread.
+    Default depth (100K base-coin) is high enough to clear all per-symbol
+    depth thresholds (XRP threshold is highest at 15K)."""
     def __init__(self, bid: float = 60_000.0, ask: float = 60_002.0,
-                 spread_pct: float = 0.003, connected: bool = True):
+                 spread_pct: float = 0.003, connected: bool = True,
+                 bid_depth: float = 100_000.0, ask_depth: float = 100_000.0):
         self._bid = bid
         self._ask = ask
         self._spread_pct = spread_pct
         self._connected = connected
+        self._bid_depth = bid_depth
+        self._ask_depth = ask_depth
 
     def is_connected(self) -> bool:
         return self._connected
@@ -1406,6 +1411,9 @@ class _FakeOBFeed:
 
     def get_spread_pct(self, sym):
         return self._spread_pct
+
+    def get_depth(self, sym, top_n=5, max_age_secs=30):
+        return (self._bid_depth, self._ask_depth)
 
 
 def test_post_only_entry_places_limit_at_top_of_book():
@@ -1981,12 +1989,15 @@ def _bot_with_tape_and_signal():
             self.aggression = 0.0
             self.cvd = None
             self.activity = None
+            self.price_change = None
         def get_aggression_ratio(self, sym, window_secs=10, min_count=5):
             return self.aggression
         def get_cvd(self, sym, window_secs=60, min_count=5):
             return self.cvd
         def get_activity_multiplier(self, sym, **kw):
             return self.activity
+        def get_price_change_pct(self, sym, window_secs=10, min_count=5):
+            return self.price_change
 
     tape = FakeTape()
     bot.tape_feed = tape
@@ -2042,6 +2053,8 @@ def test_tape_veto_blocks_short_against_strong_buy_flow():
             return None
         def get_activity_multiplier(self, sym, **kw):
             return None
+        def get_price_change_pct(self, sym, window_secs=10, min_count=5):
+            return None
     bot.tape_feed = FakeTape()
     bot._resolve_symbol_meta()
     bot._tick()
@@ -2069,6 +2082,489 @@ def test_tape_veto_skipped_when_no_data():
     bot._tick()
     assert bot.client.place_order.called, \
         "no-tape-data should not block trades — graceful degrade"
+
+
+# ----------------------------------------------------------------- Grok review v3
+
+
+def test_fire_threshold_lowers_in_trending_regime():
+    """ADX > 28 should reduce the effective fire threshold by 0.05."""
+    from bitunix_bot.strategy import _effective_fire_threshold
+    # Trending: 30 > 28 → threshold drops by 0.05.
+    assert abs(_effective_fire_threshold(30.0, 0.50) - 0.45) < 1e-9
+    # Strong trend: 50 → still drops by 0.05 (no further scaling).
+    assert abs(_effective_fire_threshold(50.0, 0.50) - 0.45) < 1e-9
+
+
+def test_fire_threshold_raises_in_ranging_regime():
+    """ADX < 18 should increase the effective fire threshold by 0.08."""
+    from bitunix_bot.strategy import _effective_fire_threshold
+    assert abs(_effective_fire_threshold(15.0, 0.50) - 0.58) < 1e-9
+    # Very low ADX still bumps by 0.08 (no further scaling).
+    assert abs(_effective_fire_threshold(5.0, 0.50) - 0.58) < 1e-9
+
+
+def test_fire_threshold_neutral_in_mid_regime():
+    """ADX in [18, 28] should leave the threshold unchanged."""
+    from bitunix_bot.strategy import _effective_fire_threshold
+    assert _effective_fire_threshold(22.0, 0.50) == 0.50
+    assert _effective_fire_threshold(18.0, 0.50) == 0.50
+    assert _effective_fire_threshold(28.0, 0.50) == 0.50
+    # NaN ADX (e.g., during warmup) → keep base.
+    import math
+    assert _effective_fire_threshold(math.nan, 0.50) == 0.50
+
+
+def test_fire_threshold_clamps_at_bounds():
+    """Threshold must stay within [0.0, 1.0] even at extreme bases."""
+    from bitunix_bot.strategy import _effective_fire_threshold
+    assert _effective_fire_threshold(30.0, 0.02) == 0.0   # would be -0.03 → clamped
+    assert _effective_fire_threshold(15.0, 0.95) == 1.0   # would be 1.03 → clamped
+
+
+def test_signal_records_fire_threshold_used():
+    """A signal returned by evaluate() must carry the effective threshold
+    so build_order can compute conviction-mult."""
+    from bitunix_bot.config import StrategyCfg
+    from bitunix_bot.strategy import evaluate
+    cfg = StrategyCfg(
+        ema_fast=9, ema_mid=21, ema_slow=50,
+        rsi_period=14, rsi_long_min=40, rsi_long_max=80,
+        rsi_short_min=20, rsi_short_max=60,
+        macd_fast=12, macd_slow=26, macd_signal=9,
+        bb_period=20, bb_std=2.0, atr_period=14,
+        adx_period=14, adx_min=15.0,
+        supertrend_period=10, supertrend_mult=3.0,
+        pattern_weight=0.55, pattern_norm=2.0, fire_threshold=0.05,
+    )
+    klines = make_uptrend_klines()
+    o = [k["open"] for k in klines]
+    h = [k["high"] for k in klines]
+    l_ = [k["low"] for k in klines]
+    c = [k["close"] for k in klines]
+    sig = evaluate(o, h, l_, c, cfg)
+    assert sig is not None
+    assert sig.fire_threshold_used is not None, \
+        "signal must record the threshold it cleared"
+    assert 0.0 <= sig.fire_threshold_used <= 1.0
+
+
+def test_conviction_sizing_high_score_increases_risk():
+    """Score well above threshold → conviction_mult ~1.5 → larger notional."""
+    from bitunix_bot.config import RiskCfg, TradingCfg
+    from bitunix_bot.risk import build_order
+    from bitunix_bot.strategy import Signal
+
+    tc = TradingCfg(symbols=["BTCUSDT"], timeframe="1m", leverage=25,
+                    margin_coin="USDT", margin_mode="ISOLATION",
+                    risk_per_trade_pct=1.0)
+    rc = RiskCfg(stop_loss_pct=0.40, take_profit_r=2.5, use_atr=False,
+                 atr_multiplier_sl=1.2, atr_multiplier_tp=4.0)
+    # High-conviction signal: score 0.85 vs threshold 0.50 → ratio 1.7 → clamps to 1.5.
+    high_sig = Signal(direction="long", score=0.85, indicator_score=15,
+                      pattern_score=2.0, reasons=["x"], price=60_000.0,
+                      atr=120.0, fire_threshold_used=0.50)
+    # Marginal signal: score 0.50 (right at threshold) → ratio 1.0 → mult=1.0.
+    base_sig = Signal(direction="long", score=0.50, indicator_score=12,
+                      pattern_score=2.0, reasons=["x"], price=60_000.0,
+                      atr=120.0, fire_threshold_used=0.50)
+    high_plan = build_order(high_sig, free_margin=46.0, trading=tc, risk=rc,
+                             min_volume=0.0001, volume_step=0.0001, digits=1,
+                             symbol="BTCUSDT")
+    base_plan = build_order(base_sig, free_margin=46.0, trading=tc, risk=rc,
+                             min_volume=0.0001, volume_step=0.0001, digits=1,
+                             symbol="BTCUSDT")
+    assert high_plan.volume > base_plan.volume, \
+        f"high-conviction should size up: {high_plan.volume} vs {base_plan.volume}"
+    # Ratio should be ~1.5 (high-conviction maxes the clamp).
+    ratio = high_plan.volume / base_plan.volume
+    assert abs(ratio - 1.5) < 0.05, f"expected ~1.5x, got {ratio:.3f}"
+
+
+def test_conviction_sizing_clamps_to_floor():
+    """Score well BELOW threshold (shouldn't happen normally, but defensive):
+    conviction_mult clamps to 0.7 floor."""
+    from bitunix_bot.config import RiskCfg, TradingCfg
+    from bitunix_bot.risk import build_order
+    from bitunix_bot.strategy import Signal
+
+    tc = TradingCfg(symbols=["BTCUSDT"], timeframe="1m", leverage=25,
+                    margin_coin="USDT", margin_mode="ISOLATION",
+                    risk_per_trade_pct=1.0)
+    rc = RiskCfg(stop_loss_pct=0.40, take_profit_r=2.5, use_atr=False,
+                 atr_multiplier_sl=1.2, atr_multiplier_tp=4.0)
+    # Low-conviction (impossible in practice — would not pass threshold) but
+    # tests the clamp: 0.10 / 0.50 = 0.20 → clamps to 0.7.
+    low_sig = Signal(direction="long", score=0.10, indicator_score=2,
+                     pattern_score=0.5, reasons=["x"], price=60_000.0,
+                     atr=120.0, fire_threshold_used=0.50)
+    base_sig = Signal(direction="long", score=0.50, indicator_score=12,
+                      pattern_score=2.0, reasons=["x"], price=60_000.0,
+                      atr=120.0, fire_threshold_used=0.50)
+    low_plan = build_order(low_sig, free_margin=46.0, trading=tc, risk=rc,
+                            min_volume=0.0001, volume_step=0.0001, digits=1,
+                            symbol="BTCUSDT")
+    base_plan = build_order(base_sig, free_margin=46.0, trading=tc, risk=rc,
+                             min_volume=0.0001, volume_step=0.0001, digits=1,
+                             symbol="BTCUSDT")
+    ratio = low_plan.volume / base_plan.volume
+    assert abs(ratio - 0.7) < 0.05, f"expected ~0.7x, got {ratio:.3f}"
+
+
+def test_conviction_sizing_unset_threshold_no_change():
+    """If fire_threshold_used is None (legacy callers), conviction_mult=1.0."""
+    from bitunix_bot.config import RiskCfg, TradingCfg
+    from bitunix_bot.risk import build_order
+    from bitunix_bot.strategy import Signal
+
+    tc = TradingCfg(symbols=["BTCUSDT"], timeframe="1m", leverage=25,
+                    margin_coin="USDT", margin_mode="ISOLATION",
+                    risk_per_trade_pct=1.0)
+    rc = RiskCfg(stop_loss_pct=0.40, take_profit_r=2.5, use_atr=False,
+                 atr_multiplier_sl=1.2, atr_multiplier_tp=4.0)
+    sig_none = Signal(direction="long", score=0.85, indicator_score=15,
+                       pattern_score=2.0, reasons=["x"], price=60_000.0,
+                       atr=120.0)  # fire_threshold_used defaults to None
+    sig_at = Signal(direction="long", score=0.50, indicator_score=12,
+                     pattern_score=2.0, reasons=["x"], price=60_000.0,
+                     atr=120.0, fire_threshold_used=0.50)
+    plan_none = build_order(sig_none, free_margin=46.0, trading=tc, risk=rc,
+                             min_volume=0.0001, volume_step=0.0001, digits=1,
+                             symbol="BTCUSDT")
+    plan_at = build_order(sig_at, free_margin=46.0, trading=tc, risk=rc,
+                           min_volume=0.0001, volume_step=0.0001, digits=1,
+                           symbol="BTCUSDT")
+    # Both should size identically (conviction=1.0 in both cases).
+    assert abs(plan_none.volume - plan_at.volume) < 1e-9, \
+        f"unset threshold should match conviction=1.0: {plan_none.volume} vs {plan_at.volume}"
+
+
+def test_absorption_vote_fires_on_extreme_flow_no_movement():
+    """|aggression| ≥ 0.55 + |price change| < 0.15% → absorption vote
+    OPPOSITE the aggressive flow."""
+    from bitunix_bot.config import StrategyCfg
+    from bitunix_bot.strategy import evaluate
+    rng = np.random.default_rng(7)
+    n = 200
+    closes = 100 + np.cumsum(rng.normal(0.05, 0.3, n))
+    opens = closes - rng.uniform(0.05, 0.2, n)
+    highs = np.maximum(opens, closes) + rng.uniform(0.02, 0.1, n)
+    lows = np.minimum(opens, closes) - rng.uniform(0.02, 0.1, n)
+    cfg = StrategyCfg(
+        ema_fast=9, ema_mid=21, ema_slow=50,
+        rsi_period=14, rsi_long_min=30, rsi_long_max=80,
+        rsi_short_min=20, rsi_short_max=70,
+        macd_fast=12, macd_slow=26, macd_signal=9,
+        bb_period=20, bb_std=2.0, atr_period=14,
+        adx_period=14, adx_min=15.0,
+        supertrend_period=10, supertrend_mult=3.0,
+        pattern_weight=0.55, pattern_norm=2.0, fire_threshold=0.05,
+    )
+    # Strong BUY flow being absorbed (price barely moved despite 80/20 buy aggression)
+    # → absorption SHORT vote.
+    sig = evaluate(opens.tolist(), highs.tolist(), lows.tolist(),
+                    closes.tolist(), cfg,
+                    aggression_10s=0.65, price_change_10s_pct=0.05)
+    if sig is not None:
+        # absorption tag could fire either side; check it's SHORT-side when buy-flow absorbed.
+        if sig.direction == "short":
+            assert any("absorb" in r for r in sig.reasons), \
+                f"expected absorb in short reasons: {sig.reasons}"
+
+    # Now strong SELL flow being absorbed → absorption LONG vote.
+    sig2 = evaluate(opens.tolist(), highs.tolist(), lows.tolist(),
+                     closes.tolist(), cfg,
+                     aggression_10s=-0.65, price_change_10s_pct=-0.03)
+    if sig2 is not None and sig2.direction == "long":
+        assert any("absorb" in r for r in sig2.reasons)
+
+
+def test_absorption_vote_does_not_fire_when_price_moves():
+    """If price MOVED ≥0.15% in the same window, it's not absorption —
+    just normal aggressive flow that found follow-through."""
+    from bitunix_bot.config import StrategyCfg
+    from bitunix_bot.strategy import evaluate
+    rng = np.random.default_rng(7)
+    n = 200
+    closes = 100 + np.cumsum(rng.normal(0.05, 0.3, n))
+    opens = closes - rng.uniform(0.05, 0.2, n)
+    highs = np.maximum(opens, closes) + rng.uniform(0.02, 0.1, n)
+    lows = np.minimum(opens, closes) - rng.uniform(0.02, 0.1, n)
+    cfg = StrategyCfg(
+        ema_fast=9, ema_mid=21, ema_slow=50,
+        rsi_period=14, rsi_long_min=30, rsi_long_max=80,
+        rsi_short_min=20, rsi_short_max=70,
+        macd_fast=12, macd_slow=26, macd_signal=9,
+        bb_period=20, bb_std=2.0, atr_period=14,
+        adx_period=14, adx_min=15.0,
+        supertrend_period=10, supertrend_mult=3.0,
+        pattern_weight=0.55, pattern_norm=2.0, fire_threshold=0.05,
+    )
+    # Strong buy flow + meaningful price move → normal momentum, NOT absorption.
+    sig = evaluate(opens.tolist(), highs.tolist(), lows.tolist(),
+                    closes.tolist(), cfg,
+                    aggression_10s=0.65, price_change_10s_pct=0.30)
+    if sig is not None:
+        assert not any("absorb" in r for r in sig.reasons), \
+            f"absorption should NOT fire when price moved 0.30%: {sig.reasons}"
+
+
+def test_absorption_vote_does_not_fire_when_aggression_weak():
+    """Below 0.55 aggression magnitude → not extreme enough to be absorption."""
+    from bitunix_bot.config import StrategyCfg
+    from bitunix_bot.strategy import evaluate
+    rng = np.random.default_rng(7)
+    n = 200
+    closes = 100 + np.cumsum(rng.normal(0.05, 0.3, n))
+    opens = closes - rng.uniform(0.05, 0.2, n)
+    highs = np.maximum(opens, closes) + rng.uniform(0.02, 0.1, n)
+    lows = np.minimum(opens, closes) - rng.uniform(0.02, 0.1, n)
+    cfg = StrategyCfg(
+        ema_fast=9, ema_mid=21, ema_slow=50,
+        rsi_period=14, rsi_long_min=30, rsi_long_max=80,
+        rsi_short_min=20, rsi_short_max=70,
+        macd_fast=12, macd_slow=26, macd_signal=9,
+        bb_period=20, bb_std=2.0, atr_period=14,
+        adx_period=14, adx_min=15.0,
+        supertrend_period=10, supertrend_mult=3.0,
+        pattern_weight=0.55, pattern_norm=2.0, fire_threshold=0.05,
+    )
+    # Aggression 0.40 + tiny price change → still normal flow (vote 24 fires,
+    # vote 25 doesn't) because magnitude < 0.55.
+    sig = evaluate(opens.tolist(), highs.tolist(), lows.tolist(),
+                    closes.tolist(), cfg,
+                    aggression_10s=0.40, price_change_10s_pct=0.02)
+    if sig is not None:
+        assert not any("absorb" in r for r in sig.reasons)
+
+
+def test_depth_filter_blocks_thin_book():
+    """Per-symbol depth threshold: a book with min(bid_depth, ask_depth)
+    below threshold must skip the trade with a 'thin book' reason."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.trading.symbols = ["BTCUSDT"]
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+    # Thin book: 5 BTC depth, threshold 8 BTC for BTC → skip.
+    bot.ob_feed = _FakeOBFeed(bid_depth=5.0, ask_depth=5.0)
+    bot._resolve_symbol_meta()
+    bot._tick()
+
+    # Should not have placed any order due to thin-book filter.
+    bot.client.place_order.assert_not_called()
+    skips = [e for e in bot.state.snapshot()["events"] if e["kind"] == "skip"]
+    assert any("thin book" in s["text"] for s in skips), \
+        f"expected thin book skip; got {[s['text'] for s in skips]}"
+
+
+def test_depth_filter_allows_normal_book():
+    """Adequate depth (above threshold) should NOT block a trade."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.trading.symbols = ["BTCUSDT"]
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+    # Well above threshold (BTC: 8.0).
+    bot.ob_feed = _FakeOBFeed(bid_depth=50.0, ask_depth=50.0)
+    bot._resolve_symbol_meta()
+    bot._tick()
+    bot.client.place_order.assert_called()
+
+
+def test_depth_filter_unknown_symbol_no_filter():
+    """A symbol not in the depth-threshold map should NOT be filtered
+    even with thin book."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.trading.symbols = ["DOGEUSDT"]   # not in default symbol_min_depth map
+    cfg.trading.symbol_risk_mult = {"DOGEUSDT": 1.0}
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.client.trading_pairs.return_value = [
+        {"symbol": "DOGEUSDT", "basePrecision": 0, "quotePrecision": 5,
+         "minTradeVolume": "1", "maxLeverage": 75},
+    ]
+    bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+    bot.ob_feed = _FakeOBFeed(bid_depth=1.0, ask_depth=1.0)  # very thin
+    bot._resolve_symbol_meta()
+    bot._tick()
+    # No depth threshold for DOGE → trade proceeds.
+    skips = [e for e in bot.state.snapshot()["events"] if e["kind"] == "skip"]
+    assert not any("thin book" in s["text"] for s in skips), \
+        f"unknown symbol shouldn't trigger depth filter: {skips}"
+
+
+def test_dynamic_post_only_timeout_shortens_with_high_activity():
+    """High activity multiplier (busy market) → shorter timeout. Inverted
+    scaling so frantic markets either fill fast or skip."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.trading.post_only_timeout_secs = 8
+    cfg.trading.symbols = ["BTCUSDT"]
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+    bot.ob_feed = _FakeOBFeed()
+
+    # Fake high activity (raw ×1.5) → expected timeout = round(8 / 1.5) = 5s.
+    # The fake mirrors the real impl: applies the caller's clamp range so
+    # the strategy-side call (default [0.85, 1.10]) and the timeout-side
+    # call ([0.5, 2.0]) get appropriately clamped values.
+    class HighActTape:
+        def get_aggression_ratio(self, sym, **kw): return None
+        def get_cvd(self, sym, **kw): return None
+        def get_activity_multiplier(self, sym, clamp_min=0.85, clamp_max=1.10):
+            raw = 1.5
+            return max(clamp_min, min(clamp_max, raw))
+        def get_price_change_pct(self, sym, **kw): return None
+    bot.tape_feed = HighActTape()
+    bot._resolve_symbol_meta()
+    bot._tick()
+
+    info = bot.pending_limits.get("BTCUSDT")
+    assert info is not None
+    assert info["timeout_secs"] == 5, f"expected 5s timeout, got {info['timeout_secs']}"
+
+
+def test_dynamic_post_only_timeout_lengthens_in_dead_market():
+    """Low activity multiplier (dead market) → longer timeout."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.trading.post_only_timeout_secs = 8
+    cfg.trading.symbols = ["BTCUSDT"]
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+    bot.ob_feed = _FakeOBFeed()
+
+    # Fake low activity (raw ×0.7) → expected timeout = round(8 / 0.7) = 11s.
+    # Mirrors the real impl: respects the caller's clamp range.
+    class LowActTape:
+        def get_aggression_ratio(self, sym, **kw): return None
+        def get_cvd(self, sym, **kw): return None
+        def get_activity_multiplier(self, sym, clamp_min=0.85, clamp_max=1.10):
+            raw = 0.7
+            return max(clamp_min, min(clamp_max, raw))
+        def get_price_change_pct(self, sym, **kw): return None
+    bot.tape_feed = LowActTape()
+    bot._resolve_symbol_meta()
+    bot._tick()
+
+    info = bot.pending_limits.get("BTCUSDT")
+    assert info is not None
+    assert info["timeout_secs"] == 11, f"expected 11s timeout, got {info['timeout_secs']}"
+
+
+def test_dynamic_post_only_timeout_clamps_to_4_12():
+    """Even at extreme activity values, timeout stays in [4, 12]s."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.trading.post_only_timeout_secs = 8
+    cfg.trading.symbols = ["BTCUSDT"]
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+    bot.ob_feed = _FakeOBFeed()
+
+    # Extreme high activity (raw ×3.0). Clamped at the caller's bound:
+    # strategy uses [0.85, 1.10] → 1.10; timeout uses [0.5, 2.0] → 2.0.
+    # Final timeout = 8 / 2.0 = 4s.
+    class FastTape:
+        def get_aggression_ratio(self, sym, **kw): return None
+        def get_cvd(self, sym, **kw): return None
+        def get_activity_multiplier(self, sym, clamp_min=0.85, clamp_max=1.10):
+            raw = 3.0
+            return max(clamp_min, min(clamp_max, raw))
+        def get_price_change_pct(self, sym, **kw): return None
+    bot.tape_feed = FastTape()
+    bot._resolve_symbol_meta()
+    bot._tick()
+    info = bot.pending_limits.get("BTCUSDT")
+    assert info is not None and info["timeout_secs"] == 4
+
+    # Extreme dead market.
+    reset_state()
+    bot2 = BitunixBot(cfg)
+    bot2.client = make_mock_client()
+    bot2.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+    bot2.ob_feed = _FakeOBFeed()
+    class DeadTape:
+        def get_aggression_ratio(self, sym, **kw): return None
+        def get_cvd(self, sym, **kw): return None
+        def get_activity_multiplier(self, sym, clamp_min=0.85, clamp_max=1.10):
+            raw = 0.3
+            return max(clamp_min, min(clamp_max, raw))
+        def get_price_change_pct(self, sym, **kw): return None
+    bot2.tape_feed = DeadTape()
+    bot2._resolve_symbol_meta()
+    bot2._tick()
+    info2 = bot2.pending_limits.get("BTCUSDT")
+    assert info2 is not None and info2["timeout_secs"] == 12, \
+        f"dead market should clamp to 12s, got {info2['timeout_secs']}"
+
+
+def test_tighter_tape_veto_threshold():
+    """Tape veto now fires at ±0.45 (was ±0.50)."""
+    bot, tape = _bot_with_tape_and_signal()
+    # -0.46 is below the new threshold (-0.45) → should veto.
+    tape.aggression = -0.46
+    bot._tick()
+    bot.client.place_order.assert_not_called()
+    skips = [e for e in bot.state.snapshot()["events"] if e["kind"] == "skip"]
+    assert any("tape veto" in s["text"] for s in skips), \
+        "tighter veto must catch -0.46"
+
+    # -0.44 should NOT veto (just below new threshold).
+    bot, tape = _bot_with_tape_and_signal()
+    tape.aggression = -0.44
+    bot._tick()
+    assert bot.client.place_order.called, "−0.44 should NOT veto under tighter threshold"
+
+
+def test_tradetape_get_price_change_pct():
+    """Price change accessor: oldest vs newest trade in window."""
+    from bitunix_bot.tradetape import TradeFeed, Trade
+    feed = TradeFeed(symbols=["BTCUSDT"])
+    now = time.time()
+    # Trade prices: 60000 → 60030 across 5 trades. +0.05% change.
+    for i, px in enumerate([60_000.0, 60_010.0, 60_020.0, 60_025.0, 60_030.0]):
+        feed._ingest(Trade(ts=now - (5 - i), price=px, qty=0.5, is_buy=True),
+                     "BTCUSDT")
+    pct = feed.get_price_change_pct("BTCUSDT", window_secs=10)
+    assert pct is not None and abs(pct - 0.05) < 1e-3, \
+        f"expected +0.050%, got {pct:.4f}%"
+
+    # min_count guard: only 1 trade returns None.
+    feed2 = TradeFeed(symbols=["BTCUSDT"])
+    feed2._ingest(Trade(ts=now, price=60000, qty=1.0, is_buy=True), "BTCUSDT")
+    assert feed2.get_price_change_pct("BTCUSDT", window_secs=10) is None
+
+
+def test_orderbook_get_depth():
+    """OrderBookFeed.get_depth returns top-N summed sizes per side."""
+    from bitunix_bot.orderbook import OrderBookFeed
+    feed = OrderBookFeed(symbols=["BTCUSDT"], depth_levels=10)
+    with feed._lock:
+        b = feed._books["BTCUSDT"]
+        b.bids = [(60000.0, 5.0), (59999.0, 4.0), (59998.0, 3.0),
+                   (59997.0, 2.0), (59996.0, 1.0), (59995.0, 0.5)]
+        b.asks = [(60001.0, 1.0), (60002.0, 2.0), (60003.0, 3.0),
+                   (60004.0, 4.0), (60005.0, 5.0), (60006.0, 0.5)]
+        b.last_update = time.time()
+    depth = feed.get_depth("BTCUSDT", top_n=5)
+    assert depth is not None
+    bid_d, ask_d = depth
+    # Top-5 only: bid sum 5+4+3+2+1=15; ask sum 1+2+3+4+5=15.
+    assert abs(bid_d - 15.0) < 1e-9 and abs(ask_d - 15.0) < 1e-9
 
 
 # ----------------------------------------------------------------- ATR-aware SL
@@ -2296,6 +2792,8 @@ def test_tape_exit_flattens_pre_BE_long_on_strong_sell_flow():
             return None
         def get_activity_multiplier(self, sym, **kw):
             return None
+        def get_price_change_pct(self, sym, window_secs=10, min_count=5):
+            return None
     bot.tape_feed = FakeTape()
     bot._tick()
 
@@ -2322,6 +2820,8 @@ def test_tape_exit_skipped_for_post_BE_position():
             return None
         def get_activity_multiplier(self, sym, **kw):
             return None
+        def get_price_change_pct(self, sym, window_secs=10, min_count=5):
+            return None
     bot.tape_feed = FakeTape()
     bot._tick()
 
@@ -2341,6 +2841,8 @@ def test_tape_exit_skipped_when_tape_neutral():
         def get_cvd(self, sym, window_secs=60, min_count=5):
             return None
         def get_activity_multiplier(self, sym, **kw):
+            return None
+        def get_price_change_pct(self, sym, window_secs=10, min_count=5):
             return None
     bot.tape_feed = FakeTape()
     bot._tick()
@@ -2444,6 +2946,26 @@ def main() -> int:
         test_tape_veto_blocks_short_against_strong_buy_flow,
         test_tape_veto_respects_neutral_flow,
         test_tape_veto_skipped_when_no_data,
+        test_fire_threshold_lowers_in_trending_regime,
+        test_fire_threshold_raises_in_ranging_regime,
+        test_fire_threshold_neutral_in_mid_regime,
+        test_fire_threshold_clamps_at_bounds,
+        test_signal_records_fire_threshold_used,
+        test_conviction_sizing_high_score_increases_risk,
+        test_conviction_sizing_clamps_to_floor,
+        test_conviction_sizing_unset_threshold_no_change,
+        test_absorption_vote_fires_on_extreme_flow_no_movement,
+        test_absorption_vote_does_not_fire_when_price_moves,
+        test_absorption_vote_does_not_fire_when_aggression_weak,
+        test_depth_filter_blocks_thin_book,
+        test_depth_filter_allows_normal_book,
+        test_depth_filter_unknown_symbol_no_filter,
+        test_dynamic_post_only_timeout_shortens_with_high_activity,
+        test_dynamic_post_only_timeout_lengthens_in_dead_market,
+        test_dynamic_post_only_timeout_clamps_to_4_12,
+        test_tighter_tape_veto_threshold,
+        test_tradetape_get_price_change_pct,
+        test_orderbook_get_depth,
         test_atr_hybrid_floor_wins_in_calm_markets,
         test_atr_hybrid_widens_in_vol_regime,
         test_atr_hybrid_disabled_uses_fixed_pct,

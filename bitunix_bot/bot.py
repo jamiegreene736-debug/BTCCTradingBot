@@ -586,6 +586,23 @@ class BitunixBot:
                 )
                 continue
 
+            # Depth filter — reject if top-5 book is too thin. Standard
+            # microstructure filter: thin books cause post-only limits to
+            # sit forever or get picked off by HFT-style adverse selection.
+            # Threshold is per-symbol (calibrated from observed liquidity).
+            min_depth = self.cfg.trading.symbol_min_depth.get(sym_u, 0.0)
+            if min_depth > 0 and self.ob_feed is not None:
+                depth = self.ob_feed.get_depth(sym, top_n=5)
+                if depth is not None:
+                    bid_d, ask_d = depth
+                    thinnest = min(bid_d, ask_d)
+                    if thinnest < min_depth:
+                        self.state.record_skip(
+                            f"{sym}: thin book ({thinnest:.1f} < {min_depth:.0f} "
+                            f"min) — post-only would sit"
+                        )
+                        continue
+
             # Klines.
             try:
                 rows = self.client.klines(sym, self.cfg.trading.timeframe,
@@ -619,14 +636,16 @@ class BitunixBot:
             sess_w = self._session_weight()
 
             # Trade-tape inputs (real order flow alpha):
-            #   real_cvd_60s    — 60s cumulative volume delta (base coin units)
-            #   aggression_10s  — 10s aggression ratio in [-1, +1]
-            #   activity_mult   — print-rate vs 5min baseline, clamped [0.85, 1.10]
-            real_cvd = aggression_10s = activity_mult = None
+            #   real_cvd_60s          — 60s cumulative volume delta (base coin units)
+            #   aggression_10s        — 10s aggression ratio in [-1, +1]
+            #   activity_mult         — print-rate vs 5min baseline, clamped [0.85, 1.10]
+            #   price_change_10s_pct  — 10s price change % (for absorption detector)
+            real_cvd = aggression_10s = activity_mult = price_change_10s_pct = None
             if self.tape_feed is not None:
                 real_cvd = self.tape_feed.get_cvd(sym, window_secs=60)
                 aggression_10s = self.tape_feed.get_aggression_ratio(sym, window_secs=10)
                 activity_mult = self.tape_feed.get_activity_multiplier(sym)
+                price_change_10s_pct = self.tape_feed.get_price_change_pct(sym, window_secs=10)
 
             # Signal.
             sig = evaluate(
@@ -636,6 +655,7 @@ class BitunixBot:
                 btc_trend=btc_trend, session_weight=sess_w,
                 real_cvd=real_cvd, aggression_10s=aggression_10s,
                 activity_mult=activity_mult,
+                price_change_10s_pct=price_change_10s_pct,
             )
             if sig is None:
                 continue
@@ -977,21 +997,22 @@ class BitunixBot:
 
     def _execute(self, symbol: str, plan: OrderPlan) -> bool:
         # Tape veto — "don't fight the flow". If the most recent 10s of trade
-        # tape is strongly contrary to our intended direction (≥75/25 split),
-        # skip the trade. This is the single highest-EV filter the bot has:
-        # signals look right on indicators but fall into an active reversal
-        # of order flow are statistically the worst trades. Pro desks veto
-        # these before placement. Applied in BOTH paper and live so the
-        # simulation accurately reflects live behavior.
+        # tape is strongly contrary to our intended direction (≥72/28 split),
+        # skip the trade. Threshold tightened from ±0.50 → ±0.45 to catch
+        # more borderline contrary-flow setups. Signals that look right on
+        # indicators but fall into active reversals of order flow are
+        # statistically the worst trades. Pro desks veto these before
+        # placement. Applied in BOTH paper and live so the simulation
+        # accurately reflects live behavior.
         if self.tape_feed is not None:
             agg = self.tape_feed.get_aggression_ratio(symbol, window_secs=10)
             if agg is not None:
-                if plan.side == "BUY" and agg <= -0.50:
+                if plan.side == "BUY" and agg <= -0.45:
                     self.state.record_skip(
                         f"{symbol}: tape veto — long signal but {agg:+.2f} sell flow"
                     )
                     return False
-                if plan.side == "SELL" and agg >= 0.50:
+                if plan.side == "SELL" and agg >= 0.45:
                     self.state.record_skip(
                         f"{symbol}: tape veto — short signal but {agg:+.2f} buy flow"
                     )
@@ -1036,6 +1057,22 @@ class BitunixBot:
         # If our chosen price would already be a taker (rare race), bail to market.
         if (is_long and limit_px > ask) or ((not is_long) and limit_px < bid):
             return False
+
+        # Dynamic timeout — high tape activity = price moves fast = either
+        # fill quickly or skip. Dead market = give the limit more time to
+        # be hit. Inverted scaling so high activity → shorter timeout.
+        # Wider clamp range here ([0.5, 2.0]) than the score-multiplier
+        # version ([0.85, 1.10]) so we get meaningful timeout variation.
+        base_timeout = self.cfg.trading.post_only_timeout_secs
+        timeout_secs = base_timeout
+        if self.tape_feed is not None:
+            activity = self.tape_feed.get_activity_multiplier(
+                sym_u, clamp_min=0.5, clamp_max=2.0
+            )
+            if activity is not None and activity > 0:
+                # High activity → shorter timeout. Clamp final value to [4, 12]s.
+                timeout_secs = max(4, min(12, int(round(base_timeout / activity))))
+
         minute_bucket = int(time.time()) // 60
         client_id = f"bot-{symbol}-{minute_bucket}-{plan.side}-PO"
         try:
@@ -1060,10 +1097,13 @@ class BitunixBot:
                 "plan": plan,
                 "order_text": order_text,
                 "limit_px": limit_px,
+                "timeout_secs": timeout_secs,
             }
-            log.info("MAKER %s LIMIT @ %s POST_ONLY orderId=%s", symbol, limit_px, order_id)
+            log.info("MAKER %s LIMIT @ %s POST_ONLY orderId=%s timeout=%ds",
+                     symbol, limit_px, order_id, timeout_secs)
             self.state.record_order(
-                f"{symbol} MAKER {plan.side} qty={plan.volume} @ {limit_px} (POST_ONLY)"
+                f"{symbol} MAKER {plan.side} qty={plan.volume} @ {limit_px} "
+                f"(POST_ONLY, t/o={timeout_secs}s)"
             )
             return True
         except BitunixError as e:
@@ -1104,12 +1144,11 @@ class BitunixBot:
     def _check_pending_limits(self, all_open_positions: list[dict[str, Any]]) -> None:
         """Sweep pending post-only limit entries:
           - if a position now exists for the symbol → entry filled, clear tracking
-          - if timeout exceeded → cancel limit + place market fallback
+          - if timeout exceeded → cancel limit and skip (no market fallback)
         """
         if not self.pending_limits:
             return
         now = int(time.time())
-        timeout = self.cfg.trading.post_only_timeout_secs
         open_by_sym = {str(p.get("symbol", "")).upper() for p in all_open_positions}
         for sym_u, info in list(self.pending_limits.items()):
             # Filled? A position now exists for this symbol.
@@ -1118,6 +1157,8 @@ class BitunixBot:
                 self.state.record_order(f"{sym_u} MAKER FILLED orderId={info['order_id']}")
                 del self.pending_limits[sym_u]
                 continue
+            # Per-order timeout (computed at placement time from activity).
+            timeout = info.get("timeout_secs", self.cfg.trading.post_only_timeout_secs)
             # Timed out → cancel and SKIP. Do NOT market-fallback.
             #
             # Pro-desk rule: if your maker bid wasn't hit in the timeout window,

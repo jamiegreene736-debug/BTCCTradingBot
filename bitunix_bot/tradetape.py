@@ -222,6 +222,25 @@ class TradeFeed:
         sizes = [t.qty for t in recent]
         return sum(sizes) / len(sizes)
 
+    def get_price_change_pct(
+        self, symbol: str, window_secs: float = 10.0, min_count: int = 5
+    ) -> float | None:
+        """Percentage price change between the OLDEST and NEWEST trade in
+        the window. Used by the absorption detector — when aggression is
+        extreme but price barely moved, big players are defending the
+        level and a reversal is likely.
+
+        Returns None if fewer than `min_count` trades or invalid prices.
+        """
+        recent = self._recent(symbol, window_secs)
+        if len(recent) < min_count:
+            return None
+        first_price = recent[0].price
+        last_price = recent[-1].price
+        if first_price <= 0:
+            return None
+        return (last_price - first_price) / first_price * 100.0
+
     def get_large_print_count(
         self,
         symbol: str,

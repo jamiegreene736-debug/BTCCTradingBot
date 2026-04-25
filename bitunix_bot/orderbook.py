@@ -117,6 +117,26 @@ class OrderBookFeed:
             return None
         return (ask - bid) / mid * 100.0
 
+    def get_depth(
+        self, symbol: str, top_n: int = 5, max_age_secs: float = 30.0
+    ) -> tuple[float, float] | None:
+        """Sum of size across the top-N levels per side. Returns
+        (bid_depth, ask_depth) in base-coin units. Used as a pre-trade
+        liquidity filter — thin books are where post-only limits sit
+        forever or get picked off by HFT-style adverse selection.
+        Standard microstructure filter beyond just spread.
+        """
+        sym = symbol.upper()
+        with self._lock:
+            book = self._books.get(sym)
+            if not book or not book.bids or not book.asks:
+                return None
+            if (time.time() - book.last_update) > max_age_secs:
+                return None
+            bid_depth = sum(sz for _, sz in book.bids[:top_n])
+            ask_depth = sum(sz for _, sz in book.asks[:top_n])
+            return (bid_depth, ask_depth)
+
     def is_connected(self) -> bool:
         return self._ws is not None and getattr(self._ws, "sock", None) is not None
 

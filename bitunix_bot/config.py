@@ -68,6 +68,18 @@ class TradingCfg:
         "SOLUSDT": 0.70,
         "XRPUSDT": 0.70,
     })
+    # Minimum top-5 book depth (base-coin units) per symbol — thin-book
+    # microstructure filter. Standard HFT/desk filter: thin books cause
+    # post-only limits to sit forever or get picked off via adverse
+    # selection. Skip new entries when min(bid_depth, ask_depth) < threshold.
+    # Calibrate from observed Bitunix per-symbol liquidity. Symbols not
+    # listed have no depth filter (None / 0 = disabled).
+    symbol_min_depth: dict[str, float] = field(default_factory=lambda: {
+        "BTCUSDT": 8.0,
+        "ETHUSDT": 60.0,
+        "SOLUSDT": 400.0,
+        "XRPUSDT": 15000.0,
+    })
 
 
 @dataclass

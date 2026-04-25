@@ -198,7 +198,11 @@ strategy:
   # Pattern recognition + indicators are the entire decision.
   # combined = pattern_weight * pattern + (1 - pattern_weight) * indicator
   # fire if combined >= fire_threshold AND that side wins.
-  pattern_weight: 0.55
+  # 0.60 lean (vs 0.55) — multi-bar chart patterns + strong 1-3 bar candles
+  # survive 1m noise better than ANY single indicator. Heavier pattern
+  # weight pulls signal quality up because patterns are pre-filtered
+  # for confluence (multi-bar shapes aggregate price action).
+  pattern_weight: 0.60
   pattern_norm: 2.0      # 2 mid-strength patterns = saturation
   # Tightened to 0.50 after reviewing 24-trade live results: the previous
   # 0.30 threshold produced ~3 trades/hour with 17% win rate. Most losses
