@@ -2085,6 +2085,85 @@ def test_tape_veto_skipped_when_no_data():
         "no-tape-data should not block trades — graceful degrade"
 
 
+# ----------------------------------------------------------------- admin reset endpoint
+
+
+def test_reset_streaks_endpoint_clears_in_memory_state():
+    """POST /api/admin/reset-streaks must clear streak_pause_until,
+    mini_cooldown_until, consec_losses, and recent_losses on the bot.
+    Cascade / DD breaker / recent_trade_r should be PRESERVED."""
+    reset_state()
+    cfg = fresh_cfg()
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+
+    # Pre-load streak state across all 4 alts.
+    now_s = time.time()
+    for sym in ("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"):
+        bot.streak_pause_until[sym] = int(now_s + 7200)
+        bot.mini_cooldown_until[sym] = now_s + 300
+        bot.consec_losses[sym] = 3
+        bot.recent_losses[sym] = [now_s - 60, now_s - 30, now_s - 5]
+
+    # And put cascade + DD + recent_trade_r in non-default state — must NOT
+    # be cleared by the reset.
+    bot._cascade_active = True
+    bot.daily_dd_breached = True
+    bot.recent_trade_r.extend([-0.5, -0.7])
+
+    app = create_app(cfg, bot.client, bot=bot)
+    c = app.test_client()
+    auth = base64.b64encode(b"admin:test_pass").decode()
+    r = c.post("/api/admin/reset-streaks",
+               headers={"Authorization": f"Basic {auth}"})
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["ok"] is True
+    assert sorted(body["cleared"]["streak_pauses"]) == \
+        ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
+
+    # In-memory state cleared.
+    assert bot.streak_pause_until == {}
+    assert bot.mini_cooldown_until == {}
+    assert bot.consec_losses == {}
+    assert bot.recent_losses == {}
+
+    # Preserved state untouched.
+    assert bot._cascade_active is True
+    assert bot.daily_dd_breached is True
+    assert len(bot.recent_trade_r) == 2
+
+
+def test_reset_streaks_requires_auth():
+    """Reset endpoint must reject unauthenticated requests."""
+    reset_state()
+    cfg = fresh_cfg()
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.streak_pause_until["BTCUSDT"] = int(time.time() + 7200)
+
+    app = create_app(cfg, bot.client, bot=bot)
+    c = app.test_client()
+    # No auth header — should 401.
+    r = c.post("/api/admin/reset-streaks")
+    assert r.status_code == 401
+    # Unchanged.
+    assert "BTCUSDT" in bot.streak_pause_until
+
+
+def test_reset_streaks_returns_503_when_no_bot():
+    """When dashboard is constructed without a bot reference, reset is 503."""
+    reset_state()
+    cfg = fresh_cfg()
+    client = make_mock_client()
+    app = create_app(cfg, client)  # no bot kwarg
+    c = app.test_client()
+    auth = base64.b64encode(b"admin:test_pass").decode()
+    r = c.post("/api/admin/reset-streaks",
+               headers={"Authorization": f"Basic {auth}"})
+    assert r.status_code == 503
+
+
 # ----------------------------------------------------------------- ChatGPT review v5 (factor groups)
 
 
@@ -3501,6 +3580,9 @@ def main() -> int:
         test_tape_veto_blocks_short_against_strong_buy_flow,
         test_tape_veto_respects_neutral_flow,
         test_tape_veto_skipped_when_no_data,
+        test_reset_streaks_endpoint_clears_in_memory_state,
+        test_reset_streaks_requires_auth,
+        test_reset_streaks_returns_503_when_no_bot,
         test_factor_classification_routes_votes_correctly,
         test_factor_score_breakdown_dedups_within_group,
         test_factor_score_caps_at_one,

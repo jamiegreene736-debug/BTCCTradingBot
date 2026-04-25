@@ -27,7 +27,14 @@ from .state import get as get_state
 log = logging.getLogger(__name__)
 
 
-def create_app(cfg: Config, client: BitunixClient) -> Flask:
+def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
+    """Build the Flask app.
+
+    `bot` is the BitunixBot instance (optional — when provided, enables
+    admin endpoints that mutate live in-memory state, e.g. resetting
+    streak pauses without a full process restart). When omitted (e.g. in
+    unit tests), admin endpoints return 503.
+    """
     app = Flask(__name__)
     state = get_state()
     password = os.environ.get("DASHBOARD_PASSWORD", "")
@@ -170,6 +177,58 @@ def create_app(cfg: Config, client: BitunixClient) -> Flask:
             out["win_rate"] = {"wins": 0, "losses": 0, "total": 0, "rate": None}
 
         return jsonify(out)
+
+    @app.post("/api/admin/reset-streaks")
+    def reset_streaks() -> Response:
+        """Clear all streak / mini-cooldown / consecutive-loss state on the
+        live bot. Useful after a chop session pauses every symbol — lets
+        the bot resume trading without a full process restart.
+
+        Does NOT clear: cascade detector (price-driven, would re-trip if
+        chaos persists), daily DD breaker (equity-driven, recovers when
+        equity does), recent_trade_r (the rolling tally that drives
+        adaptive self-defense; that's the system reacting to your actual
+        performance — overriding it would defeat the adaptive layer).
+
+        Auth-required; returns 503 if the dashboard wasn't constructed
+        with a bot reference (e.g. in unit tests).
+        """
+        if bot is None:
+            return Response("admin endpoints not available", status=503,
+                            mimetype="text/plain")
+
+        cleared_streak = list(bot.streak_pause_until.keys())
+        cleared_mini = list(bot.mini_cooldown_until.keys())
+        cleared_consec = dict(bot.consec_losses)
+        cleared_recent = {k: len(v) for k, v in bot.recent_losses.items()}
+
+        bot.streak_pause_until.clear()
+        bot.mini_cooldown_until.clear()
+        bot.consec_losses.clear()
+        bot.recent_losses.clear()
+
+        log.warning("ADMIN: reset-streaks cleared streak=%s mini=%s "
+                    "consec=%s recent_losses=%s",
+                    cleared_streak, cleared_mini, cleared_consec, cleared_recent)
+        state.record_order(
+            "ADMIN reset-streaks: cleared "
+            f"{len(cleared_streak)} streak pauses, "
+            f"{len(cleared_mini)} mini-cooldowns"
+        )
+        return jsonify({
+            "ok": True,
+            "cleared": {
+                "streak_pauses": cleared_streak,
+                "mini_cooldowns": cleared_mini,
+                "consec_losses": cleared_consec,
+                "recent_losses_count": cleared_recent,
+            },
+            "preserved": {
+                "cascade_active": bot._cascade_active,
+                "daily_dd_breached": bot.daily_dd_breached,
+                "recent_trade_r_len": len(bot.recent_trade_r),
+            },
+        })
 
     @app.get("/")
     def index() -> Response:

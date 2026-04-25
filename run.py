@@ -45,7 +45,7 @@ def main() -> int:
     signal.signal(signal.SIGINT, _shutdown)
     signal.signal(signal.SIGTERM, _shutdown)
 
-    app = create_app(cfg, bot.client)
+    app = create_app(cfg, bot.client, bot=bot)
     port = int(os.environ.get("PORT", "8080"))
     log.info("Dashboard listening on 0.0.0.0:%d", port)
     # Use Werkzeug's built-in server. For Railway's traffic levels this is fine;
