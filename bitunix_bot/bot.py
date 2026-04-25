@@ -24,10 +24,13 @@ import numpy as np
 
 from .client import BitunixClient, BitunixError
 from .config import Config
+from .indicators import adx as adx_fn
+from .indicators import atr as atr_fn
+from .journal import TradeJournal
 from .orderbook import OrderBookFeed
 from .risk import OrderPlan, adaptive_tp_r, build_order
 from .state import get as get_state
-from .strategy import evaluate
+from .strategy import Signal, evaluate
 from .tradetape import TradeFeed
 
 log = logging.getLogger(__name__)
@@ -83,6 +86,13 @@ class BitunixBot:
         # tick and update the consecutive-loss streak per symbol.
         self.last_seen_closed_mtime: int = 0
         self.consec_losses: dict[str, int] = {}   # symbol -> count
+        # Recent-loss timestamps per symbol — used by the 2-loss mini-cooldown
+        # circuit breaker (intercepts BEFORE the 3-loss streak pause).
+        # If 2 losses happen within MINI_COOLDOWN_WINDOW seconds, that symbol
+        # gets a 5-minute pause. Catches early "we're getting chopped" without
+        # waiting for the 3rd loss.
+        self.recent_losses: dict[str, list[float]] = {}
+        self.mini_cooldown_until: dict[str, float] = {}
         # Daily drawdown circuit breaker state.
         self.session_start_equity: float | None = None
         self.session_start_day: int = 0       # UTC day-of-year, resets daily
@@ -96,6 +106,10 @@ class BitunixBot:
         # Partial-TP tracking: positionId set of those that already had
         # the +1R partial close fired. Prevents double-firing.
         self.partial_tp_done: set[str] = set()
+        # Per-position max favorable R seen so far. Used by the stale-trade
+        # early exit (cut trades that haven't moved in N minutes). Cleared
+        # passively as positions disappear from pending_positions.
+        self.position_max_favor: dict[str, float] = {}
         # Post-only entry tracking: symbol_u -> dict with order_id, place_ts, plan.
         # When a limit hits and a position appears, entry is removed. When the
         # timeout expires without a fill, the limit is cancelled and a market
@@ -108,6 +122,10 @@ class BitunixBot:
         # side aggressed. Source of real CVD / aggression / print-rate flow
         # signals. Started alongside ob_feed in run_forever().
         self.tape_feed: TradeFeed | None = None
+        # Trade-quality journal — JSONL log of structured entry + exit events
+        # for offline analysis. Prerequisite for data-driven tuning of factor
+        # weights, threshold dynamics, and conviction calibration.
+        self.journal = TradeJournal()
         self.stop_flag = False
         self.state = get_state()
 
@@ -287,6 +305,12 @@ class BitunixBot:
             return 0.75 * weekend_mul
         return 1.0 * weekend_mul
 
+    # Mini-cooldown tunables: 2 losses within this window → 5-minute pause.
+    # Sits in front of the 3-loss / 2-hour streak pause as an early intercept.
+    _MINI_COOLDOWN_WINDOW_SECS = 600     # 10 minutes
+    _MINI_COOLDOWN_LOSS_LIMIT = 2
+    _MINI_COOLDOWN_PAUSE_SECS = 300      # 5 minutes
+
     def _update_streak_state(self) -> None:
         """Pull recent closed positions and update consecutive-loss counts
         per symbol. Pause a symbol after streak_loss_limit consecutive losses."""
@@ -313,12 +337,65 @@ class BitunixBot:
                     return float(v) if v not in (None, "", "null") else 0.0
                 except (ValueError, TypeError):
                     return 0.0
-            net = _f(p.get("realizedPNL")) + _f(p.get("fee")) + _f(p.get("funding"))
+            realized = _f(p.get("realizedPNL"))
+            fee = _f(p.get("fee"))
+            funding = _f(p.get("funding"))
+            net = realized + fee + funding
+
+            # Journal exit. exit_reason is best-effort; without per-trade
+            # closeReason from Bitunix we tag generically. Future improvement:
+            # match positionId against state-recorded events to reconstruct
+            # whether SL/TP fired vs tape_exit / stale_exit / time_exit.
+            pid_closed = str(p.get("positionId") or "")
+            ctime_ms = int(p.get("ctime") or 0)
+            mtime_ms = int(p.get("mtime") or 0)
+            hold_sec = (mtime_ms - ctime_ms) / 1000.0 if (ctime_ms and mtime_ms) else 0.0
+            entry_px = _f(p.get("avgOpenPrice"))
+            exit_px = _f(p.get("avgClosePrice")) or None
+            exit_reason = "win" if net > 0 else ("loss" if net < 0 else "flat")
+            self.journal.record_exit(
+                symbol=sym,
+                position_id=pid_closed,
+                side=str(p.get("side") or ""),
+                entry_price=entry_px,
+                exit_price=exit_px,
+                exit_reason=exit_reason,
+                hold_time_sec=hold_sec,
+                max_favor_r=self.position_max_favor.get(pid_closed),
+                net_pnl=net,
+                realized_pnl=realized,
+                fee=fee,
+                funding=funding,
+            )
+            # Clear per-position state — the position is gone.
+            self.position_max_favor.pop(pid_closed, None)
+            self.partial_tp_done.discard(pid_closed)
             if net > 0:
                 # Win resets the streak.
                 self.consec_losses[sym] = 0
             elif net < 0:
                 self.consec_losses[sym] = self.consec_losses.get(sym, 0) + 1
+                # 2-loss mini-cooldown: track timestamps of recent losses,
+                # prune old, fire a 5-min pause when count crosses the limit.
+                now_s = time.time()
+                buf = self.recent_losses.setdefault(sym, [])
+                buf.append(now_s)
+                cutoff = now_s - self._MINI_COOLDOWN_WINDOW_SECS
+                buf[:] = [t for t in buf if t > cutoff]
+                if len(buf) >= self._MINI_COOLDOWN_LOSS_LIMIT:
+                    until = now_s + self._MINI_COOLDOWN_PAUSE_SECS
+                    # Only set if not already past the existing mini-cooldown.
+                    self.mini_cooldown_until[sym] = max(
+                        self.mini_cooldown_until.get(sym, 0.0), until
+                    )
+                    log.info("MINI-COOLDOWN %s: %d losses in %dm — pause %ds",
+                             sym, len(buf),
+                             self._MINI_COOLDOWN_WINDOW_SECS // 60,
+                             self._MINI_COOLDOWN_PAUSE_SECS)
+                    self.state.record_skip(
+                        f"{sym}: 2-loss mini-cooldown — pause "
+                        f"{self._MINI_COOLDOWN_PAUSE_SECS // 60}m"
+                    )
                 if self.consec_losses[sym] >= self.cfg.trading.streak_loss_limit:
                     until = int(time.time()) + self.cfg.trading.streak_loss_pause_seconds
                     self.streak_pause_until[sym] = until
@@ -394,13 +471,18 @@ class BitunixBot:
             self.state.record_error(msg)
         return self._cascade_active
 
-    def _check_daily_drawdown(self) -> bool:
-        """Return True if the daily-DD circuit breaker is tripped.
+    def _daily_dd_risk_multiplier(self) -> float:
+        """Return a risk multiplier in [0.0, 1.0] based on current DD.
 
-        Compares current equity (available + margin + uPnL) against
-        session_start_equity (sampled at the start of each UTC day). If
-        drawdown exceeds max_daily_dd_pct, halt new entries for the rest
-        of the day. Existing positions keep being managed normally.
+        Gradual throttle (instead of binary halt) protects capital better:
+          0%   to -2%  →  1.00× (normal)
+          -2%  to -4%  →  0.75× (early caution — small overall loss)
+          -4%  to -6%  →  0.50× (significant — half-size remaining trades)
+          -6%  to -8%  →  0.25× (deep caution — quarter-size)
+          ≥ -8%        →  0.00× (HALT — no new entries)
+
+        Halt threshold is `max_daily_dd_pct`; intermediate steps scale
+        from 25% → 75% → 100% of that. Resets at UTC midnight.
         """
         try:
             acct = self.client.account()
@@ -411,7 +493,7 @@ class BitunixBot:
             equity = avail + margin + upnl
         except Exception as e:
             log.debug("DD-check account fetch failed: %s", e)
-            return self.daily_dd_breached  # keep last state
+            return 0.0 if self.daily_dd_breached else 1.0
 
         # Reset session at UTC midnight.
         today = time.gmtime().tm_yday
@@ -420,22 +502,37 @@ class BitunixBot:
             self.session_start_equity = equity
             self.daily_dd_breached = False
             log.info("New session: start equity=$%.2f", equity)
-            return False
+            return 1.0
 
         if self.session_start_equity is None or self.session_start_equity <= 0:
             self.session_start_equity = equity
-            return False
+            return 1.0
 
         dd_pct = (self.session_start_equity - equity) / self.session_start_equity * 100.0
         threshold = self.cfg.trading.max_daily_dd_pct
-        if dd_pct >= threshold and not self.daily_dd_breached:
-            self.daily_dd_breached = True
-            msg = (f"DAILY DD HALT: -{dd_pct:.2f}% from session start "
-                   f"${self.session_start_equity:.2f} → ${equity:.2f} "
-                   f"(threshold {threshold}%)")
-            log.warning(msg)
-            self.state.record_error(msg)
-        return self.daily_dd_breached
+
+        # Gradual ramp.
+        if dd_pct >= threshold:
+            if not self.daily_dd_breached:
+                self.daily_dd_breached = True
+                msg = (f"DAILY DD HALT: -{dd_pct:.2f}% from session start "
+                       f"${self.session_start_equity:.2f} → ${equity:.2f} "
+                       f"(threshold {threshold}%)")
+                log.warning(msg)
+                self.state.record_error(msg)
+            return 0.0
+        if dd_pct >= threshold * 0.75:        # e.g. -6% if threshold=8
+            return 0.25
+        if dd_pct >= threshold * 0.50:        # e.g. -4%
+            return 0.50
+        if dd_pct >= threshold * 0.25:        # e.g. -2%
+            return 0.75
+        return 1.0
+
+    # Backwards-compat shim — older _tick path uses bool dd_halted check.
+    def _check_daily_drawdown(self) -> bool:
+        """Return True iff the DD circuit breaker is fully tripped (mult=0)."""
+        return self._daily_dd_risk_multiplier() <= 0.0
 
     def _get_funding_rate(self, symbol: str) -> float | None:
         sym_u = symbol.upper()
@@ -458,9 +555,11 @@ class BitunixBot:
         # 0. Update streak-loss state from newly-closed positions.
         self._update_streak_state()
 
-        # 0b. Daily drawdown check — halt new entries if equity has dropped
-        # too far since session start. Existing positions still managed.
-        dd_halted = self._check_daily_drawdown()
+        # 0b. Daily drawdown — gradual throttle on risk sizing as DD deepens,
+        # full halt at the configured threshold. Existing positions still
+        # managed normally.
+        dd_risk_mult = self._daily_dd_risk_multiplier()
+        dd_halted = dd_risk_mult <= 0.0
 
         # 0c. Liquidation-cascade check — halt new entries when BTC moves
         # rapidly enough that indicators are about to give a false "huge
@@ -561,6 +660,17 @@ class BitunixBot:
             if per_sym_count.get(sym_u, 0) >= self.cfg.trading.max_positions_per_symbol:
                 continue
 
+            # 2-loss mini-cooldown — early-intercept circuit breaker that
+            # fires before the 3-loss streak pause. If 2 losses hit within
+            # 10 minutes, pause that symbol for 5 minutes.
+            mini_cd = self.mini_cooldown_until.get(sym_u, 0.0)
+            if mini_cd and now < mini_cd:
+                self.state.record_skip(
+                    f"{sym}: 2-loss mini-cooldown — "
+                    f"{int(mini_cd - now)}s left"
+                )
+                continue
+
             # Streak-loss circuit breaker — pause this symbol if it's hit
             # streak_loss_limit consecutive losses recently.
             paused_until = self.streak_pause_until.get(sym_u, 0)
@@ -630,6 +740,23 @@ class BitunixBot:
             highs = [float(r["high"]) for r in rows]
             lows = [float(r["low"]) for r in rows]
             closes = [float(r["close"]) for r in rows]
+
+            # Expansion-candle skip — when the most recent bar's range exceeds
+            # 2× ATR, the next bar is statistically a fakeout/continuation
+            # trap. Big bars are usually news-driven or liquidation cascades
+            # and the bot's confluence-based signals trigger a chase entry
+            # right at the wrong moment. Skip the immediate next bar.
+            atr_arr = atr_fn(np.array(highs), np.array(lows),
+                             np.array(closes), self.cfg.strategy.atr_period)
+            if len(atr_arr) > 0 and not np.isnan(atr_arr[-1]) and atr_arr[-1] > 0:
+                last_range = highs[-1] - lows[-1]
+                expansion_ratio = last_range / atr_arr[-1]
+                if expansion_ratio >= 2.0:
+                    self.state.record_skip(
+                        f"{sym}: expansion candle "
+                        f"({expansion_ratio:.1f}× ATR), skip next bar"
+                    )
+                    continue
             # Volume — Bitunix returns base coin volume per bar.
             volumes = [float(r.get("baseVol") or r.get("quoteVol") or 0) for r in rows]
             # Tier-2 inputs (cached): higher-timeframe trend + funding rate.
@@ -721,6 +848,7 @@ class BitunixBot:
                 digits=meta.price_precision,
                 effective_leverage=eff_lev,
                 symbol=sym,
+                dd_risk_mult=dd_risk_mult,
             )
             if plan is None:
                 self.state.record_skip(f"{sym}: risk manager rejected (volume below min)")
@@ -729,6 +857,59 @@ class BitunixBot:
             # Execute.
             placed = self._execute(sym, plan)
             if placed:
+                # Journal: structured entry-context log for offline analysis.
+                # Captures everything we'd want to correlate with outcome —
+                # ADX, ATR, spread, depth, tape signals, conviction, sizing.
+                conviction_mult = 1.0
+                if sig.fire_threshold_used and sig.fire_threshold_used > 0:
+                    conviction_mult = max(0.7, min(1.5,
+                        sig.score / sig.fire_threshold_used))
+                adx_arr = adx_fn(np.array(highs), np.array(lows),
+                                 np.array(closes), self.cfg.strategy.adx_period)
+                adx_now = (float(adx_arr[-1])
+                           if len(adx_arr) > 0 and not np.isnan(adx_arr[-1])
+                           else None)
+                atr_pct_now = ((float(atr_arr[-1]) / plan.price * 100.0)
+                               if len(atr_arr) > 0 and not np.isnan(atr_arr[-1])
+                               and plan.price > 0 else None)
+                depth_tup = (self.ob_feed.get_depth(sym, top_n=5)
+                             if self.ob_feed else None)
+                bid_depth = depth_tup[0] if depth_tup else None
+                ask_depth = depth_tup[1] if depth_tup else None
+                # clientId mirrors what _try_post_only / _place_market built.
+                # For entries that went MARKET (post-only path off / not
+                # connected), clientId omits "-PO". We use the same minute
+                # bucket they did.
+                minute_bucket = int(time.time()) // 60
+                cid_suffix = "-PO" if sym_u in self.pending_limits else ""
+                client_id_journal = f"bot-{sym}-{minute_bucket}-{plan.side}{cid_suffix}"
+                self.journal.record_entry(
+                    symbol=sym,
+                    side=plan.side,
+                    client_id=client_id_journal,
+                    order_type=("LIMIT" if sym_u in self.pending_limits else "MARKET"),
+                    score=sig.score,
+                    threshold_used=sig.fire_threshold_used,
+                    conviction_mult=conviction_mult,
+                    indicator_count=sig.indicator_score,
+                    pattern_score=sig.pattern_score,
+                    reasons=sig.reasons,
+                    atr_pct=atr_pct_now,
+                    adx=adx_now,
+                    spread_pct=spread_pct,
+                    bid_depth=bid_depth,
+                    ask_depth=ask_depth,
+                    aggression_10s=aggression_10s,
+                    real_cvd=real_cvd,
+                    activity_mult=activity_mult,
+                    session_weight=sess_w,
+                    entry_price=plan.price,
+                    stop_loss=plan.stop_loss,
+                    take_profit=plan.take_profit,
+                    notional=plan.volume * plan.price,
+                    leverage=plan.leverage,
+                )
+
                 self.last_action_at[sym_u] = now
                 per_sym_count[sym_u] = per_sym_count.get(sym_u, 0) + 1
                 n_open += 1
@@ -815,6 +996,39 @@ class BitunixBot:
                     r_favor = (current_price - entry) / sl_distance
                 else:
                     r_favor = (entry - current_price) / sl_distance
+
+                # Track per-position max favorable R for the stale-trade exit.
+                prev_max = self.position_max_favor.get(pid, float("-inf"))
+                if r_favor > prev_max:
+                    self.position_max_favor[pid] = r_favor
+
+                # Stale-trade early exit — if a position has aged past
+                # stale_exit_min without ever reaching stale_exit_max_favor_r,
+                # flash-close it. A 1m scalp signal that hasn't moved in 6
+                # minutes has lost its edge; pay the small loss and free the
+                # slot. Distinct from time_exit_only_if_losing (90-min profit-
+                # aware) and from tape-driven exit (immediate flow-flip).
+                if rk.stale_exit_enabled:
+                    ctime_ms_se = int(p.get("ctime") or 0)
+                    age_min_se = (time.time() * 1000 - ctime_ms_se) / 60000.0 \
+                                 if ctime_ms_se else 0
+                    max_seen = self.position_max_favor.get(pid, r_favor)
+                    if (age_min_se >= rk.stale_exit_min
+                            and max_seen < rk.stale_exit_max_favor_r):
+                        try:
+                            self.client.flash_close_position(pid)
+                            log.info("STALE EXIT %s: age=%.1fm max_favor=%.2fR "
+                                     "current=%.2fR", symbol, age_min_se,
+                                     max_seen, r_favor)
+                            self.state.record_order(
+                                f"{symbol} STALE_EXIT positionId={pid} "
+                                f"age={age_min_se:.0f}m max={max_seen:+.2f}R"
+                            )
+                            continue
+                        except BitunixError as e:
+                            log.warning("Stale exit failed for %s: %s",
+                                        symbol, e)
+                            # Fall through to normal management.
 
                 # Tape-driven exit — pre-BE positions get flattened when the
                 # tape flips strongly against us. Pro-desk rule: if the regime

@@ -87,6 +87,7 @@ def build_order(
     digits: int = 2,
     effective_leverage: int | None = None,
     symbol: str | None = None,
+    dd_risk_mult: float = 1.0,
 ) -> OrderPlan | None:
     """Compute volume + SL/TP for an order plan.
 
@@ -155,11 +156,16 @@ def build_order(
     if stop_dist <= 0:
         return None
 
-    # Risk-budgeted volume (base currency units), down-weighted by the
-    # symbol's correlation-adjusted multiplier (1.0 for BTC, ~0.70-0.85 for
-    # alts) AND scaled by conviction (score/threshold ratio, 0.7–1.5).
+    # Risk-budgeted volume (base currency units), down-weighted by:
+    #   - symbol's correlation/beta multiplier (1.0 for BTC, ~0.70-0.85 alts)
+    #   - conviction multiplier (score/threshold ratio, 0.7–1.5)
+    #   - daily-drawdown multiplier (1.0 normal → 0.25 deep DD → 0.0 halted)
+    # The DD throttle kicks in PRE-halt to protect capital gradually rather
+    # than tripping a binary cliff at -8%.
     risk_usdt = (free_margin * (trading.risk_per_trade_pct / 100.0)
-                 * sym_mult * conviction_mult)
+                 * sym_mult * conviction_mult * dd_risk_mult)
+    if risk_usdt <= 0:
+        return None  # halted by DD breaker
     volume = risk_usdt / stop_dist
 
     # Cap by available margin at the EFFECTIVE leverage.

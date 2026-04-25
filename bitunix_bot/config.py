@@ -113,6 +113,16 @@ class RiskCfg:
     # Always aim for profit — never go below the fee floor.
     adaptive_tp_enabled: bool = True
     adaptive_tp_floor_r: float = 0.7     # never tighten TP below this R (covers fees + small profit)
+    # Stale-trade early exit. If a position has been alive for stale_exit_min
+    # minutes AND has never reached more than stale_exit_max_favor_r favorable,
+    # flash-close it. Pro-desk rule: a 1m scalp signal that hasn't moved in 6
+    # minutes has lost its edge — the regime that birthed it has shifted or
+    # the move never materialized. Pay the small loss and free the slot.
+    # Distinct from time_exit_only_if_losing (90-min, profit-aware) and from
+    # the tape-driven exit (immediate, flow-flip based).
+    stale_exit_enabled: bool = True
+    stale_exit_min: float = 6.0          # minutes
+    stale_exit_max_favor_r: float = 0.5  # if max_favor below this, exit
 
 
 @dataclass

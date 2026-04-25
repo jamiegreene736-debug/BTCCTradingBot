@@ -20,6 +20,7 @@ import base64
 import os
 import sys
 import time
+from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -2084,6 +2085,315 @@ def test_tape_veto_skipped_when_no_data():
         "no-tape-data should not block trades — graceful degrade"
 
 
+# ----------------------------------------------------------------- ChatGPT review v4
+
+
+def test_stale_exit_flattens_drifting_position():
+    """Position older than stale_exit_min minutes with max_favor below
+    stale_exit_max_favor_r → flash_close."""
+    bot, _, _ = _setup_bot_with_open_position(
+        side="BUY", entry=100_000.0, current_price=100_050.0,  # +0.2R, drifting
+    )
+    # Fast-forward the position's ctime so it's "10 minutes old".
+    bot.client.pending_positions.return_value = [{
+        **bot.client.pending_positions.return_value[0],
+        "ctime": int(time.time() * 1000) - 10 * 60_000,
+    }]
+    # Pre-seed max_favor at 0.3R (below 0.5R threshold).
+    bot.position_max_favor["POS1"] = 0.3
+    bot._tick()
+
+    bot.client.flash_close_position.assert_called_once_with("POS1")
+    orders = [e for e in bot.state.snapshot()["events"] if e["kind"] == "order"]
+    assert any("STALE_EXIT" in e["text"] for e in orders), \
+        f"expected STALE_EXIT order event; got {[e['text'] for e in orders]}"
+
+
+def test_stale_exit_skipped_for_progressing_position():
+    """Position aging but with max_favor ≥ stale_exit_max_favor_r should
+    NOT be flattened — it has shown progress, let it ride."""
+    bot, _, _ = _setup_bot_with_open_position(
+        side="BUY", entry=100_000.0, current_price=100_080.0,  # +0.32R now
+    )
+    bot.client.pending_positions.return_value = [{
+        **bot.client.pending_positions.return_value[0],
+        "ctime": int(time.time() * 1000) - 10 * 60_000,
+    }]
+    # Position previously hit 0.7R favorable — has shown edge, don't kill.
+    bot.position_max_favor["POS1"] = 0.7
+    bot._tick()
+
+    bot.client.flash_close_position.assert_not_called()
+
+
+def test_stale_exit_skipped_for_young_position():
+    """Position younger than stale_exit_min minutes should NOT be exited
+    by the stale-exit rule, even with low max_favor."""
+    bot, _, _ = _setup_bot_with_open_position(
+        side="BUY", entry=100_000.0, current_price=100_050.0,
+    )
+    # Just opened 2 minutes ago — too young.
+    bot.client.pending_positions.return_value = [{
+        **bot.client.pending_positions.return_value[0],
+        "ctime": int(time.time() * 1000) - 2 * 60_000,
+    }]
+    bot.position_max_favor["POS1"] = 0.1
+    bot._tick()
+
+    bot.client.flash_close_position.assert_not_called()
+
+
+def test_expansion_candle_skip_blocks_next_bar():
+    """When the most recent bar's range exceeds 2× ATR, the next bar's
+    signal evaluation must be skipped with an 'expansion candle' reason.
+    Tested on ETH so the cascade detector (BTC-based) doesn't fire first."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.trading.symbols = ["ETHUSDT"]
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+
+    # Build ETH klines with a HUGE outlier last bar.
+    rng = np.random.default_rng(42)
+    n = 200
+    eth_closes = 3000.0 + np.cumsum(rng.normal(0.5, 1.5, n))
+    eth_opens = eth_closes - rng.uniform(0.2, 0.8, n)
+    eth_highs = np.maximum(eth_opens, eth_closes) + rng.uniform(0.1, 0.5, n)
+    eth_lows = np.minimum(eth_opens, eth_closes) - rng.uniform(0.1, 0.5, n)
+    # Last bar: range = 30 (typical ETH ATR ~3 → ratio ~10×).
+    eth_closes[-1] = 3025.0
+    eth_opens[-1] = 3005.0
+    eth_highs[-1] = 3035.0
+    eth_lows[-1] = 3005.0
+
+    # BTC klines stay flat to avoid tripping the cascade detector.
+    btc_closes = np.full(n, 60000.0) + rng.normal(0, 5, n)
+    btc_opens = btc_closes - 0.5
+    btc_highs = btc_closes + 1.0
+    btc_lows = btc_closes - 1.0
+
+    now = int(time.time() * 1000)
+    def make_klines(opens, highs, lows, closes):
+        return [{"open": float(opens[i]), "high": float(highs[i]),
+                  "low": float(lows[i]), "close": float(closes[i]),
+                  "time": now - (n-i)*60_000, "baseVol": "1.0",
+                  "quoteVol": "60000", "type": "1m"} for i in range(n)]
+    eth_kl = make_klines(eth_opens, eth_highs, eth_lows, eth_closes)
+    btc_kl = make_klines(btc_opens, btc_highs, btc_lows, btc_closes)
+
+    def klines_router(*args, **kwargs):
+        sym = (args[0] if args else kwargs.get("symbol", "")).upper()
+        return btc_kl if "BTC" in sym else eth_kl
+    bot.client.klines.side_effect = klines_router
+    bot._resolve_symbol_meta()
+    bot._tick()
+
+    # Should record an expansion-candle skip and NOT place an order.
+    skips = [e for e in bot.state.snapshot()["events"] if e["kind"] == "skip"]
+    assert any("expansion candle" in s["text"] for s in skips), \
+        f"expected expansion candle skip; got {[s['text'] for s in skips]}"
+    bot.client.place_order.assert_not_called()
+
+
+def test_dd_risk_multiplier_gradual_steps():
+    """DD ramp: 1.0 normal → 0.75 → 0.50 → 0.25 → 0.0 halt."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.trading.max_daily_dd_pct = 8.0
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.session_start_day = time.gmtime().tm_yday
+    bot.session_start_equity = 100.0
+
+    def setup_dd_pct(loss_pct):
+        equity = 100.0 * (1 - loss_pct / 100)
+        bot.client.account.return_value = {
+            "marginCoin": "USDT", "available": str(equity), "frozen": "0",
+            "margin": "0", "transfer": str(equity), "positionMode": "ONE_WAY",
+            "crossUnrealizedPNL": "0", "isolationUnrealizedPNL": "0", "bonus": "0",
+        }
+        bot.daily_dd_breached = False  # reset for each step
+
+    setup_dd_pct(0.5)
+    assert bot._daily_dd_risk_multiplier() == 1.0   # below first step
+
+    setup_dd_pct(2.5)   # past 25% of threshold
+    assert bot._daily_dd_risk_multiplier() == 0.75
+
+    setup_dd_pct(5.0)   # past 50% of threshold
+    assert bot._daily_dd_risk_multiplier() == 0.50
+
+    setup_dd_pct(7.0)   # past 75% of threshold
+    assert bot._daily_dd_risk_multiplier() == 0.25
+
+    setup_dd_pct(9.0)   # over threshold
+    assert bot._daily_dd_risk_multiplier() == 0.0
+    assert bot.daily_dd_breached is True
+
+
+def test_build_order_dd_risk_mult_scales_volume():
+    """build_order should scale notional by dd_risk_mult; halt at 0.0."""
+    from bitunix_bot.config import RiskCfg, TradingCfg
+    from bitunix_bot.risk import build_order
+    from bitunix_bot.strategy import Signal
+
+    tc = TradingCfg(symbols=["BTCUSDT"], timeframe="1m", leverage=25,
+                    margin_coin="USDT", margin_mode="ISOLATION",
+                    risk_per_trade_pct=1.0)
+    rc = RiskCfg(stop_loss_pct=0.40, take_profit_r=2.5, use_atr=False,
+                 atr_multiplier_sl=1.2, atr_multiplier_tp=4.0)
+    sig = Signal(direction="long", score=0.5, indicator_score=12,
+                 pattern_score=2.0, reasons=["x"], price=60_000.0,
+                 atr=120.0, fire_threshold_used=0.50)
+    full = build_order(sig, free_margin=46.0, trading=tc, risk=rc,
+                       min_volume=0.0001, volume_step=0.0001, digits=1,
+                       symbol="BTCUSDT", dd_risk_mult=1.0)
+    half = build_order(sig, free_margin=46.0, trading=tc, risk=rc,
+                       min_volume=0.0001, volume_step=0.0001, digits=1,
+                       symbol="BTCUSDT", dd_risk_mult=0.5)
+    halted = build_order(sig, free_margin=46.0, trading=tc, risk=rc,
+                          min_volume=0.0001, volume_step=0.0001, digits=1,
+                          symbol="BTCUSDT", dd_risk_mult=0.0)
+    assert full is not None and half is not None
+    # Half-throttle should give ~half the volume.
+    ratio = half.volume / full.volume
+    assert abs(ratio - 0.5) < 0.05, f"expected 0.5×, got {ratio:.3f}"
+    # Halt → no plan returned.
+    assert halted is None
+
+
+def test_mini_cooldown_fires_on_two_losses_in_window():
+    """Two losses within 10 min → 5-min mini-cooldown on that symbol."""
+    reset_state()
+    cfg = fresh_cfg()
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    now_ms = int(time.time() * 1000)
+
+    # Two losing closes ≤30 sec apart on BTC.
+    bot.client.history_positions.return_value = {
+        "positionList": [
+            {"positionId": "L1", "symbol": "BTCUSDT", "side": "LONG",
+             "qty": "0.01", "avgOpenPrice": "60000", "avgClosePrice": "59760",
+             "ctime": now_ms - 60_000, "mtime": now_ms - 30_000,
+             "realizedPNL": "-0.5", "fee": "-0.05", "funding": "0"},
+            {"positionId": "L2", "symbol": "BTCUSDT", "side": "LONG",
+             "qty": "0.01", "avgOpenPrice": "60000", "avgClosePrice": "59770",
+             "ctime": now_ms - 30_000, "mtime": now_ms,
+             "realizedPNL": "-0.4", "fee": "-0.05", "funding": "0"},
+        ],
+        "total": 2,
+    }
+    bot._update_streak_state()
+    assert "BTCUSDT" in bot.mini_cooldown_until
+    until = bot.mini_cooldown_until["BTCUSDT"]
+    assert until > time.time(), "mini-cooldown should be in the future"
+    # 5-minute pause = ~300s.
+    assert 290 < (until - time.time()) < 310
+
+
+def test_mini_cooldown_blocks_new_entries():
+    """When mini-cooldown is active, _tick must skip the symbol."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.trading.symbols = ["BTCUSDT"]
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+    bot._resolve_symbol_meta()
+    bot.mini_cooldown_until["BTCUSDT"] = time.time() + 200  # active 3+ min more
+    bot._tick()
+
+    bot.client.place_order.assert_not_called()
+    skips = [e for e in bot.state.snapshot()["events"] if e["kind"] == "skip"]
+    assert any("mini-cooldown" in s["text"] for s in skips), \
+        f"expected mini-cooldown skip; got {[s['text'] for s in skips]}"
+
+
+def test_mini_cooldown_does_not_fire_for_isolated_loss():
+    """A single loss should NOT trigger the mini-cooldown."""
+    reset_state()
+    cfg = fresh_cfg()
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    now_ms = int(time.time() * 1000)
+    bot.client.history_positions.return_value = {
+        "positionList": [
+            {"positionId": "L1", "symbol": "BTCUSDT", "side": "LONG",
+             "qty": "0.01", "avgOpenPrice": "60000", "avgClosePrice": "59760",
+             "ctime": now_ms - 60_000, "mtime": now_ms - 30_000,
+             "realizedPNL": "-0.5", "fee": "-0.05", "funding": "0"},
+        ],
+        "total": 1,
+    }
+    bot._update_streak_state()
+    assert "BTCUSDT" not in bot.mini_cooldown_until
+
+
+def test_journal_writes_entry_and_exit():
+    """TradeJournal should append JSONL events for entry + exit."""
+    import tempfile
+    import json
+    from bitunix_bot.journal import TradeJournal
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "trades.jsonl"
+        j = TradeJournal(path)
+        j.record_entry(
+            symbol="BTCUSDT", side="BUY", client_id="bot-BTCUSDT-1-BUY-PO",
+            order_type="LIMIT", score=0.72, threshold_used=0.50,
+            conviction_mult=1.44, indicator_count=14, pattern_score=1.5,
+            reasons=["ema_stack_up", "PAT:marubozu_bull"],
+            atr_pct=0.08, adx=25.3, spread_pct=0.012,
+            bid_depth=15.0, ask_depth=12.0,
+            aggression_10s=0.42, real_cvd=8.5, activity_mult=1.05,
+            session_weight=1.0, entry_price=60_000.0,
+            stop_loss=59_760.0, take_profit=60_600.0,
+            notional=120.0, leverage=25,
+        )
+        j.record_exit(
+            symbol="BTCUSDT", position_id="P1", side="LONG",
+            entry_price=60_000.0, exit_price=60_300.0,
+            exit_reason="win", hold_time_sec=180.0,
+            max_favor_r=1.5, net_pnl=0.36, realized_pnl=0.45,
+            fee=-0.09, funding=0.0,
+        )
+        lines = path.read_text().strip().split("\n")
+        assert len(lines) == 2
+        entry = json.loads(lines[0])
+        exit_ev = json.loads(lines[1])
+        assert entry["kind"] == "entry"
+        assert entry["symbol"] == "BTCUSDT"
+        assert entry["score"] == 0.72
+        assert entry["conviction_mult"] == 1.44
+        assert exit_ev["kind"] == "exit"
+        assert exit_ev["max_favor_r"] == 1.5
+        assert exit_ev["net_pnl"] == 0.36
+
+
+def test_journal_handles_missing_dir_gracefully():
+    """TradeJournal should not crash when the parent dir doesn't exist —
+    it lazily creates it."""
+    import tempfile
+    from bitunix_bot.journal import TradeJournal
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "subdir" / "nested" / "trades.jsonl"
+        j = TradeJournal(path)
+        j.record_entry(
+            symbol="X", side="BUY", client_id="x", order_type="LIMIT",
+            score=0.5, threshold_used=0.5, conviction_mult=1.0,
+            indicator_count=10, pattern_score=1.0, reasons=[],
+            atr_pct=None, adx=None, spread_pct=None,
+            bid_depth=None, ask_depth=None,
+            aggression_10s=None, real_cvd=None, activity_mult=None,
+            session_weight=None, entry_price=100.0,
+            stop_loss=99.6, take_profit=101.0, notional=100.0, leverage=25,
+        )
+        assert path.exists()
+        assert path.stat().st_size > 0
+
+
 # ----------------------------------------------------------------- Grok review v3
 
 
@@ -2949,6 +3259,17 @@ def main() -> int:
         test_tape_veto_blocks_short_against_strong_buy_flow,
         test_tape_veto_respects_neutral_flow,
         test_tape_veto_skipped_when_no_data,
+        test_stale_exit_flattens_drifting_position,
+        test_stale_exit_skipped_for_progressing_position,
+        test_stale_exit_skipped_for_young_position,
+        test_expansion_candle_skip_blocks_next_bar,
+        test_dd_risk_multiplier_gradual_steps,
+        test_build_order_dd_risk_mult_scales_volume,
+        test_mini_cooldown_fires_on_two_losses_in_window,
+        test_mini_cooldown_blocks_new_entries,
+        test_mini_cooldown_does_not_fire_for_isolated_loss,
+        test_journal_writes_entry_and_exit,
+        test_journal_handles_missing_dir_gracefully,
         test_fire_threshold_lowers_in_trending_regime,
         test_fire_threshold_raises_in_ranging_regime,
         test_fire_threshold_neutral_in_mid_regime,
