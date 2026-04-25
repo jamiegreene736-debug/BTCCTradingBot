@@ -187,32 +187,34 @@ class BitunixBot:
     _FUNDING_CACHE_SECONDS = 300     # funding rate updates every 8h on Bitunix
 
     def _get_htf_closes(self, symbol: str) -> list[float] | None:
+        sym_u = symbol.upper()
         now = int(time.time())
-        cached = self.htf_cache.get(symbol)
+        cached = self.htf_cache.get(sym_u)
         if cached and (now - cached[0]) < self._HTF_CACHE_SECONDS:
             return cached[1]
         try:
-            rows = self.client.klines(symbol, self.cfg.strategy.htf_timeframe, limit=100)
+            rows = self.client.klines(sym_u, self.cfg.strategy.htf_timeframe, limit=100)
             rows = sorted(rows, key=lambda r: int(r.get("time") or 0))
             closes = [float(r["close"]) for r in rows]
-            self.htf_cache[symbol] = (now, closes)
+            self.htf_cache[sym_u] = (now, closes)
             return closes
         except Exception as e:
-            log.debug("HTF kline fetch failed for %s: %s", symbol, e)
+            log.debug("HTF kline fetch failed for %s: %s", sym_u, e)
             return None
 
     def _get_funding_rate(self, symbol: str) -> float | None:
+        sym_u = symbol.upper()
         now = int(time.time())
-        cached = self.funding_cache.get(symbol)
+        cached = self.funding_cache.get(sym_u)
         if cached and (now - cached[0]) < self._FUNDING_CACHE_SECONDS:
             return cached[1]
         try:
-            data = self.client.funding_rate(symbol)
+            data = self.client.funding_rate(sym_u)
             rate = float(data.get("fundingRate") or 0)
-            self.funding_cache[symbol] = (now, rate)
+            self.funding_cache[sym_u] = (now, rate)
             return rate
         except Exception as e:
-            log.debug("Funding rate fetch failed for %s: %s", symbol, e)
+            log.debug("Funding rate fetch failed for %s: %s", sym_u, e)
             return None
 
     # ------------------------------------------------------------------ tick
@@ -501,8 +503,18 @@ class BitunixBot:
                     f"{symbol} SL {current_sl} → {new_sl_rounded} ({reason})"
                 )
             except BitunixError as e:
-                log.warning("SL update failed for %s: %s", p.get("symbol"), e)
-                self.state.record_error(f"SL update failed: {e.code} {e.msg}")
+                # "Order not found" / "position closed" between our pending_tpsl
+                # read and the modify call is benign — the position closed
+                # naturally (TP/SL fired). Don't crowd the activity log with errors.
+                msg = (e.msg or "").lower()
+                benign = any(s in msg for s in
+                             ("not found", "not exist", "closed", "expired", "canceled"))
+                if benign:
+                    log.info("SL update skipped for %s (position closed): %s",
+                             p.get("symbol"), e.msg)
+                else:
+                    log.warning("SL update failed for %s: %s", p.get("symbol"), e)
+                    self.state.record_error(f"SL update failed: {e.code} {e.msg}")
             except Exception as e:
                 log.exception("Position management error for %s: %s", p.get("symbol"), e)
 
@@ -515,6 +527,12 @@ class BitunixBot:
         if not self.cfg.is_live:
             self.state.record_order(order_text + " (paper)")
             return True
+        # Deterministic clientId per (symbol, minute, side) so a network
+        # retry within the same minute hits Bitunix's natural duplicate-id
+        # rejection and we can't accidentally double-up. After the minute
+        # rolls over, the next signal naturally has a different bucket.
+        minute_bucket = int(time.time()) // 60
+        client_id = f"bot-{symbol}-{minute_bucket}-{plan.side}"
         try:
             resp = self.client.place_order(
                 symbol=symbol,
@@ -524,6 +542,7 @@ class BitunixBot:
                 trade_side="OPEN",
                 tp_price=str(plan.take_profit),
                 sl_price=str(plan.stop_loss),
+                client_id=client_id,
             )
             log.info("Placed orderId=%s clientId=%s", resp.get("orderId"), resp.get("clientId"))
             self.state.record_order(f"{order_text} → orderId={resp.get('orderId')}")
@@ -531,4 +550,12 @@ class BitunixBot:
         except BitunixError as e:
             log.error("Order rejected: %s (payload=%s)", e, e.payload)
             self.state.record_error(f"{symbol} order rejected: {e.code} {e.msg}")
+            return False
+        except Exception as e:
+            # Network timeout / DNS / SSL — we don't know if Bitunix accepted
+            # the order. Don't retry next tick blindly: the per-symbol cap
+            # check in _tick (against fresh pending_positions) will handle the
+            # case where Bitunix DID place the order. Mark as error for visibility.
+            log.error("place_order network/unknown failure for %s: %s", symbol, e)
+            self.state.record_error(f"{symbol} order failure (unknown state): {e}")
             return False

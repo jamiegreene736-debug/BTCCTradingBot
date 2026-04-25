@@ -148,8 +148,11 @@ def load(path: str | Path = "config.yaml", env_path: str | Path = ".env") -> Con
         trading_raw.pop("symbol")
     if isinstance(trading_raw.get("symbols"), str):
         trading_raw["symbols"] = [trading_raw["symbols"]]
+    # Normalize symbols to UPPER throughout the bot's lifecycle to avoid
+    # case-mismatch bugs in caches keyed by symbol.
+    trading_raw["symbols"] = [str(s).upper() for s in trading_raw["symbols"]]
 
-    return Config(
+    cfg = Config(
         mode=raw["mode"],
         creds=creds,
         trading=TradingCfg(**trading_raw),
@@ -159,3 +162,46 @@ def load(path: str | Path = "config.yaml", env_path: str | Path = ".env") -> Con
         logging=LoggingCfg(**raw["logging"]),
         raw=raw,
     )
+    _validate(cfg)
+    return cfg
+
+
+def _validate(cfg: Config) -> None:
+    """Catch config sins early — fail loudly at startup, not mid-trade."""
+    errs: list[str] = []
+    t, r, s, l = cfg.trading, cfg.risk, cfg.strategy, cfg.loop
+    if cfg.mode not in ("paper", "live"):
+        errs.append(f"mode must be 'paper' or 'live', got {cfg.mode!r}")
+    if not t.symbols:
+        errs.append("trading.symbols must be non-empty")
+    if not (1 <= t.leverage <= 200):
+        errs.append(f"trading.leverage must be 1..200, got {t.leverage}")
+    if t.margin_mode not in ("ISOLATION", "CROSS"):
+        errs.append(f"trading.margin_mode must be ISOLATION/CROSS, got {t.margin_mode!r}")
+    if not (0 < t.risk_per_trade_pct <= 10):
+        errs.append(f"trading.risk_per_trade_pct must be 0..10 (refuse >10% per trade), "
+                    f"got {t.risk_per_trade_pct}")
+    if t.max_open_positions < 1:
+        errs.append(f"trading.max_open_positions must be >=1, got {t.max_open_positions}")
+    if t.max_positions_per_symbol < 1:
+        errs.append("trading.max_positions_per_symbol must be >=1")
+    if t.cooldown_seconds < 0:
+        errs.append("trading.cooldown_seconds must be >=0")
+    if not (0 < r.stop_loss_pct < 5):
+        errs.append(f"risk.stop_loss_pct must be 0..5%, got {r.stop_loss_pct}")
+    if not (0 < r.take_profit_r < 20):
+        errs.append(f"risk.take_profit_r must be 0..20, got {r.take_profit_r}")
+    if r.breakeven_at_r < 0 or r.trailing_activate_r < 0 or r.trailing_distance_r < 0:
+        errs.append("risk.breakeven_at_r / trailing_* must be >=0")
+    if s.fire_threshold < 0 or s.fire_threshold > 1:
+        errs.append("strategy.fire_threshold must be 0..1")
+    if s.pattern_weight < 0 or s.pattern_weight > 1:
+        errs.append("strategy.pattern_weight must be 0..1")
+    if s.adx_min < 0 or s.adx_min > 100:
+        errs.append("strategy.adx_min must be 0..100")
+    if l.tick_seconds < 1:
+        errs.append("loop.tick_seconds must be >=1")
+    if l.kline_lookback < 60:
+        errs.append("loop.kline_lookback must be >=60 for indicators to warm up")
+    if errs:
+        raise ValueError("Config validation failed:\n  - " + "\n  - ".join(errs))

@@ -823,6 +823,156 @@ def test_imbalance_vote_in_strategy():
         assert any("ob_imb" in r for r in sig.reasons), f"reasons: {sig.reasons}"
 
 
+def test_clientid_is_deterministic_and_includes_symbol_side():
+    """The same (symbol, minute, side) should produce the same clientId so
+    a network retry within the same minute hits Bitunix's natural
+    duplicate-id rejection rather than placing a second order."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+    bot._resolve_symbol_meta()
+    bot._tick()
+    if not bot.client.place_order.called:
+        return  # no signal fired this run; skip
+    cid = bot.client.place_order.call_args.kwargs.get("client_id")
+    assert cid and cid.startswith("bot-"), f"expected deterministic clientId, got {cid!r}"
+    # Format: bot-<SYMBOL>-<minute>-<SIDE>
+    parts = cid.split("-")
+    assert parts[0] == "bot"
+    assert parts[1] in [s.upper() for s in cfg.trading.symbols]
+    assert parts[3] in ("BUY", "SELL")
+
+
+def test_execute_handles_network_timeout_without_crashing():
+    """A non-BitunixError raised by place_order (e.g. requests.Timeout)
+    must be caught — it's an unknown-state failure, not a crash."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+    bot.client.place_order.side_effect = TimeoutError("connection timed out")
+    bot._resolve_symbol_meta()
+    bot._tick()  # should NOT raise
+    errors = [e for e in bot.state.snapshot()["events"] if e["kind"] == "error"]
+    assert any("unknown state" in e["text"] for e in errors), \
+        f"expected 'unknown state' error, got {errors}"
+
+
+def test_health_check_fails_when_tick_loop_stalls():
+    """The /healthz endpoint must return 503 if the bot's last tick is
+    older than 3× tick_seconds (Railway can then redeploy)."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.loop.tick_seconds = 10  # so threshold is 30s grace + 60 startup = 60s
+    client = make_mock_client()
+    bot_state = get_state()
+    # Simulate a tick from 5 minutes ago (well past threshold).
+    bot_state.last_tick_at = int(time.time()) - 300
+    app = create_app(cfg, client)
+    c = app.test_client()
+    r = c.get("/healthz")
+    assert r.status_code == 503, f"expected 503 (stale), got {r.status_code}: {r.data}"
+    # And a fresh tick brings it back to 200.
+    bot_state.last_tick_at = int(time.time())
+    r = c.get("/healthz")
+    assert r.status_code == 200
+
+
+def test_config_rejects_silly_values():
+    """Loading a config with insane values should fail loudly."""
+    import tempfile
+    from bitunix_bot.config import load
+    bad_yaml = """
+mode: paper
+trading:
+  symbols: [BTCUSDT]
+  timeframe: 1m
+  leverage: 999
+  margin_coin: USDT
+  margin_mode: ISOLATION
+  risk_per_trade_pct: 50
+  max_open_positions: 4
+  max_positions_per_symbol: 1
+  max_same_direction: 2
+  cooldown_seconds: 60
+  max_position_age_seconds: 5400
+risk:
+  stop_loss_pct: 99
+  take_profit_r: 1.5
+  use_atr: false
+  atr_multiplier_sl: 0.8
+  atr_multiplier_tp: 4.0
+  breakeven_at_r: 1.0
+  breakeven_buffer_pct: 0.05
+  trailing_activate_r: 1.5
+  trailing_distance_r: 0.5
+strategy:
+  ema_fast: 9
+  ema_mid: 21
+  ema_slow: 50
+  rsi_period: 14
+  rsi_long_min: 45
+  rsi_long_max: 60
+  rsi_short_min: 40
+  rsi_short_max: 55
+  macd_fast: 12
+  macd_slow: 26
+  macd_signal: 9
+  bb_period: 20
+  bb_std: 2.0
+  atr_period: 14
+  adx_period: 14
+  adx_min: 18.0
+  supertrend_period: 10
+  supertrend_mult: 3.0
+  min_atr_pct: 0.0
+  pattern_weight: 0.55
+  pattern_norm: 2.0
+  fire_threshold: 0.30
+  min_confluence: 4
+  volume_ma_period: 20
+  volume_spike_multiplier: 1.5
+  stoch_rsi_period: 14
+  stoch_rsi_k: 3
+  stoch_rsi_d: 3
+  htf_timeframe: 15m
+  htf_ema_period: 50
+  funding_threshold: 0.0005
+  swing_lookback: 5
+  sr_cluster_tol_pct: 0.3
+  sr_min_touches: 2
+  sr_proximity_pct: 0.3
+  ob_depth_levels: 10
+  ob_imbalance_threshold: 0.30
+loop:
+  tick_seconds: 10
+  kline_lookback: 200
+logging:
+  level: INFO
+  file: logs/bot.log
+"""
+    with tempfile.NamedTemporaryFile(suffix=".yaml", mode="w", delete=False) as f:
+        f.write(bad_yaml)
+        path = f.name
+    try:
+        load(path, "/dev/null")
+        raised = False
+    except ValueError as e:
+        raised = True
+        # Both bad values should appear in the error.
+        assert "leverage" in str(e), str(e)
+        assert "stop_loss_pct" in str(e), str(e)
+        assert "risk_per_trade_pct" in str(e), str(e)
+    finally:
+        os.unlink(path)
+    assert raised, "expected ValueError on insane config"
+
+
 def test_sl_and_tp_always_on_correct_side():
     """Critical: SL must be BELOW entry for longs and ABOVE for shorts.
     Inverted SL = catastrophic loss. Verify across both directions."""
@@ -883,6 +1033,10 @@ def main() -> int:
         test_orderbook_imbalance_compute,
         test_orderbook_parser_handles_multiple_formats,
         test_imbalance_vote_in_strategy,
+        test_clientid_is_deterministic_and_includes_symbol_side,
+        test_execute_handles_network_timeout_without_crashing,
+        test_health_check_fails_when_tick_loop_stalls,
+        test_config_rejects_silly_values,
         test_sl_and_tp_always_on_correct_side,
     ]
     passed = failed = 0

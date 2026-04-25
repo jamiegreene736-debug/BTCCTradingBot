@@ -32,6 +32,9 @@ WS_URL = "wss://fapi.bitunix.com/public/"
 CHANNEL = "depth_books"
 PING_INTERVAL = 15.0
 RECONNECT_BACKOFF_SECS = 5.0
+# If no messages received for this long, the connection looks dead even though
+# the socket may report itself open. Force a reconnect.
+SILENCE_TIMEOUT_SECS = 60.0
 
 
 @dataclass
@@ -53,6 +56,7 @@ class OrderBookFeed:
         self._ws: websocket.WebSocketApp | None = None
         self._thread: threading.Thread | None = None
         self._ping_thread: threading.Thread | None = None
+        self._last_message_at: float = 0.0  # for the silence watchdog
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -131,6 +135,7 @@ class OrderBookFeed:
             self._ping_thread.start()
 
     def _on_message(self, ws: websocket.WebSocketApp, message: str) -> None:
+        self._last_message_at = time.time()
         try:
             msg = json.loads(message)
         except json.JSONDecodeError:
@@ -164,9 +169,23 @@ class OrderBookFeed:
         log.info("OB WS closed")
 
     def _pinger(self) -> None:
+        """Send heartbeats AND watchdog the connection — if no messages have
+        arrived for SILENCE_TIMEOUT_SECS, force-close so _run reconnects.
+        Sometimes WS sockets stay nominally open but stop delivering data."""
         while not self._stop.is_set():
             time.sleep(PING_INTERVAL)
             if self._stop.is_set() or not self._ws:
+                return
+            # Watchdog: silence implies dead connection. Force a reconnect.
+            if self._last_message_at and (
+                time.time() - self._last_message_at > SILENCE_TIMEOUT_SECS
+            ):
+                log.warning("OB WS silent for >%.0fs; forcing reconnect",
+                            SILENCE_TIMEOUT_SECS)
+                try:
+                    self._ws.close()
+                except Exception:
+                    pass
                 return
             try:
                 self._ws.send(json.dumps({"op": "ping", "ping": int(time.time())}))

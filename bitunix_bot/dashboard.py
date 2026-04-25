@@ -72,6 +72,18 @@ def create_app(cfg: Config, client: BitunixClient) -> Flask:
 
     @app.get("/healthz")
     def healthz() -> Response:
+        # Fail loudly if the tick loop has stalled. Railway / external uptime
+        # checks should treat 5xx as "redeploy this thing".
+        snap = state.snapshot()
+        last = snap.get("last_tick_at") or 0
+        # If the bot has never ticked yet (just started), allow 60s grace.
+        # After that, fail if no tick within 3× the configured tick interval.
+        startup_grace = 60
+        max_silence = max(startup_grace, cfg.loop.tick_seconds * 3)
+        age = int(time.time()) - last
+        if last and age > max_silence:
+            return Response(f"stale: last tick {age}s ago", status=503,
+                            mimetype="text/plain")
         return Response("ok", mimetype="text/plain")
 
     @app.get("/api/state")
