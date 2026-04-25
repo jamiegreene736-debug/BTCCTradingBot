@@ -81,9 +81,18 @@ def evaluate(
     i = len(c) - 1
     p = c[i]
 
-    # HARD GATE: no trades in chop.
+    # HARD GATE 1: no trades in chop (ADX-based).
     a_now = adx_v[i] if i < len(adx_v) else np.nan
     if np.isnan(a_now) or a_now < cfg.adx_min:
+        return None
+
+    # HARD GATE 2: no trades in dead markets (ATR/price too low to ever clear
+    # fees + reach TP within reasonable time). 0.08% default.
+    atr_now = atr_v[i] if i < len(atr_v) else np.nan
+    if np.isnan(atr_now) or p <= 0:
+        return None
+    atr_pct = (atr_now / p) * 100.0
+    if atr_pct < cfg.min_atr_pct:
         return None
 
     long_reasons, short_reasons = [f"adx({a_now:.0f})"], [f"adx({a_now:.0f})"]

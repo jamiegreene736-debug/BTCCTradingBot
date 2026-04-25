@@ -18,7 +18,11 @@ trading:
   max_positions_per_symbol: 1   # never pyramid into the same trade
   max_same_direction: 2         # max concurrent LONGs (or SHORTs) — anti-correlation
   cooldown_seconds: 60          # min seconds between trades on same symbol
-  max_position_age_seconds: 900 # 15min: force-close stale positions (0 disables)
+  # Force-close stale positions only as a SAFETY NET, not as a primary exit.
+  # 15min was killing profitability — most TPs need 30+ min to hit. 4 hours
+  # leaves TP/SL to do its job; if a trade is still open after 4hr something
+  # is genuinely stuck. 0 disables entirely.
+  max_position_age_seconds: 14400
 
 risk:
   # CONSERVATIVE stop loss — tight, in % of entry price.
@@ -48,12 +52,14 @@ strategy:
   bb_period: 20
   bb_std: 2.0
   atr_period: 14
-  # ADX trend-strength filter (whipsaw killer; counts for whichever side wins)
+  # ADX trend-strength filter (whipsaw killer; HARD GATE — not counted)
   adx_period: 14
   adx_min: 22.0
-  # Supertrend regime filter (direction-aware)
+  # Supertrend regime filter (direction-aware; counted)
   supertrend_period: 10
   supertrend_mult: 3.0
+  # Dead-market filter (HARD GATE — not counted): skip if ATR/price < this %
+  min_atr_pct: 0.08
   min_confluence: 4      # of 6 confluence rules; ADX is a hard gate (not counted).
                          # 3-of-6 = aggressive; 4-of-6 = selective; 5+ = rare
 

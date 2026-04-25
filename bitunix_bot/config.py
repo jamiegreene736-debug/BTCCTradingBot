@@ -63,6 +63,9 @@ class StrategyCfg:
     # Supertrend regime filter — direction-aware.
     supertrend_period: int = 10
     supertrend_mult: float = 3.0
+    # Dead-market filter: skip if ATR/price < this (no point trading when
+    # the market can't move enough to clear fees + reach TP within hours).
+    min_atr_pct: float = 0.08    # 0.08% = 8 bps
 
 
 @dataclass

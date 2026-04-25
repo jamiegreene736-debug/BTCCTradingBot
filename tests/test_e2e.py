@@ -109,6 +109,7 @@ def fresh_cfg():
     cfg.strategy.rsi_long_max = 80
     cfg.strategy.rsi_short_min = 20
     cfg.strategy.rsi_short_max = 60
+    cfg.strategy.min_atr_pct = 0.0  # disable ATR floor for fixture
     return cfg
 
 
@@ -181,6 +182,21 @@ def test_chop_produces_no_signal_due_to_adx_filter():
 
     kinds = [e["kind"] for e in bot.state.snapshot()["events"]]
     assert "signal" not in kinds, "ADX filter should reject chop"
+
+
+def test_dead_market_skipped_by_atr_filter():
+    """Even on a clean trend, if ATR is below min_atr_pct, no signal."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.strategy.min_atr_pct = 99.0  # impossible threshold to force a skip
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+    bot._resolve_symbol_meta()
+    bot._tick()
+
+    kinds = [e["kind"] for e in bot.state.snapshot()["events"]]
+    assert "signal" not in kinds, "ATR filter should block dead markets"
 
 
 def test_global_max_open_positions_cap():
@@ -452,6 +468,7 @@ def main() -> int:
         test_signing_matches_bitunix_spec_example,
         test_uptrend_produces_long_signal_with_paper_order,
         test_chop_produces_no_signal_due_to_adx_filter,
+        test_dead_market_skipped_by_atr_filter,
         test_global_max_open_positions_cap,
         test_same_direction_cap_kills_correlated_risk,
         test_per_symbol_cap_blocks_same_symbol_but_allows_others,
