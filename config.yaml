@@ -10,9 +10,25 @@ trading:
     - SOLUSDT
     - XRPUSDT
   timeframe: 1m          # 1m / 5m / 15m / 30m / 1h / 2h / 4h
-  leverage: 50           # 50x is the sweet spot in production scalp repos.
-                         # 100x: 3 losses = liquidation. 50x: 6 losses tolerated.
-                         # Halves fee drag as % of margin. Bitunix max is 200 BTC.
+  leverage: 25           # 25x — pro scalper sweet spot. NOTE on misconception:
+                         # lowering leverage does NOT cut fees. Fees scale with
+                         # NOTIONAL (= risk_per_trade / sl_pct), which is
+                         # leverage-independent at fixed risk. A trade at 50x
+                         # and 25x with 1% risk + 0.25% SL has IDENTICAL notional
+                         # (~$184 on $46) and IDENTICAL round-trip fees ($0.31).
+                         #
+                         # What leverage DOES change is liquidation distance:
+                         #   100x → 1% adverse = liq
+                         #    50x → 2% adverse = liq
+                         #    25x → 4% adverse = liq   ← sweet spot
+                         #    10x → 10% adverse = liq
+                         #
+                         # With 0.25% SL we're never near liq in normal flow,
+                         # but flash wicks / oracle delays can momentarily skip
+                         # the SL trigger — bigger buffer = real protection.
+                         # 25x supports 4 concurrent positions on $46 (margin
+                         # use ~$22, ~50% buffer left). Bitunix per-symbol caps
+                         # (BTC 200x, ETH 100x, SOL/XRP 75x) all permit 25x.
   margin_coin: USDT
   margin_mode: ISOLATION # ISOLATION isolates loss per position; CROSS shares margin
   risk_per_trade_pct: 1.0
