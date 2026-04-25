@@ -696,6 +696,15 @@ def evaluate(
             factor_context=breakdown.get("context", 0.0),
         )
 
+    # Hard ADX floor — don't trade in deep chop. Live drawdown analysis
+    # showed the bot firing 0.64+ scores at ADX=15-20 and bleeding via
+    # 6-min stale exits (price never moved in predicted direction). The
+    # regime-adaptive threshold raise wasn't enough; in deep chop the
+    # confluence is pattern noise on flat candles. Skip outright.
+    min_adx = float(getattr(cfg, "min_adx_for_trade", 0.0) or 0.0)
+    if min_adx > 0 and not np.isnan(a_for_regime) and a_for_regime < min_adx:
+        return None
+
     # Base threshold — `fire_threshold_override` lets the bot inject the
     # adaptive self-defense adjustment (rolling-R-tally based) before regime
     # adaptation. Composes additively: drawdown bumps the BASE up, then

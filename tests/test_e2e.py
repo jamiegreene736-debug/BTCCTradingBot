@@ -2151,6 +2151,59 @@ def test_reset_streaks_requires_auth():
     assert "BTCUSDT" in bot.streak_pause_until
 
 
+def test_min_adx_skips_deep_chop():
+    """When ADX is below cfg.min_adx_for_trade (default 22), evaluate()
+    must return None regardless of how strong the score would otherwise be.
+    Deep chop = pattern artifacts on flat candles, not predictive of direction."""
+    from bitunix_bot.config import StrategyCfg
+    from bitunix_bot.strategy import evaluate
+    klines = make_uptrend_klines()
+    o = [k["open"] for k in klines]
+    h = [k["high"] for k in klines]
+    l_ = [k["low"] for k in klines]
+    c = [k["close"] for k in klines]
+
+    # Build a config where ADX is naturally low (very long EMAs make ADX small).
+    # Easier path: just patch the cfg's min_adx very high so any market is "chop".
+    cfg = StrategyCfg(
+        ema_fast=9, ema_mid=21, ema_slow=50,
+        rsi_period=14, rsi_long_min=40, rsi_long_max=80,
+        rsi_short_min=20, rsi_short_max=60,
+        macd_fast=12, macd_slow=26, macd_signal=9,
+        bb_period=20, bb_std=2.0, atr_period=14,
+        adx_period=14, adx_min=15.0,
+        supertrend_period=10, supertrend_mult=3.0,
+        pattern_weight=0.55, pattern_norm=2.0, fire_threshold=0.05,
+        min_adx_for_trade=999.0,  # impossibly high — nothing should fire
+    )
+    sig = evaluate(o, h, l_, c, cfg)
+    assert sig is None, "min_adx_for_trade=999 must block all signals"
+
+
+def test_min_adx_zero_disables_filter():
+    """min_adx_for_trade=0 means no ADX floor (regression check)."""
+    from bitunix_bot.config import StrategyCfg
+    from bitunix_bot.strategy import evaluate
+    klines = make_uptrend_klines()
+    o = [k["open"] for k in klines]
+    h = [k["high"] for k in klines]
+    l_ = [k["low"] for k in klines]
+    c = [k["close"] for k in klines]
+    cfg = StrategyCfg(
+        ema_fast=9, ema_mid=21, ema_slow=50,
+        rsi_period=14, rsi_long_min=40, rsi_long_max=80,
+        rsi_short_min=20, rsi_short_max=60,
+        macd_fast=12, macd_slow=26, macd_signal=9,
+        bb_period=20, bb_std=2.0, atr_period=14,
+        adx_period=14, adx_min=15.0,
+        supertrend_period=10, supertrend_mult=3.0,
+        pattern_weight=0.55, pattern_norm=2.0, fire_threshold=0.05,
+        min_adx_for_trade=0.0,  # disabled
+    )
+    sig = evaluate(o, h, l_, c, cfg)
+    assert sig is not None  # baseline behavior preserved
+
+
 def test_absorption_vetoes_same_direction_short():
     """When absorb(sellflow) fires (sell aggression being absorbed → buyers
     defending), any SHORT signal must be vetoed — that's the textbook
@@ -3944,6 +3997,8 @@ def main() -> int:
         test_reset_streaks_endpoint_clears_in_memory_state,
         test_reset_streaks_requires_auth,
         test_reset_streaks_returns_503_when_no_bot,
+        test_min_adx_skips_deep_chop,
+        test_min_adx_zero_disables_filter,
         test_absorption_vetoes_same_direction_short,
         test_absorption_vetoes_same_direction_long,
         test_absorption_does_not_block_reversal_trade,

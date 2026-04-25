@@ -200,6 +200,15 @@ class StrategyCfg:
     pattern_weight: float = 0.55          # 55% pattern, 45% indicator
     pattern_norm: float = 2.0             # divide raw pattern strength by this for 0-1 normalization
     fire_threshold: float = 0.50          # combined score must be ≥ this to fire
+    # Hard ADX floor — don't trade at all when below this. The regime-
+    # adaptive threshold (raise to 0.58 in chop) wasn't enough; live data
+    # showed the bot still firing 0.64+ scores in ADX=15-20 chop and
+    # bleeding via 6-min stale exits because price never moved in the
+    # predicted direction. In deep chop, confluence agreement DOESN'T
+    # predict direction — it's pattern artifacts of flat candles.
+    # 22 matches the existing chop band (used to raise fire_threshold);
+    # going below the band = fully skip rather than just raise the bar.
+    min_adx_for_trade: float = 22.0
     # Factor-group scoring — replaces raw vote-count normalization. Each
     # vote is classified into one of four groups; counts within a group are
     # capped at the saturation value (so 6 correlated trend votes don't
