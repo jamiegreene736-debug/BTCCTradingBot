@@ -207,29 +207,50 @@ class BitunixClient:
         )
         return data.get("data") or {"orderList": [], "total": 0}
 
-    def modify_position_tpsl(
+    def modify_tpsl_order(
         self,
-        symbol: str,
-        position_id: str,
+        order_id: str,
         tp_price: str | None = None,
         sl_price: str | None = None,
+        tp_qty: str | None = None,
+        sl_qty: str | None = None,
         tp_stop_type: str = "LAST_PRICE",
         sl_stop_type: str = "LAST_PRICE",
+        tp_order_type: str = "MARKET",
+        sl_order_type: str = "MARKET",
     ) -> dict[str, Any]:
-        """Update the TP and/or SL trigger prices for an open position.
+        """Modify a SPECIFIC TPSL trigger order by its orderId.
 
-        Bitunix's modify endpoint replaces position-level TPSL — to preserve
-        existing TP while updating SL, the caller must pass the existing TP.
-        See `pending_tpsl()` to read the current values.
+        IMPORTANT: Bitunix stores TPSL as separate trigger orders. When you
+        place an order with both tpPrice and slPrice, two separate triggers
+        are created: one TP-only row and one SL-only row, each with its own
+        `id` returned by /tpsl/get_pending_orders.
+
+        The /tpsl/position/modify_order endpoint (deprecated by us — it
+        doesn't actually persist changes to the underlying triggers) is
+        useless for ratcheting. Use this method with the trigger's own
+        orderId from pending_tpsl() instead.
         """
-        body: dict[str, Any] = {"symbol": symbol, "positionId": str(position_id)}
+        body: dict[str, Any] = {"orderId": str(order_id)}
         if tp_price is not None:
             body["tpPrice"] = str(tp_price)
             body["tpStopType"] = tp_stop_type
+            body["tpOrderType"] = tp_order_type
+            if tp_qty:
+                body["tpQty"] = str(tp_qty)
         if sl_price is not None:
             body["slPrice"] = str(sl_price)
             body["slStopType"] = sl_stop_type
-        return self._post("/api/v1/futures/tpsl/position/modify_order", body)
+            body["slOrderType"] = sl_order_type
+            if sl_qty:
+                body["slQty"] = str(sl_qty)
+        return self._post("/api/v1/futures/tpsl/modify_order", body)
+
+    def cancel_tpsl_order(self, symbol: str, order_id: str) -> dict[str, Any]:
+        return self._post(
+            "/api/v1/futures/tpsl/cancel_order",
+            {"symbol": symbol, "orderId": str(order_id)},
+        )
 
     def pending_tpsl(self, symbol: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
         """Fetch pending TP/SL trigger orders. Bitunix stores TPSL as separate

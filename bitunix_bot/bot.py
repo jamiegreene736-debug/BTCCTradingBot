@@ -393,14 +393,14 @@ class BitunixBot:
         except Exception as e:
             log.warning("pending_tpsl fetch failed (skipping SL management): %s", e)
             return
-        sl_by_pos: dict[str, str] = {}
-        tp_by_pos: dict[str, str] = {}
+        # Bitunix stores TPSL as separate trigger orders — find the SL-only
+        # row per position so we can target it by its own id (the only way
+        # to actually persist a modification).
+        sl_orders: dict[str, dict[str, Any]] = {}    # positionId -> SL trigger row
         for r in tpsl_rows:
             pid = str(r.get("positionId") or "")
             if r.get("slPrice"):
-                sl_by_pos[pid] = r["slPrice"]
-            if r.get("tpPrice"):
-                tp_by_pos[pid] = r["tpPrice"]
+                sl_orders[pid] = r
 
         rk = self.cfg.risk
         for p in open_positions:
@@ -423,10 +423,11 @@ class BitunixBot:
                 price_delta = upnl / qty if qty else 0.0
                 current_price = entry + price_delta if is_long else entry - price_delta
 
-                current_sl_str = sl_by_pos.get(pid)
-                if not current_sl_str:
-                    continue  # no SL set; can't safely manage
-                current_sl = float(current_sl_str)
+                sl_order = sl_orders.get(pid)
+                if not sl_order:
+                    continue  # no SL trigger order; can't safely manage
+                current_sl = float(sl_order["slPrice"])
+                sl_order_id = str(sl_order["id"])
 
                 # R-multiple is measured from the ORIGINAL config-based SL
                 # distance, not the current SL — otherwise sl_distance shrinks
@@ -467,17 +468,19 @@ class BitunixBot:
                    ((not is_long) and new_sl_rounded >= current_sl):
                     continue
 
-                # Push update — preserve existing TP.
-                tp_existing = tp_by_pos.get(pid)
-                self.client.modify_position_tpsl(
-                    symbol=symbol,
-                    position_id=pid,
+                # Push update — modify the SPECIFIC SL trigger order by its id.
+                # The position-level modify endpoint doesn't actually persist;
+                # this targets the SL trigger directly.
+                self.client.modify_tpsl_order(
+                    order_id=sl_order_id,
                     sl_price=str(new_sl_rounded),
-                    tp_price=tp_existing,
+                    sl_qty=sl_order.get("slQty"),
+                    sl_stop_type=sl_order.get("slStopType") or "LAST_PRICE",
+                    sl_order_type=sl_order.get("slOrderType") or "MARKET",
                 )
                 log.info(
-                    "SL %s for %s: %s → %s (%s, entry=%s, current=%.6f)",
-                    "ratchet", symbol, current_sl, new_sl_rounded, reason, entry, current_price,
+                    "SL ratchet %s: %s → %s (%s, entry=%s, current=%.6f)",
+                    symbol, current_sl, new_sl_rounded, reason, entry, current_price,
                 )
                 self.state.record_order(
                     f"{symbol} SL {current_sl} → {new_sl_rounded} ({reason})"

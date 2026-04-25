@@ -474,12 +474,16 @@ def _setup_bot_with_open_position(side: str, entry: float, current_price: float,
     }
     bot.client.pending_positions.return_value = [pos]
     bot.client.pending_tpsl.return_value = [
-        {"id": "T1", "positionId": "POS1", "symbol": "BTCUSDT",
+        {"id": "T_TP", "positionId": "POS1", "symbol": "BTCUSDT",
          "tpPrice": str(original_tp), "slPrice": None,
-         "tpStopType": "LAST_PRICE", "slStopType": "LAST_PRICE"},
-        {"id": "T2", "positionId": "POS1", "symbol": "BTCUSDT",
+         "tpStopType": "LAST_PRICE", "slStopType": "LAST_PRICE",
+         "tpQty": str(qty), "slQty": None,
+         "tpOrderType": "MARKET", "slOrderType": None},
+        {"id": "T_SL", "positionId": "POS1", "symbol": "BTCUSDT",
          "tpPrice": None, "slPrice": str(original_sl),
-         "tpStopType": "LAST_PRICE", "slStopType": "LAST_PRICE"},
+         "tpStopType": "LAST_PRICE", "slStopType": "LAST_PRICE",
+         "tpQty": None, "slQty": str(qty),
+         "tpOrderType": None, "slOrderType": "MARKET"},
     ]
     bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
     bot._resolve_symbol_meta()
@@ -491,13 +495,15 @@ def test_breakeven_sl_move_at_1r_long():
         side="BUY", entry=100_000.0, current_price=100_250.0,  # +1R exactly
     )
     bot._tick()
-    bot.client.modify_position_tpsl.assert_called_once()
-    kw = bot.client.modify_position_tpsl.call_args.kwargs
+    bot.client.modify_tpsl_order.assert_called_once()
+    kw = bot.client.modify_tpsl_order.call_args.kwargs
+    # Targets the SL trigger order specifically by its id.
+    assert kw["order_id"] == "T_SL", f"should target SL trigger T_SL, got {kw.get('order_id')}"
     new_sl = float(kw["sl_price"])
     # Expected: entry + 0.05% buffer = 100_050
     assert abs(new_sl - 100_050.0) < 1.0, f"long BE SL wrong: {new_sl}"
-    # Should preserve existing TP.
-    assert kw["tp_price"] == str(orig_tp), f"TP should be preserved: {kw['tp_price']} vs {orig_tp}"
+    # Should preserve the SL qty.
+    assert kw["sl_qty"] is not None
 
 
 def test_trailing_sl_at_2r_long():
@@ -505,8 +511,8 @@ def test_trailing_sl_at_2r_long():
         side="BUY", entry=100_000.0, current_price=100_500.0,  # +2R
     )
     bot._tick()
-    bot.client.modify_position_tpsl.assert_called_once()
-    new_sl = float(bot.client.modify_position_tpsl.call_args.kwargs["sl_price"])
+    bot.client.modify_tpsl_order.assert_called_once()
+    new_sl = float(bot.client.modify_tpsl_order.call_args.kwargs["sl_price"])
     # Expected: current - trail_dist = 100_500 - 0.5*250 = 100_375
     assert abs(new_sl - 100_375.0) < 1.0, f"long trailing SL wrong: {new_sl}"
 
@@ -516,32 +522,27 @@ def test_breakeven_sl_short():
         side="SELL", entry=100_000.0, current_price=99_750.0,  # +1R for short
     )
     bot._tick()
-    bot.client.modify_position_tpsl.assert_called_once()
-    new_sl = float(bot.client.modify_position_tpsl.call_args.kwargs["sl_price"])
+    bot.client.modify_tpsl_order.assert_called_once()
+    new_sl = float(bot.client.modify_tpsl_order.call_args.kwargs["sl_price"])
     # Expected: entry - 0.05% buffer = 99_950
     assert abs(new_sl - 99_950.0) < 1.0, f"short BE SL wrong: {new_sl}"
 
 
 def test_sl_never_moves_against_position():
-    """If existing SL is already more favorable than the new computed SL, skip."""
-    # Long: existing SL is already at 100_100 (very tight, profit-locked).
-    # +1R move would target 100_050 — that's WORSE (further from current).
-    # Should not call modify.
     bot, _, _ = _setup_bot_with_open_position(
         side="BUY", entry=100_000.0, current_price=100_250.0,
         original_sl=100_100.0,  # already locked in some profit
     )
     bot._tick()
-    bot.client.modify_position_tpsl.assert_not_called()
+    bot.client.modify_tpsl_order.assert_not_called()
 
 
 def test_no_management_below_threshold():
-    """At +0.5R favorable (below breakeven_at_r=1.0), no SL move."""
     bot, _, _ = _setup_bot_with_open_position(
         side="BUY", entry=100_000.0, current_price=100_125.0,  # +0.5R
     )
     bot._tick()
-    bot.client.modify_position_tpsl.assert_not_called()
+    bot.client.modify_tpsl_order.assert_not_called()
 
 
 def test_htf_and_funding_votes_contribute_to_score():
