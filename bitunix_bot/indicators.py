@@ -79,6 +79,74 @@ def atr(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) 
     return out
 
 
+def volume_ma(volumes: np.ndarray, period: int = 20) -> np.ndarray:
+    """Rolling SMA of volume — used as a baseline to spot volume spikes."""
+    n = len(volumes)
+    out = np.full(n, np.nan)
+    if n < period:
+        return out
+    for i in range(period - 1, n):
+        out[i] = volumes[i - period + 1 : i + 1].mean()
+    return out
+
+
+def vwap(high: np.ndarray, low: np.ndarray, close: np.ndarray, volumes: np.ndarray) -> np.ndarray:
+    """Rolling Volume-Weighted Average Price.
+
+    Uses (high+low+close)/3 as the typical price. This is the classic VWAP
+    calculation; price above VWAP = bullish bias, price below = bearish bias.
+    """
+    typical = (high + low + close) / 3.0
+    cum_pv = np.cumsum(typical * volumes)
+    cum_v = np.cumsum(volumes)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        out = np.where(cum_v > 0, cum_pv / cum_v, np.nan)
+    return out
+
+
+def stoch_rsi(
+    close: np.ndarray,
+    rsi_period: int = 14,
+    stoch_period: int = 14,
+    k_smooth: int = 3,
+    d_smooth: int = 3,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Stochastic RSI: stochastic oscillator applied to RSI values.
+
+    Returns (%K, %D), both normalized to [0, 100]. More sensitive than raw
+    RSI — common scalper momentum indicator. Crossovers in the oversold (<20)
+    or overbought (>80) zones produce reversal signals.
+    """
+    rsi_v = rsi(close, rsi_period)
+    n = len(rsi_v)
+    raw = np.full(n, np.nan)
+    for i in range(stoch_period - 1, n):
+        window = rsi_v[max(0, i - stoch_period + 1) : i + 1]
+        valid = window[~np.isnan(window)]
+        if len(valid) < 2:
+            continue
+        lo, hi = float(valid.min()), float(valid.max())
+        if hi == lo:
+            raw[i] = 50.0
+        else:
+            raw[i] = 100.0 * (rsi_v[i] - lo) / (hi - lo)
+    # %K = SMA(raw, k_smooth)
+    k = np.full(n, np.nan)
+    for i in range(k_smooth - 1, n):
+        window = raw[max(0, i - k_smooth + 1) : i + 1]
+        valid = window[~np.isnan(window)]
+        if len(valid):
+            k[i] = float(valid.mean())
+    # %D = SMA(%K, d_smooth)
+    d = np.full(n, np.nan)
+    for i in range(d_smooth - 1, n):
+        window = k[max(0, i - d_smooth + 1) : i + 1]
+        valid = window[~np.isnan(window)]
+        if len(valid):
+            d[i] = float(valid.mean())
+    return k, d
+
+
 def adx(high: np.ndarray, low: np.ndarray, close: np.ndarray, period: int = 14) -> np.ndarray:
     """Average Directional Index — measures trend strength regardless of direction.
 

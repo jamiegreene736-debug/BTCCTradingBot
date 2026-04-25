@@ -1,7 +1,8 @@
 """Signal generation — pure technicals: candlestick patterns + indicators.
 
 Per user direction: candlestick patterns AND other technicals (RSI, MACD,
-EMA, BB, ADX, Supertrend) ARE the decision. No other factors matter.
+EMA, BB, ADX, Supertrend, VWAP, Stoch RSI, Volume) ARE the decision.
+No other factors matter.
 
 NO HARD GATES — every signal comes purely from technical agreement.
 
@@ -9,20 +10,23 @@ Architecture:
 
   SCORING (combined directional score):
 
-    indicator_score = (count of rules agreeing) / 7              # 0-1
+    indicator_score = (count of rules agreeing) / 10             # 0-1
     pattern_score   = min(1, sum(pattern strengths) / norm)      # 0-1
     combined        = pattern_weight * pattern + (1-pw) * ind    # 0-1
 
   Fire if combined >= fire_threshold for one direction AND that side wins.
 
-INDICATOR RULES (counted, non-pattern half):
-  1. EMA stack (fast > mid > slow for long; reverse for short)
-  2. Close cross of EMA fast (bar-to-bar)
-  3. RSI in long/short window
-  4. MACD line vs signal AND histogram rising
-  5. Bollinger basis (close above/below mid)
-  6. Supertrend direction
-  7. ADX trend strength (counts for whichever side wins on other rules)
+INDICATOR RULES (counted, non-pattern half — 10 votes):
+  1.  EMA stack (fast > mid > slow for long; reverse for short)
+  2.  Close cross of EMA fast (bar-to-bar)
+  3.  RSI in long/short window
+  4.  MACD line vs signal AND histogram rising
+  5.  Bollinger basis (close above/below mid)
+  6.  Supertrend direction
+  7.  VWAP (close above/below institutional volume-weighted price)
+  8.  Stoch RSI cross (more sensitive than raw RSI)
+  9.  Volume spike (votes for whichever side wins; like ADX)
+  10. ADX trend strength (votes for whichever side wins)
 
 PATTERNS: 23 classical candlestick patterns from bitunix_bot.patterns,
 weighted 0.4–1.5 by historical reliability. See patterns.py.
@@ -40,7 +44,10 @@ from .config import StrategyCfg
 from .indicators import adx as adx_fn
 from .indicators import atr as atr_fn
 from .indicators import bollinger, ema, macd, rsi
+from .indicators import stoch_rsi as stoch_rsi_fn
 from .indicators import supertrend as supertrend_fn
+from .indicators import volume_ma as volume_ma_fn
+from .indicators import vwap as vwap_fn
 
 log = logging.getLogger(__name__)
 
@@ -69,6 +76,7 @@ def evaluate(
     lows: list[float],
     closes: list[float],
     cfg: StrategyCfg,
+    volumes: list[float] | None = None,
 ) -> Signal | None:
     if len(closes) < max(cfg.ema_slow, cfg.macd_slow, cfg.bb_period, cfg.atr_period) + 5:
         return None
@@ -77,6 +85,7 @@ def evaluate(
     h = np.array(highs, dtype=float)
     l = np.array(lows, dtype=float)
     c = np.array(closes, dtype=float)
+    v = np.array(volumes if volumes is not None else [0.0] * len(c), dtype=float)
 
     # ------------------------------------------------------------------ indicators
     ema_f = ema(c, cfg.ema_fast)
@@ -88,6 +97,10 @@ def evaluate(
     atr_v = atr_fn(h, l, c, cfg.atr_period)
     adx_v = adx_fn(h, l, c, cfg.adx_period)
     _, st_dir = supertrend_fn(h, l, c, cfg.supertrend_period, cfg.supertrend_mult)
+    vol_ma_v = volume_ma_fn(v, cfg.volume_ma_period) if v.sum() > 0 else None
+    vwap_v = vwap_fn(h, l, c, v) if v.sum() > 0 else None
+    stoch_k, stoch_d = stoch_rsi_fn(c, cfg.rsi_period, cfg.stoch_rsi_period,
+                                     cfg.stoch_rsi_k, cfg.stoch_rsi_d)
 
     i = len(c) - 1
     p = c[i]
@@ -146,21 +159,49 @@ def evaluate(
         elif st_dir[i] == -1:
             short_reasons.append("supertrend_down")
 
-    # 7. ADX trend strength — counts for whichever side is otherwise winning.
+    # 7. VWAP — close above/below institutional volume-weighted reference.
+    if vwap_v is not None and i < len(vwap_v) and not np.isnan(vwap_v[i]):
+        if p > vwap_v[i]:
+            long_reasons.append("above_vwap")
+        elif p < vwap_v[i]:
+            short_reasons.append("below_vwap")
+
+    # 8. Stochastic RSI — momentum oscillator. Bull cross in oversold, bear
+    # cross in overbought. More sensitive than raw RSI.
+    if i < len(stoch_k) and i >= 1:
+        k_now, k_prev = stoch_k[i], stoch_k[i - 1]
+        d_now, d_prev = stoch_d[i], stoch_d[i - 1]
+        if not (np.isnan(k_now) or np.isnan(d_now) or np.isnan(k_prev) or np.isnan(d_prev)):
+            # Bullish cross: %K crosses above %D AND we're not already overbought.
+            if k_prev <= d_prev and k_now > d_now and k_now < 80:
+                long_reasons.append(f"stoch_bull({k_now:.0f})")
+            # Bearish cross: %K crosses below %D AND not already oversold.
+            if k_prev >= d_prev and k_now < d_now and k_now > 20:
+                short_reasons.append(f"stoch_bear({k_now:.0f})")
+
+    # 9. Volume confirmation — a volume spike (current > N× average) votes
+    # for whichever side is otherwise winning. Like ADX, direction-agnostic.
+    if vol_ma_v is not None and i < len(vol_ma_v):
+        vma = vol_ma_v[i]
+        if not np.isnan(vma) and vma > 0:
+            ratio = v[i] / vma
+            if ratio >= cfg.volume_spike_multiplier:
+                if len(long_reasons) > len(short_reasons):
+                    long_reasons.append(f"vol_spike({ratio:.1f}x)")
+                elif len(short_reasons) > len(long_reasons):
+                    short_reasons.append(f"vol_spike({ratio:.1f}x)")
+
+    # 10. ADX trend strength — counts for whichever side is otherwise winning.
     a_now = adx_v[i] if i < len(adx_v) else np.nan
     if not np.isnan(a_now) and a_now >= cfg.adx_min:
-        # ADX is direction-agnostic; it amplifies whichever side has more votes.
         if len(long_reasons) > len(short_reasons):
             long_reasons.append(f"adx({a_now:.0f})")
         elif len(short_reasons) > len(long_reasons):
             short_reasons.append(f"adx({a_now:.0f})")
-        else:
-            # Tie — ADX doesn't break it, but record context.
-            pass
 
     indicator_long = len(long_reasons)
     indicator_short = len(short_reasons)
-    INDICATOR_MAX = 7
+    INDICATOR_MAX = 10
 
     # ------------------------------------------------------------------ patterns
     hits = patterns.detect(o, h, l, c)

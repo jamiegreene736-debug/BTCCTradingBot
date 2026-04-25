@@ -73,6 +73,14 @@ strategy:
   # Supertrend regime filter (direction-aware; counted)
   supertrend_period: 10
   supertrend_mult: 3.0
+  # Volume confirmation — vote for whichever side wins when volume > multiplier × MA.
+  volume_ma_period: 20
+  volume_spike_multiplier: 1.5
+  # Stochastic RSI — sensitive momentum oscillator (Stoch applied to RSI values).
+  # Bull cross (%K > %D) outside overbought = long; bear cross outside oversold = short.
+  stoch_rsi_period: 14
+  stoch_rsi_k: 3
+  stoch_rsi_d: 3
   # Dead-market filter REMOVED. Set to 0 to disable (kept for backward compat).
   min_atr_pct: 0.0
   # Pattern recognition + indicators are the entire decision.

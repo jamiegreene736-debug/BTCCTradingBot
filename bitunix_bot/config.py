@@ -69,6 +69,14 @@ class StrategyCfg:
     # Supertrend regime filter — direction-aware.
     supertrend_period: int = 10
     supertrend_mult: float = 3.0
+    # Volume confirmation — current bar volume / N-period MA. A "spike" is when
+    # current volume >= multiplier × MA, indicating real conviction behind the move.
+    volume_ma_period: int = 20
+    volume_spike_multiplier: float = 1.5
+    # Stochastic RSI — more sensitive momentum oscillator (Stoch applied to RSI).
+    stoch_rsi_period: int = 14
+    stoch_rsi_k: int = 3
+    stoch_rsi_d: int = 3
     # Dead-market filter: skip if ATR/price < this (no point trading when
     # the market can't move enough to clear fees + reach TP within hours).
     min_atr_pct: float = 0.08    # 0.08% = 8 bps

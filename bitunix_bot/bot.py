@@ -254,13 +254,15 @@ class BitunixBot:
             highs = [float(r["high"]) for r in rows]
             lows = [float(r["low"]) for r in rows]
             closes = [float(r["close"]) for r in rows]
+            # Volume — Bitunix returns base coin volume per bar.
+            volumes = [float(r.get("baseVol") or r.get("quoteVol") or 0) for r in rows]
 
             # Signal.
-            sig = evaluate(opens, highs, lows, closes, self.cfg.strategy)
+            sig = evaluate(opens, highs, lows, closes, self.cfg.strategy, volumes=volumes)
             if sig is None:
                 continue
             sig_text = (f"{sym} {sig.direction.upper()} score={sig.score:.2f} "
-                        f"(pat={sig.pattern_score:.1f},ind={sig.indicator_score}/7) @ "
+                        f"(pat={sig.pattern_score:.1f},ind={sig.indicator_score}/10) @ "
                         f"{sig.price:.4f} ({', '.join(sig.reasons)})")
             log.info("Signal: %s", sig_text)
             self.state.record_signal(sig_text)
