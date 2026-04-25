@@ -1065,6 +1065,94 @@ def test_obv_and_mfi_indicators_compute():
     assert 0 <= mfi_v[-1] <= 100, f"MFI out of range: {mfi_v[-1]}"
 
 
+def test_skip_events_dedupe_within_window():
+    """Repeated identical skips must collapse to a single event within
+    the dedupe window, otherwise the activity feed gets spammed."""
+    reset_state()
+    state = get_state()
+    state.skip_dedupe_seconds = 60
+    for _ in range(10):
+        state.record_skip("XRPUSDT: same-direction cap (2 shorts already)")
+    skips = [e for e in state.snapshot()["events"] if e["kind"] == "skip"]
+    assert len(skips) == 1, f"expected 1 deduped skip, got {len(skips)}"
+
+    # Different reason should NOT dedupe.
+    state.record_skip("XRPUSDT: no available margin")
+    skips = [e for e in state.snapshot()["events"] if e["kind"] == "skip"]
+    assert len(skips) == 2
+
+    # Different symbol same reason should NOT dedupe.
+    state.record_skip("BTCUSDT: same-direction cap (2 shorts already)")
+    skips = [e for e in state.snapshot()["events"] if e["kind"] == "skip"]
+    assert len(skips) == 3
+
+
+def test_capped_signals_emit_skip_not_signal():
+    """When same-direction cap blocks, the activity feed should get a
+    skip event (deduped) rather than a noisy signal+skip pair."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.trading.max_open_positions = 4
+    cfg.trading.max_same_direction = 2
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    # Two LONGs already open on BTC and ETH.
+    bot.client.pending_positions.return_value = [
+        {"positionId": "P1", "symbol": "BTCUSDT", "qty": "0.01", "side": "BUY",
+         "leverage": 100, "ctime": int(time.time() * 1000)},
+        {"positionId": "P2", "symbol": "ETHUSDT", "qty": "0.1", "side": "BUY",
+         "leverage": 100, "ctime": int(time.time() * 1000)},
+    ]
+    bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+    bot._resolve_symbol_meta()
+    bot._tick()
+
+    events = bot.state.snapshot()["events"]
+    skips = [e for e in events if e["kind"] == "skip"]
+    signals = [e for e in events if e["kind"] == "signal"]
+    # We expect skip events for each blocked symbol (deduped), and NO
+    # signal events for the blocked symbols.
+    assert any("same-direction" in s["text"] for s in skips), \
+        f"expected same-direction skip, got skips={[s['text'] for s in skips]}"
+    # The dashboard would have shown the skip + signal pair before this fix.
+    # After the fix: signal events only for actionable (non-blocked) signals.
+    blocked_symbols = {"SOLUSDT", "XRPUSDT"}  # those would have signaled LONG
+    blocked_signals = [s for s in signals
+                        if any(sym in s["text"] for sym in blocked_symbols)]
+    assert not blocked_signals, \
+        f"capped symbols should NOT emit signal events: {blocked_signals}"
+
+
+def test_adaptive_tp_tightens_with_age_and_respects_floor():
+    """The adaptive TP function should:
+       - return the original target for fresh positions
+       - tighten progressively with age
+       - never go below the fee-aware floor
+    """
+    from bitunix_bot.risk import adaptive_tp_r
+
+    # Fresh trade: full target.
+    r = adaptive_tp_r(age_minutes=2, original_tp_r=1.5, fee_pct=0.17, sl_pct=0.25, floor_r=0.7)
+    assert abs(r - 1.5) < 0.01, f"fresh should be 1.5R, got {r}"
+
+    # 7 min: 80% of original.
+    r = adaptive_tp_r(age_minutes=7, original_tp_r=1.5, fee_pct=0.17, sl_pct=0.25, floor_r=0.7)
+    assert abs(r - 1.2) < 0.01, f"at 7m should be 1.2R (=0.8*1.5), got {r}"
+
+    # 15 min: 60% but floor wins.
+    r = adaptive_tp_r(age_minutes=15, original_tp_r=1.5, fee_pct=0.17, sl_pct=0.25, floor_r=0.7)
+    assert r >= 0.9, f"at 15m should be ≥0.9R, got {r}"
+
+    # 50 min: floor.
+    r = adaptive_tp_r(age_minutes=50, original_tp_r=1.5, fee_pct=0.17, sl_pct=0.25, floor_r=0.7)
+    # Fee floor: fee/sl × 1.5 = (0.17/0.25) × 1.5 = 1.02 — beats floor_r=0.7.
+    assert r >= 1.0, f"old trade must respect fee-aware floor (≥1.0R), got {r}"
+
+    # If sl_pct is large (low leverage), fee floor relaxes; floor_r kicks in.
+    r = adaptive_tp_r(age_minutes=50, original_tp_r=1.5, fee_pct=0.05, sl_pct=1.0, floor_r=0.7)
+    assert abs(r - 0.7) < 0.01, f"with low fees, floor=0.7R, got {r}"
+
+
 def test_sl_and_tp_always_on_correct_side():
     """Critical: SL must be BELOW entry for longs and ABOVE for shorts.
     Inverted SL = catastrophic loss. Verify across both directions."""
@@ -1133,6 +1221,9 @@ def main() -> int:
         test_smc_fvg_detection,
         test_smc_liquidity_sweep_bearish,
         test_obv_and_mfi_indicators_compute,
+        test_skip_events_dedupe_within_window,
+        test_capped_signals_emit_skip_not_signal,
+        test_adaptive_tp_tightens_with_age_and_respects_floor,
         test_sl_and_tp_always_on_correct_side,
     ]
     passed = failed = 0

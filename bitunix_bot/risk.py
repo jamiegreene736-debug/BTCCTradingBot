@@ -36,6 +36,45 @@ class OrderPlan:
     notes: str
 
 
+def adaptive_tp_r(
+    age_minutes: float,
+    original_tp_r: float,
+    fee_pct: float,
+    sl_pct: float,
+    floor_r: float = 0.7,
+) -> float:
+    """Return the desired TP distance in R-multiples based on position age.
+
+    Methodology: as a flat trade ages, lower the bar on what counts as a
+    "win" — but never below a level that's still profitable after fees.
+
+    Tier ladder (1m timeframe assumed):
+      0–5 min:   original (e.g. 1.5R = full target)
+      5–10 min:  80% of original (still ambitious)
+      10–20 min: 60% of original
+      20–40 min: 40% of original (or floor, whichever is higher)
+      40+ min:   floor_r (minimum profitable after fees)
+
+    Floor is enforced: TP must stay ≥ floor_r × SL distance, AND must
+    cover fees with a small margin (fee_pct + 50% buffer in % of price).
+    Returns R-multiple (NOT a price); caller multiplies by SL distance.
+    """
+    # Floor must beat fees with margin. Convert fee_pct to R units:
+    #   1R = sl_pct of price; fees = fee_pct of price → fees in R = fee_pct / sl_pct.
+    fee_r = (fee_pct / sl_pct) if sl_pct > 0 else 0.0
+    safety_floor = max(floor_r, fee_r * 1.5)
+
+    if age_minutes < 5:
+        return max(original_tp_r, safety_floor)
+    if age_minutes < 10:
+        return max(original_tp_r * 0.80, safety_floor)
+    if age_minutes < 20:
+        return max(original_tp_r * 0.60, safety_floor)
+    if age_minutes < 40:
+        return max(original_tp_r * 0.40, safety_floor)
+    return safety_floor
+
+
 def build_order(
     signal: Signal,
     free_margin: float,

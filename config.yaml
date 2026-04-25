@@ -50,6 +50,17 @@ risk:
   breakeven_buffer_pct: 0.05    # tiny cushion above entry to cover round-trip fees
   trailing_activate_r: 1.5
   trailing_distance_r: 0.5
+  # Round-trip fee + slippage estimate as % of notional (Bitunix taker × 2 ≈
+  # 0.12% + 0.05% slippage). The bot guarantees TP will always be at least
+  # adaptive_tp_floor_r × SL distance which exceeds this fee buffer, so a
+  # winning trade ALWAYS nets profit after fees.
+  round_trip_fee_pct: 0.17
+  # Adaptive TP — as a position ages without hitting the original target,
+  # tighten the TP progressively. We always aim for profit (TP stays above
+  # fee floor), but accept smaller wins on flat trades rather than letting
+  # them time-exit at a loss. Tier ladder is hard-coded in risk.py.
+  adaptive_tp_enabled: true
+  adaptive_tp_floor_r: 0.7      # minimum profitable TP after fees
 
 strategy:
   # 5-rule confluence; min_confluence is how many must agree to fire.

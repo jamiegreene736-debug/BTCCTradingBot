@@ -25,7 +25,7 @@ import numpy as np
 from .client import BitunixClient, BitunixError
 from .config import Config
 from .orderbook import OrderBookFeed
-from .risk import OrderPlan, build_order
+from .risk import OrderPlan, adaptive_tp_r, build_order
 from .state import get as get_state
 from .strategy import evaluate
 
@@ -382,16 +382,24 @@ class BitunixBot:
                         f"sess={sess_w:.2f}) @ "
                         f"{sig.price:.4f} ({', '.join(sig.reasons)})")
             log.info("Signal: %s", sig_text)
-            self.state.record_signal(sig_text)
 
-            # Same-direction cap: kills correlated-bet risk (e.g. 4 longs on
-            # crypto = 1 big bet on crypto, not 4 diversified bets).
+            # Determine up-front if this signal will be blocked by any cap.
+            # If so, record only the (deduped) skip — don't crowd the activity
+            # feed with signal events that won't lead to an order.
+            block_reason: str | None = None
             if sig.direction == "long" and long_count >= self.cfg.trading.max_same_direction:
-                self.state.record_skip(f"{sym}: same-direction cap ({long_count} longs already)")
+                block_reason = f"{sym}: same-direction cap ({long_count} longs already)"
+            elif sig.direction == "short" and short_count >= self.cfg.trading.max_same_direction:
+                block_reason = f"{sym}: same-direction cap ({short_count} shorts already)"
+            elif n_open >= self.cfg.trading.max_open_positions:
+                block_reason = f"{sym}: global cap ({n_open}/{self.cfg.trading.max_open_positions})"
+
+            if block_reason:
+                self.state.record_skip(block_reason)
                 continue
-            if sig.direction == "short" and short_count >= self.cfg.trading.max_same_direction:
-                self.state.record_skip(f"{sym}: same-direction cap ({short_count} shorts already)")
-                continue
+
+            # Actionable signal → record for the dashboard.
+            self.state.record_signal(sig_text)
 
             # Risk plan.
             if cached_acct is None:
@@ -466,13 +474,15 @@ class BitunixBot:
             log.warning("pending_tpsl fetch failed (skipping SL management): %s", e)
             return
         # Bitunix stores TPSL as separate trigger orders — find the SL-only
-        # row per position so we can target it by its own id (the only way
-        # to actually persist a modification).
+        # AND TP-only rows per position so we can target each by its own id.
         sl_orders: dict[str, dict[str, Any]] = {}    # positionId -> SL trigger row
+        tp_orders: dict[str, dict[str, Any]] = {}    # positionId -> TP trigger row
         for r in tpsl_rows:
             pid = str(r.get("positionId") or "")
             if r.get("slPrice"):
                 sl_orders[pid] = r
+            if r.get("tpPrice"):
+                tp_orders[pid] = r
 
         rk = self.cfg.risk
         for p in open_positions:
@@ -556,6 +566,63 @@ class BitunixBot:
                 )
                 self.state.record_order(
                     f"{symbol} SL {current_sl} → {new_sl_rounded} ({reason})"
+                )
+            except BitunixError as e_sl:
+                # SL ratchet may benignly fail if the position closed.
+                msg = (e_sl.msg or "").lower()
+                benign = any(s in msg for s in
+                             ("not found", "not exist", "closed", "expired", "canceled"))
+                if not benign:
+                    log.warning("SL update failed for %s: %s", p.get("symbol"), e_sl)
+                    self.state.record_error(f"SL update failed: {e_sl.code} {e_sl.msg}")
+                continue   # skip TP adjustment too — position likely gone
+
+            # ---------- ADAPTIVE TP TIGHTENING ----------
+            # As the trade ages, ratchet TP DOWN (closer to current price)
+            # toward a fee-aware floor. Always profitable; never below
+            # round-trip fees. Original TP only loosens, never tightens
+            # past floor.
+            try:
+                if not rk.adaptive_tp_enabled:
+                    continue
+                tp_order = tp_orders.get(pid)
+                if not tp_order:
+                    continue  # position has no TP trigger — skip
+                current_tp = float(tp_order["tpPrice"])
+                tp_order_id = str(tp_order["id"])
+                # Position age in minutes from ctime (Bitunix ms timestamp).
+                ctime_ms = int(p.get("ctime") or 0)
+                age_min = (time.time() * 1000 - ctime_ms) / 60000.0 if ctime_ms else 0
+                desired_r = adaptive_tp_r(
+                    age_minutes=age_min,
+                    original_tp_r=rk.take_profit_r,
+                    fee_pct=rk.round_trip_fee_pct,
+                    sl_pct=rk.stop_loss_pct,
+                    floor_r=rk.adaptive_tp_floor_r,
+                )
+                desired_tp = (entry + desired_r * sl_distance) if is_long \
+                             else (entry - desired_r * sl_distance)
+                desired_tp_rounded = round(desired_tp, meta.price_precision)
+                # Only TIGHTEN (move TP toward entry). Never expand TP.
+                tighter = (desired_tp_rounded < current_tp) if is_long \
+                          else (desired_tp_rounded > current_tp)
+                if not tighter:
+                    continue
+                # And only tighten meaningfully (>= 1 price tick).
+                if abs(desired_tp_rounded - current_tp) < 10 ** (-meta.price_precision):
+                    continue
+                self.client.modify_tpsl_order(
+                    order_id=tp_order_id,
+                    tp_price=str(desired_tp_rounded),
+                    tp_qty=tp_order.get("tpQty"),
+                    tp_stop_type=tp_order.get("tpStopType") or "LAST_PRICE",
+                    tp_order_type=tp_order.get("tpOrderType") or "MARKET",
+                )
+                log.info("TP tighten %s: %s → %s (age=%.1fm desired=%.2fR)",
+                         symbol, current_tp, desired_tp_rounded, age_min, desired_r)
+                self.state.record_order(
+                    f"{symbol} TP {current_tp} → {desired_tp_rounded} "
+                    f"(age={age_min:.0f}m, target={desired_r:.2f}R)"
                 )
             except BitunixError as e:
                 # "Order not found" / "position closed" between our pending_tpsl

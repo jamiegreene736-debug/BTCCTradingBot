@@ -32,6 +32,10 @@ class BotState:
         self.events: deque[TickEvent] = deque(maxlen=max_events)
         self.last_price: float | None = None
         self.last_klines_count: int = 0
+        # Skip-event dedupe: (symbol, reason) -> last_recorded_unix_ts.
+        # Suppresses spam like "XRPUSDT: same-direction cap" on every tick.
+        self._skip_last_at: dict[tuple[str, str], int] = {}
+        self.skip_dedupe_seconds: int = 300  # 5-min cooldown per (symbol, reason)
 
     def record_tick(self, price: float | None, klines_n: int) -> None:
         with self._lock:
@@ -53,8 +57,22 @@ class BotState:
             self.events.append(TickEvent(int(time.time()), "order", text, extra))
 
     def record_skip(self, text: str) -> None:
+        """Record a skip event. Deduplicates (symbol, reason-prefix) within
+        skip_dedupe_seconds so the activity feed isn't flooded with the
+        same skip on every tick (e.g. same-direction cap blocking the same
+        symbol for an hour straight)."""
         with self._lock:
-            self.events.append(TickEvent(int(time.time()), "skip", text))
+            # Extract symbol prefix and a coarse reason key so different
+            # SL distances or counts dedupe to the same cooldown bucket.
+            symbol, _, rest = text.partition(":")
+            reason_key = rest.strip().split("(")[0].strip().split(" ")[0:3]
+            key = (symbol.strip(), " ".join(reason_key))
+            now_s = int(time.time())
+            last = self._skip_last_at.get(key, 0)
+            if now_s - last < self.skip_dedupe_seconds:
+                return  # suppressed
+            self._skip_last_at[key] = now_s
+            self.events.append(TickEvent(now_s, "skip", text))
 
     def record_error(self, text: str) -> None:
         with self._lock:

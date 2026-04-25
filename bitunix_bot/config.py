@@ -44,6 +44,17 @@ class RiskCfg:
     breakeven_buffer_pct: float = 0.05   # SL sits this % above (long) / below (short) entry
     trailing_activate_r: float = 1.5     # at +1.5R favorable, start trailing
     trailing_distance_r: float = 0.5     # SL trails this many R behind current price
+    # Round-trip fee buffer (round-trip taker fee + slippage estimate). Used
+    # to enforce a minimum profitable TP target after fees. 0.17% is the
+    # observed Bitunix taker round-trip + slippage on 50x.
+    round_trip_fee_pct: float = 0.17     # % of notional. SL+TP must clear this for net profit.
+    # Adaptive TP tightening over time. Original TP is take_profit_r × SL distance.
+    # As the trade ages, if it hasn't progressed, ratchet the TP DOWN toward
+    # break-even-plus-fees so the trade has a realistic chance to fire while
+    # still being net-positive. Tiers expressed as (age_minutes, R-multiple).
+    # Always aim for profit — never go below the fee floor.
+    adaptive_tp_enabled: bool = True
+    adaptive_tp_floor_r: float = 0.7     # never tighten TP below this R (covers fees + small profit)
 
 
 @dataclass
