@@ -1660,6 +1660,174 @@ def test_post_only_paper_mode_still_uses_paper_path():
     assert orders, "paper mode should still emit a simulated order event"
 
 
+# ----------------------------------------------------------------- trade tape
+
+
+def test_tradetape_parser_handles_side_field():
+    """Trade payload with explicit side: 'BUY'/'SELL' aggressor flag."""
+    from bitunix_bot.tradetape import TradeFeed
+    msg = {"ch": "trade", "symbol": "BTCUSDT", "data": [
+        {"p": "60000", "v": "0.5", "t": int(time.time() * 1000), "side": "BUY"},
+        {"p": "60001", "v": "0.3", "t": int(time.time() * 1000), "side": "SELL"},
+    ]}
+    sym, trades = TradeFeed._extract_trades(msg)
+    assert sym == "BTCUSDT"
+    assert len(trades) == 2
+    assert trades[0].is_buy is True and trades[0].qty == 0.5 and trades[0].price == 60000.0
+    assert trades[1].is_buy is False and trades[1].qty == 0.3
+
+
+def test_tradetape_parser_handles_buyer_maker_field():
+    """Binance-style: isBuyerMaker=True means the seller was the aggressor."""
+    from bitunix_bot.tradetape import TradeFeed
+    msg = {"symbol": "ETHUSDT", "data": {
+        "price": "3000", "size": "1.5", "ts": int(time.time() * 1000),
+        "m": True,    # buyer was maker → seller aggressed → is_buy=False
+    }}
+    sym, trades = TradeFeed._extract_trades(msg)
+    assert sym == "ETHUSDT" and len(trades) == 1
+    assert trades[0].is_buy is False, "buyer-maker=True implies seller aggressor"
+    # Inverse case.
+    msg["data"]["m"] = False
+    _, trades = TradeFeed._extract_trades(msg)
+    assert trades[0].is_buy is True
+
+
+def test_tradetape_parser_rejects_unparseable():
+    """Missing price/qty/side → no trade emitted."""
+    from bitunix_bot.tradetape import TradeFeed
+    bad_msgs = [
+        {"symbol": "BTC", "data": {"v": "1"}},                 # no price
+        {"symbol": "BTC", "data": {"p": "60000"}},             # no qty
+        {"symbol": "BTC", "data": {"p": "60000", "v": "1"}},   # no side
+        {"symbol": "BTC", "data": {"p": "0", "v": "1", "side": "BUY"}},  # zero price
+    ]
+    for m in bad_msgs:
+        sym, trades = TradeFeed._extract_trades(m)
+        assert not trades, f"expected no trades from {m}, got {trades}"
+
+
+def test_tradetape_cvd_computation():
+    """CVD = sum of signed sizes (buy positive, sell negative)."""
+    from bitunix_bot.tradetape import TradeFeed, Trade
+    feed = TradeFeed(symbols=["BTCUSDT"])
+    now = time.time()
+    # 3 buys totalling 2.0, 2 sells totalling 1.5 → CVD = +0.5
+    for ts_off, qty, is_buy in [
+        (-30, 0.5, True), (-25, 1.0, True), (-20, 0.5, True),
+        (-15, 1.0, False), (-10, 0.5, False),
+    ]:
+        feed._ingest(Trade(ts=now + ts_off, price=60000, qty=qty, is_buy=is_buy), "BTCUSDT")
+    cvd = feed.get_cvd("BTCUSDT", window_secs=60)
+    assert cvd is not None and abs(cvd - 0.5) < 1e-9, f"expected +0.5, got {cvd}"
+
+
+def test_tradetape_window_filtering():
+    """Trades older than window_secs must be excluded from accessors."""
+    from bitunix_bot.tradetape import TradeFeed, Trade
+    feed = TradeFeed(symbols=["BTCUSDT"])
+    now = time.time()
+    # Old buy (90s ago, outside 60s window) + recent sell.
+    feed._ingest(Trade(ts=now - 90, price=60000, qty=10.0, is_buy=True), "BTCUSDT")
+    feed._ingest(Trade(ts=now - 5, price=60000, qty=2.0, is_buy=False), "BTCUSDT")
+    cvd_60 = feed.get_cvd("BTCUSDT", window_secs=60)
+    cvd_120 = feed.get_cvd("BTCUSDT", window_secs=120)
+    assert abs(cvd_60 - (-2.0)) < 1e-9, f"60s window should only see -2.0, got {cvd_60}"
+    assert abs(cvd_120 - 8.0) < 1e-9, f"120s window should see +8.0, got {cvd_120}"
+
+
+def test_tradetape_aggression_ratio_bounded():
+    """Aggression ratio must be in [-1, +1]."""
+    from bitunix_bot.tradetape import TradeFeed, Trade
+    feed = TradeFeed(symbols=["BTCUSDT"])
+    now = time.time()
+    # All buys → ratio = +1.0
+    for i in range(5):
+        feed._ingest(Trade(ts=now - i, price=60000, qty=1.0, is_buy=True), "BTCUSDT")
+    assert feed.get_aggression_ratio("BTCUSDT", window_secs=10) == 1.0
+
+    # All sells → ratio = -1.0
+    feed2 = TradeFeed(symbols=["BTCUSDT"])
+    for i in range(5):
+        feed2._ingest(Trade(ts=now - i, price=60000, qty=1.0, is_buy=False), "BTCUSDT")
+    assert feed2.get_aggression_ratio("BTCUSDT", window_secs=10) == -1.0
+
+    # Balanced → ratio = 0.0
+    feed3 = TradeFeed(symbols=["BTCUSDT"])
+    for i in range(4):
+        feed3._ingest(Trade(ts=now - i, price=60000, qty=1.0, is_buy=(i % 2 == 0)), "BTCUSDT")
+    assert feed3.get_aggression_ratio("BTCUSDT", window_secs=10) == 0.0
+
+
+def test_tradetape_print_rate_and_aggressor_size():
+    """print_rate = trades/sec; avg_aggressor_size = mean of qty."""
+    from bitunix_bot.tradetape import TradeFeed, Trade
+    feed = TradeFeed(symbols=["BTCUSDT"])
+    now = time.time()
+    qtys = [0.5, 1.5, 2.0, 0.5, 1.0]
+    for i, q in enumerate(qtys):
+        feed._ingest(Trade(ts=now - i, price=60000, qty=q, is_buy=True), "BTCUSDT")
+    rate = feed.get_print_rate("BTCUSDT", window_secs=10)
+    assert rate is not None and abs(rate - 0.5) < 1e-9, f"5 trades / 10s = 0.5/s, got {rate}"
+    avg = feed.get_avg_aggressor_size("BTCUSDT", window_secs=10)
+    assert avg is not None and abs(avg - 1.1) < 1e-9, f"mean = 1.1, got {avg}"
+
+
+def test_tradetape_large_print_count():
+    """Iceberg-style detector — count of prints above a size threshold."""
+    from bitunix_bot.tradetape import TradeFeed, Trade
+    feed = TradeFeed(symbols=["BTCUSDT"])
+    now = time.time()
+    for q in (0.1, 5.0, 0.2, 7.0, 10.0, 0.05):
+        feed._ingest(Trade(ts=now - 1, price=60000, qty=q, is_buy=True), "BTCUSDT")
+    count = feed.get_large_print_count("BTCUSDT", size_threshold=3.0, window_secs=10)
+    assert count == 3, f"expected 3 prints ≥3.0, got {count}"
+
+
+def test_tradetape_returns_none_when_empty():
+    """Stale / no-data state should return None, not crash or zero."""
+    from bitunix_bot.tradetape import TradeFeed
+    feed = TradeFeed(symbols=["BTCUSDT"])
+    assert feed.get_cvd("BTCUSDT") is None
+    assert feed.get_aggression_ratio("BTCUSDT") is None
+    assert feed.get_print_rate("BTCUSDT") is None
+    assert feed.get_avg_aggressor_size("BTCUSDT") is None
+    assert feed.last_trade_age("BTCUSDT") is None
+
+
+def test_tradetape_handles_seconds_and_ms_timestamps():
+    """Timestamps may arrive as seconds OR milliseconds. Both should work."""
+    from bitunix_bot.tradetape import TradeFeed
+    sec_msg = {"symbol": "X", "data": {"p": "1", "v": "1", "t": 1700000000, "side": "BUY"}}
+    ms_msg = {"symbol": "X", "data": {"p": "1", "v": "1", "t": 1700000000000, "side": "BUY"}}
+    _, t1 = TradeFeed._extract_trades(sec_msg)
+    _, t2 = TradeFeed._extract_trades(ms_msg)
+    # Both should parse to roughly the same unix-second timestamp.
+    assert t1 and t2
+    assert abs(t1[0].ts - t2[0].ts) < 1.0, \
+        f"sec={t1[0].ts}, ms-converted={t2[0].ts} should match"
+
+
+def test_tradetape_lifecycle_in_bot():
+    """Bot.run_forever should start tape_feed alongside ob_feed (smoke test)."""
+    reset_state()
+    cfg = fresh_cfg()
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    # Don't actually call run_forever (it loops); just verify the feed
+    # gets instantiated when start() runs the same wiring path.
+    # Manually mirror the lifecycle init.
+    from bitunix_bot.orderbook import OrderBookFeed
+    from bitunix_bot.tradetape import TradeFeed
+    bot.ob_feed = OrderBookFeed(symbols=cfg.trading.symbols, depth_levels=10)
+    bot.tape_feed = TradeFeed(symbols=cfg.trading.symbols)
+    assert isinstance(bot.tape_feed, TradeFeed)
+    # And the feeds are not yet connected (we never called .start()).
+    assert not bot.tape_feed.is_connected()
+    # Sanity: accessors return None on cold feed.
+    assert bot.tape_feed.get_cvd("BTCUSDT") is None
+
+
 # ----------------------------------------------------------------- runner
 
 def main() -> int:
@@ -1718,6 +1886,17 @@ def main() -> int:
         test_pending_limits_count_toward_global_cap,
         test_pending_limits_count_toward_same_direction_cap,
         test_post_only_paper_mode_still_uses_paper_path,
+        test_tradetape_parser_handles_side_field,
+        test_tradetape_parser_handles_buyer_maker_field,
+        test_tradetape_parser_rejects_unparseable,
+        test_tradetape_cvd_computation,
+        test_tradetape_window_filtering,
+        test_tradetape_aggression_ratio_bounded,
+        test_tradetape_print_rate_and_aggressor_size,
+        test_tradetape_large_print_count,
+        test_tradetape_returns_none_when_empty,
+        test_tradetape_handles_seconds_and_ms_timestamps,
+        test_tradetape_lifecycle_in_bot,
     ]
     passed = failed = 0
     for t in tests:

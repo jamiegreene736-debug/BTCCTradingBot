@@ -28,6 +28,7 @@ from .orderbook import OrderBookFeed
 from .risk import OrderPlan, adaptive_tp_r, build_order
 from .state import get as get_state
 from .strategy import evaluate
+from .tradetape import TradeFeed
 
 log = logging.getLogger(__name__)
 
@@ -96,6 +97,11 @@ class BitunixBot:
         self.pending_limits: dict[str, dict[str, Any]] = {}
         # Live order-book feed (WebSocket). Started in start() / run_forever().
         self.ob_feed: OrderBookFeed | None = None
+        # Live trade-tape feed (WebSocket). Companion to ob_feed — where the
+        # OB shows what's RESTING, the tape shows what just EXECUTED and which
+        # side aggressed. Source of real CVD / aggression / print-rate flow
+        # signals. Started alongside ob_feed in run_forever().
+        self.tape_feed: TradeFeed | None = None
         self.stop_flag = False
         self.state = get_state()
 
@@ -181,6 +187,10 @@ class BitunixBot:
                 depth_levels=self.cfg.strategy.ob_depth_levels,
             )
             self.ob_feed.start()
+        # Start the trade-tape feed alongside.
+        if self.tape_feed is None:
+            self.tape_feed = TradeFeed(symbols=self.cfg.trading.symbols)
+            self.tape_feed.start()
         while not self.stop_flag:
             try:
                 self._tick()
@@ -196,6 +206,8 @@ class BitunixBot:
                 time.sleep(1)
         if self.ob_feed:
             self.ob_feed.stop()
+        if self.tape_feed:
+            self.tape_feed.stop()
         log.info("Bot stopped")
 
     def _on_sig(self, *_: Any) -> None:
