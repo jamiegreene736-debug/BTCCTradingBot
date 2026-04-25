@@ -8,13 +8,25 @@ NO HARD GATES — every signal comes purely from technical agreement.
 
 Architecture:
 
-  SCORING (combined directional score):
+  SCORING (combined directional score, factor-group based):
 
-    indicator_score = (count of rules agreeing) / 10             # 0-1
-    pattern_score   = min(1, sum(pattern strengths) / norm)      # 0-1
-    combined        = pattern_weight * pattern + (1-pw) * ind    # 0-1
+    Each indicator vote is classified into ONE of 4 factor groups:
+      trend      — directional/trend-following (EMA, MACD, supertrend, …)
+      mean_rev   — reversal/exhaustion/level (RSI, BB, divergence, S/R, …)
+      flow       — order-flow / tape (CVD, aggression, OB, absorption)
+      context    — regime / vol / session (ADX, vol_spike, funding, squeeze)
 
-  Fire if combined >= fire_threshold for one direction AND that side wins.
+    Within each group, votes are DEDUPLICATED by category (so 5 correlated
+    trend votes don't inflate confidence) and CAPPED at saturation. Each
+    group outputs a value in [0, 1].
+
+    factor_score    = Σ weight[g] * min(1, count[g] / saturation[g])    # weighted avg
+    pattern_score   = min(1, sum(pattern strengths) / norm)              # 0-1
+    combined        = pattern_weight * pattern + (1-pw) * factor_score   # 0-1
+
+  Fire if combined >= effective_fire_threshold for one direction AND that
+  side wins. effective_fire_threshold is regime-adaptive (ADX-based) plus
+  adaptive self-defense (recent R-tally based — see bot._adaptive_threshold_adjustment).
 
 INDICATOR RULES (counted, non-pattern half — 25 votes):
   1.  EMA stack (fast > mid > slow for long; reverse for short)
@@ -103,7 +115,7 @@ Direction = Literal["long", "short"]
 class Signal:
     direction: Direction
     score: float                       # combined 0-1
-    indicator_score: int               # raw indicator confluence count
+    indicator_score: int               # raw indicator confluence count (kept for compat)
     pattern_score: float               # raw pattern strength sum
     reasons: list[str]                 # human-readable mix of indicators + patterns
     pattern_hits: list[str] = field(default_factory=list)
@@ -113,10 +125,133 @@ class Signal:
     # risk manager so conviction-based sizing can scale risk by score/threshold.
     # None when not set (legacy callers); build_order skips conviction-mult.
     fire_threshold_used: float | None = None
+    # Per-factor breakdown (each 0..1 normalized) — captured for the journal
+    # and dashboard so we can later analyze WHICH factor categories actually
+    # predict outcomes. Source of truth for strategy quality calibration.
+    factor_trend: float = 0.0
+    factor_mean_rev: float = 0.0
+    factor_flow: float = 0.0
+    factor_context: float = 0.0
 
     @property
     def side_code(self) -> str:
         return "BUY" if self.direction == "long" else "SELL"
+
+
+## ---------------------------------------------------------------- factor groups
+#
+# Each indicator vote is classified into one of four factor groups:
+#   trend      — directional/trend-following votes
+#   mean_rev   — reversal/exhaustion/level votes
+#   flow       — order-flow / tape-derived votes (highest scalper edge)
+#   context    — regime / volatility / session modulators
+#
+# Within each group, multiple votes are DEDUPLICATED by category so highly
+# correlated signals (e.g. 5 trend indicators all firing on the same move)
+# count as ONE category, not five. This kills the confluence-inflation
+# problem where the same underlying signal is over-counted.
+#
+# Group scores are capped at saturation (configurable per group), then
+# weighted-averaged into the indicator-half of combined_score. Each group
+# outputs a value in [0, 1].
+
+# (prefix, group, dedup_key) — first match wins. Order matters: more
+# specific prefixes must come before generic ones.
+_FACTOR_CLASSIFICATIONS: tuple[tuple[str, str, str], ...] = (
+    # ----- Trend group -----
+    ("ema_stack_",          "trend",    "ema_stack"),
+    ("cross_above_ema",     "trend",    "ema_cross"),
+    ("cross_below_ema",     "trend",    "ema_cross"),
+    ("macd_up",             "trend",    "macd"),
+    ("macd_down",           "trend",    "macd"),
+    ("supertrend_",         "trend",    "supertrend"),
+    ("above_vwap",          "trend",    "vwap"),
+    ("below_vwap",          "trend",    "vwap"),
+    ("above_bb_mid",        "trend",    "bb_mid"),
+    ("below_bb_mid",        "trend",    "bb_mid"),
+    ("htf_uptrend",         "trend",    "htf"),
+    ("htf_downtrend",       "trend",    "htf"),
+    ("btc_leader_",         "trend",    "btc_leader"),
+    ("CMB:trend_pullback",  "trend",    "trend_pullback_combo"),
+    ("CMB:squeeze_breakout","trend",    "squeeze_breakout_combo"),
+    # ----- Mean-Reversion group -----
+    ("rsi(",                "mean_rev", "rsi"),
+    ("stoch_",              "mean_rev", "stoch"),
+    ("DIV:rsi",             "mean_rev", "div_rsi"),
+    ("DIV:macd",            "mean_rev", "div_macd"),
+    ("DIV:obv",             "mean_rev", "div_volume"),
+    ("DIV:cvd",             "mean_rev", "div_volume"),
+    ("SMC:fvg",             "mean_rev", "smc_fvg"),
+    ("SMC:liquidity_sweep", "mean_rev", "smc_sweep"),
+    ("mfi(",                "mean_rev", "mfi"),
+    ("sr_bounce",           "mean_rev", "sr"),
+    ("sr_reject",           "mean_rev", "sr"),
+    ("CMB:smc_reversal",    "mean_rev", "smc_reversal_combo"),
+    ("CMB:bb_extreme_revert","mean_rev","bb_extreme_combo"),
+    # ----- Flow group -----
+    ("ob_imb",              "flow",     "ob_imb"),
+    ("cvd_real",            "flow",     "cvd"),
+    ("cvd_proxy",           "flow",     "cvd"),
+    ("agg+",                "flow",     "agg"),
+    ("agg-",                "flow",     "agg"),
+    ("absorb",              "flow",     "absorb"),
+    # ----- Context group -----
+    ("vol_spike",           "context",  "vol_spike"),
+    ("adx(",                "context",  "adx"),
+    ("funding",             "context",  "funding"),
+    ("squeeze_up",          "context",  "squeeze"),
+    ("squeeze_down",        "context",  "squeeze"),
+    ("CMB:crowd_contrarian","context",  "crowd_combo"),
+)
+
+_FACTOR_GROUPS = ("trend", "mean_rev", "flow", "context")
+
+
+def _classify_reason(reason: str) -> tuple[str, str] | None:
+    """Return (group, dedup_key) for a reason tag, or None if uncategorized."""
+    for prefix, group, key in _FACTOR_CLASSIFICATIONS:
+        if reason.startswith(prefix):
+            return (group, key)
+    return None
+
+
+def factor_score_breakdown(
+    reasons: list[str],
+    saturation: dict[str, int],
+) -> dict[str, float]:
+    """Compute per-group normalized scores [0, 1] for a reasons list.
+
+    Returns dict keyed by group name. Counts are deduplicated within each
+    group by category — e.g. one score for "ema_stack" regardless of how
+    many ema_stack_up tags appear. Saturation caps each group at the
+    configured count (e.g. 6 trend votes → 1.0).
+    """
+    seen: set[tuple[str, str]] = set()
+    counts = {grp: 0 for grp in _FACTOR_GROUPS}
+    for r in reasons:
+        cls = _classify_reason(r)
+        if cls is None:
+            continue
+        if cls in seen:
+            continue
+        seen.add(cls)
+        counts[cls[0]] += 1
+    out: dict[str, float] = {}
+    for grp in _FACTOR_GROUPS:
+        sat = max(1, int(saturation.get(grp, 1)))
+        out[grp] = min(1.0, counts[grp] / sat)
+    return out
+
+
+def factor_score_weighted(
+    breakdown: dict[str, float],
+    weights: dict[str, float],
+) -> float:
+    """Weighted average of factor-group scores. Returns 0..max(weights_sum)."""
+    total = 0.0
+    for grp in _FACTOR_GROUPS:
+        total += weights.get(grp, 0.0) * breakdown.get(grp, 0.0)
+    return total
 
 
 def _effective_fire_threshold(adx_val: float, base_threshold: float) -> float:
@@ -162,6 +297,7 @@ def evaluate(
     aggression_10s: float | None = None,  # tape-derived 10s aggression in [-1,+1]
     activity_mult: float | None = None,   # tape-derived score multiplier (~0.85–1.10)
     price_change_10s_pct: float | None = None,  # tape-derived 10s price change %
+    fire_threshold_override: float | None = None,  # adaptive self-defense override
 ) -> Signal | None:
     if len(closes) < max(cfg.ema_slow, cfg.macd_slow, cfg.bb_period, cfg.atr_period) + 5:
         return None
@@ -456,7 +592,6 @@ def evaluate(
 
     indicator_long = len(long_reasons)
     indicator_short = len(short_reasons)
-    INDICATOR_MAX = 25
 
     # ------------------------------------------------------------------ patterns
     candle_hits = patterns.detect(o, h, l, c)
@@ -469,9 +604,19 @@ def evaluate(
     pattern_short_n = min(1.0, pattern_short / cfg.pattern_norm)
 
     # ------------------------------------------------------------------ combine
+    # Factor-group scoring replaces raw vote counting. Each side's votes are
+    # classified into 4 groups (trend / mean_rev / flow / context), capped
+    # within each group (so 6 correlated trend votes don't inflate score),
+    # and weighted-averaged. This kills the "1 weak signal counted 6 times"
+    # problem that creates over-confidence in chop.
+    factor_breakdown_long = factor_score_breakdown(long_reasons, cfg.factor_saturation)
+    factor_breakdown_short = factor_score_breakdown(short_reasons, cfg.factor_saturation)
+    factor_long = factor_score_weighted(factor_breakdown_long, cfg.factor_weights)
+    factor_short = factor_score_weighted(factor_breakdown_short, cfg.factor_weights)
+
     pw = cfg.pattern_weight
-    combined_long = pw * pattern_long_n + (1 - pw) * (indicator_long / INDICATOR_MAX)
-    combined_short = pw * pattern_short_n + (1 - pw) * (indicator_short / INDICATOR_MAX)
+    combined_long = pw * pattern_long_n + (1 - pw) * factor_long
+    combined_short = pw * pattern_short_n + (1 - pw) * factor_short
 
     # ----------------- REGIME-AWARE WEIGHTING -----------------
     # ADX-based market regime: trend (>28), neutral, or range (<18). In a
@@ -528,6 +673,7 @@ def evaluate(
         ind_reasons = long_reasons if is_long else short_reasons
         candle_names = pat_long_names if is_long else pat_short_names
         cp_names = chart_long_names if is_long else chart_short_names
+        breakdown = factor_breakdown_long if is_long else factor_breakdown_short
         all_reasons = (
             [f"atr({atr_pct:.2f}%)"]
             + [f"PAT:{n}" for n in candle_names]
@@ -544,14 +690,26 @@ def evaluate(
             pattern_hits=candle_names + cp_names,
             price=float(p),
             atr=float(atr_now),
+            factor_trend=breakdown.get("trend", 0.0),
+            factor_mean_rev=breakdown.get("mean_rev", 0.0),
+            factor_flow=breakdown.get("flow", 0.0),
+            factor_context=breakdown.get("context", 0.0),
         )
+
+    # Base threshold — `fire_threshold_override` lets the bot inject the
+    # adaptive self-defense adjustment (rolling-R-tally based) before regime
+    # adaptation. Composes additively: drawdown bumps the BASE up, then
+    # regime adjusts further (chop adds more, trending eases).
+    base_threshold = (fire_threshold_override
+                      if fire_threshold_override is not None
+                      else cfg.fire_threshold)
 
     # Regime-adaptive fire threshold — lower bar in trending markets,
     # higher bar in chop. ADX is the same value already used for regime
     # weighting above, so this composes cleanly: trend regimes both pump
     # trend-tagged votes AND lower the bar; chop both dampens trend votes
     # AND raises the bar.
-    eff_threshold = _effective_fire_threshold(a_for_regime, cfg.fire_threshold)
+    eff_threshold = _effective_fire_threshold(a_for_regime, base_threshold)
 
     if combined_long >= eff_threshold and combined_long > combined_short:
         sig = _build("long")

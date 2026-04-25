@@ -31,7 +31,12 @@ trading:
                          # (BTC 200x, ETH 100x, SOL/XRP 75x) all permit 25x.
   margin_coin: USDT
   margin_mode: ISOLATION # ISOLATION isolates loss per position; CROSS shares margin
-  risk_per_trade_pct: 1.0
+  # Temporarily reduced 1.0 → 0.75 while equity curve stabilizes. With the
+  # factor-group scoring + adaptive self-defense + 5 stacked exit pathways
+  # now in place, the bot's character is meaningfully different — give it a
+  # smaller per-trade footprint while it earns back trust. Compounds with
+  # conviction_mult (0.7-1.5) and dd_risk_mult (1.0-0.0) as before.
+  risk_per_trade_pct: 0.75
   max_open_positions: 4         # global cap; total across all symbols
   max_positions_per_symbol: 1   # never pyramid into the same trade
   max_same_direction: 2         # max concurrent LONGs (or SHORTs) — anti-correlation

@@ -16,9 +16,10 @@ import logging
 import logging.handlers
 import signal
 import time
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Deque
 
 import numpy as np
 
@@ -93,6 +94,12 @@ class BitunixBot:
         # waiting for the 3rd loss.
         self.recent_losses: dict[str, list[float]] = {}
         self.mini_cooldown_until: dict[str, float] = {}
+        # Adaptive self-defense: rolling R-multiple history of last N closed
+        # trades. If the running tally drops too low (deep drawdown) the
+        # fire_threshold ratchets UP (harder to fire) until equity recovers;
+        # if it climbs high, threshold can ease slightly. Trade R is computed
+        # in _update_streak_state when each closed position is observed.
+        self.recent_trade_r: Deque[float] = deque(maxlen=20)
         # Daily drawdown circuit breaker state.
         self.session_start_equity: float | None = None
         self.session_start_day: int = 0       # UTC day-of-year, resets daily
@@ -311,6 +318,62 @@ class BitunixBot:
     _MINI_COOLDOWN_LOSS_LIMIT = 2
     _MINI_COOLDOWN_PAUSE_SECS = 300      # 5 minutes
 
+    # Adaptive self-defense: threshold adjustments based on rolling R-tally.
+    # Conservative bands — we tighten more aggressively than we loosen, and
+    # require minimum sample size to avoid trippy noise on first few trades.
+    _ADAPTIVE_MIN_SAMPLES = 5
+    _ADAPTIVE_DD_R_THRESHOLD = -2.0      # last-20 sum < -2R → +0.04
+    _ADAPTIVE_DD_BUMP = 0.04
+    _ADAPTIVE_HOT_R_THRESHOLD = 3.0      # last-20 sum > +3R → -0.02
+    _ADAPTIVE_HOT_RELAX = -0.02
+
+    def _adaptive_threshold_adjustment(self) -> float:
+        """Return the additive adjustment to fire_threshold based on the
+        rolling sum of recent trade R-multiples.
+
+        Logic:
+          last-20 sum < -2R  → +0.04 (raise bar in drawdown)
+          last-20 sum > +3R  → -0.02 (modest ease when on a streak)
+          else               → 0.0
+
+        Requires _ADAPTIVE_MIN_SAMPLES trades observed before kicking in,
+        so we don't react to noise on the first few trades after startup.
+        """
+        if len(self.recent_trade_r) < self._ADAPTIVE_MIN_SAMPLES:
+            return 0.0
+        total_r = sum(self.recent_trade_r)
+        if total_r < self._ADAPTIVE_DD_R_THRESHOLD:
+            return self._ADAPTIVE_DD_BUMP
+        if total_r > self._ADAPTIVE_HOT_R_THRESHOLD:
+            return self._ADAPTIVE_HOT_RELAX
+        return 0.0
+
+    @staticmethod
+    def _compute_trade_r(p: dict[str, Any], sl_pct_default: float) -> float:
+        """Estimate trade R-multiple from a closed position record.
+
+        R = net_pnl / risk_dollars where risk_dollars = qty * entry_price * sl_pct.
+        Uses config sl_pct as the assumed entry SL distance (we don't track
+        per-trade SL pct — would require keeping a per-position dict — but
+        it's close enough for a rolling tally to detect drawdown). Returns
+        0.0 on insufficient data.
+        """
+        try:
+            open_px = float(p.get("avgOpenPrice") or 0)
+            qty = float(p.get("qty") or 0)
+            realized = float(p.get("realizedPNL") or 0)
+            fee = float(p.get("fee") or 0)
+            funding = float(p.get("funding") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+        if open_px <= 0 or qty <= 0 or sl_pct_default <= 0:
+            return 0.0
+        sl_dist = open_px * sl_pct_default / 100.0
+        risk_dollars = qty * sl_dist
+        if risk_dollars <= 0:
+            return 0.0
+        return (realized + fee + funding) / risk_dollars
+
     def _update_streak_state(self) -> None:
         """Pull recent closed positions and update consecutive-loss counts
         per symbol. Pause a symbol after streak_loss_limit consecutive losses."""
@@ -341,6 +404,13 @@ class BitunixBot:
             fee = _f(p.get("fee"))
             funding = _f(p.get("funding"))
             net = realized + fee + funding
+
+            # Adaptive self-defense: append trade R to the rolling tally
+            # before any other state updates. If this drives the tally below
+            # the drawdown threshold, the next signal evaluation will see
+            # a higher fire_threshold via _adaptive_threshold_adjustment.
+            trade_r = self._compute_trade_r(p, self.cfg.risk.stop_loss_pct)
+            self.recent_trade_r.append(trade_r)
 
             # Journal exit. exit_reason is best-effort; without per-trade
             # closeReason from Bitunix we tag generically. Future improvement:
@@ -781,6 +851,13 @@ class BitunixBot:
                 activity_mult = self.tape_feed.get_activity_multiplier(sym)
                 price_change_10s_pct = self.tape_feed.get_price_change_pct(sym, window_secs=10)
 
+            # Adaptive self-defense — adjust the BASE fire_threshold based
+            # on the rolling-20 trade R-tally before regime adaptation.
+            # Drawdown raises the bar; hot streaks ease it slightly.
+            adaptive_adj = self._adaptive_threshold_adjustment()
+            adaptive_base = max(0.0, min(1.0,
+                self.cfg.strategy.fire_threshold + adaptive_adj))
+
             # Signal.
             sig = evaluate(
                 opens, highs, lows, closes, self.cfg.strategy,
@@ -790,11 +867,14 @@ class BitunixBot:
                 real_cvd=real_cvd, aggression_10s=aggression_10s,
                 activity_mult=activity_mult,
                 price_change_10s_pct=price_change_10s_pct,
+                fire_threshold_override=adaptive_base,
             )
             if sig is None:
                 continue
             sig_text = (f"{sym} {sig.direction.upper()} score={sig.score:.2f} "
-                        f"(pat={sig.pattern_score:.1f},ind={sig.indicator_score}/23,"
+                        f"(pat={sig.pattern_score:.1f}, "
+                        f"T:{sig.factor_trend:.2f}/M:{sig.factor_mean_rev:.2f}/"
+                        f"F:{sig.factor_flow:.2f}/C:{sig.factor_context:.2f}, "
                         f"sess={sess_w:.2f}) @ "
                         f"{sig.price:.4f} ({', '.join(sig.reasons)})")
             log.info("Signal: %s", sig_text)
@@ -894,6 +974,10 @@ class BitunixBot:
                     indicator_count=sig.indicator_score,
                     pattern_score=sig.pattern_score,
                     reasons=sig.reasons,
+                    factor_trend=sig.factor_trend,
+                    factor_mean_rev=sig.factor_mean_rev,
+                    factor_flow=sig.factor_flow,
+                    factor_context=sig.factor_context,
                     atr_pct=atr_pct_now,
                     adx=adx_now,
                     spread_pct=spread_pct,
@@ -903,6 +987,9 @@ class BitunixBot:
                     real_cvd=real_cvd,
                     activity_mult=activity_mult,
                     session_weight=sess_w,
+                    adaptive_adj=adaptive_adj,
+                    recent_trade_r_sum=(sum(self.recent_trade_r)
+                                        if len(self.recent_trade_r) > 0 else None),
                     entry_price=plan.price,
                     stop_loss=plan.stop_loss,
                     take_profit=plan.take_profit,

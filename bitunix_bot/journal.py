@@ -88,6 +88,12 @@ class TradeJournal:
         take_profit: float,
         notional: float,
         leverage: int,
+        factor_trend: float | None = None,
+        factor_mean_rev: float | None = None,
+        factor_flow: float | None = None,
+        factor_context: float | None = None,
+        adaptive_adj: float | None = None,
+        recent_trade_r_sum: float | None = None,
     ) -> None:
         """Log all available signal + execution context at entry time.
 
@@ -106,6 +112,10 @@ class TradeJournal:
             "indicator_count": indicator_count,
             "pattern_score": pattern_score,
             "reasons": reasons,
+            "factor_trend": factor_trend,
+            "factor_mean_rev": factor_mean_rev,
+            "factor_flow": factor_flow,
+            "factor_context": factor_context,
             "atr_pct": atr_pct,
             "adx": adx,
             "spread_pct": spread_pct,
@@ -115,6 +125,8 @@ class TradeJournal:
             "real_cvd": real_cvd,
             "activity_mult": activity_mult,
             "session_weight": session_weight,
+            "adaptive_adj": adaptive_adj,
+            "recent_trade_r_sum": recent_trade_r_sum,
             "entry_price": entry_price,
             "stop_loss": stop_loss,
             "take_profit": take_profit,
