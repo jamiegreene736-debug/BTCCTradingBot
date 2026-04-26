@@ -91,9 +91,13 @@ class RiskCfg:
     atr_multiplier_tp: float
     # Dynamic SL management — once a trade moves favorably, SL moves with it.
     # Set any of these to 0 (or breakeven_at_r above trailing_activate_r) to disable.
-    breakeven_at_r: float = 1.0          # at +1R favorable, SL → entry+buffer
+    # Grok review v9: BE/trailing thresholds lowered after seeing trades hit
+    # 0.012R max-favor and stale-exit before any protection kicked in. Letting
+    # the move develop a tiny bit (0.5R) and locking in BE there is worth more
+    # than waiting for 1R+ that 1m chop rarely produces.
+    breakeven_at_r: float = 0.5          # at +0.5R favorable, SL → entry+buffer
     breakeven_buffer_pct: float = 0.05   # SL sits this % above (long) / below (short) entry
-    trailing_activate_r: float = 1.5     # at +1.5R favorable, start trailing
+    trailing_activate_r: float = 1.0     # at +1.0R favorable, start trailing
     trailing_distance_r: float = 0.5     # SL trails this many R behind current price
     # Partial TP at +1R — close N% of position at break-even ratchet point.
     # Lock in fee-clearing profit on half, let the rest ride to TP target.
@@ -120,9 +124,13 @@ class RiskCfg:
     # the move never materialized. Pay the small loss and free the slot.
     # Distinct from time_exit_only_if_losing (90-min, profit-aware) and from
     # the tape-driven exit (immediate, flow-flip based).
+    # Grok review v9: 6-min / 0.5R was strangling winners — ETH 0.65-score
+    # trade hit max_favor 0.012R then got stale-killed before it could
+    # develop. 12 min gives 1m signals time to actually unfold; 0.2R floor
+    # only kills genuinely dead trades (zero-conviction sideways drift).
     stale_exit_enabled: bool = True
-    stale_exit_min: float = 6.0          # minutes
-    stale_exit_max_favor_r: float = 0.5  # if max_favor below this, exit
+    stale_exit_min: float = 12.0         # minutes
+    stale_exit_max_favor_r: float = 0.2  # if max_favor below this, exit
     # Tape-driven exit. DISABLED by default after live data showed it firing
     # on microstructure noise within 10–15 seconds of entry — closing trades
     # at 25-50% of full SL distance instead of letting them develop or hit

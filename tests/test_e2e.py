@@ -3117,17 +3117,21 @@ def test_recent_trade_r_appended_on_close():
 
 def test_stale_exit_flattens_drifting_position():
     """Position older than stale_exit_min minutes with max_favor below
-    stale_exit_max_favor_r → flash_close."""
+    stale_exit_max_favor_r → flash_close.
+
+    Grok v9 defaults: stale_exit_min=12m, stale_exit_max_favor_r=0.2R."""
     bot, _, _ = _setup_bot_with_open_position(
-        side="BUY", entry=100_000.0, current_price=100_050.0,  # +0.2R, drifting
+        side="BUY", entry=100_000.0, current_price=100_025.0,  # +0.1R, drifting
     )
-    # Fast-forward the position's ctime so it's "10 minutes old".
+    # Fast-forward the position's ctime so it's "15 minutes old" (past 12-min floor).
     bot.client.pending_positions.return_value = [{
         **bot.client.pending_positions.return_value[0],
-        "ctime": int(time.time() * 1000) - 10 * 60_000,
+        "ctime": int(time.time() * 1000) - 15 * 60_000,
     }]
-    # Pre-seed max_favor at 0.3R (below 0.5R threshold).
-    bot.position_max_favor["POS1"] = 0.3
+    # Pre-seed max_favor at 0.1R (below 0.2R threshold) — drifted with no edge.
+    # Live tick recomputes r_favor from current_price and only ratchets up,
+    # so seed must match or be ≤ current r_favor (0.1R here).
+    bot.position_max_favor["POS1"] = 0.1
     bot._tick()
 
     bot.client.flash_close_position.assert_called_once_with("POS1")
@@ -3144,10 +3148,10 @@ def test_stale_exit_skipped_for_progressing_position():
     )
     bot.client.pending_positions.return_value = [{
         **bot.client.pending_positions.return_value[0],
-        "ctime": int(time.time() * 1000) - 10 * 60_000,
+        "ctime": int(time.time() * 1000) - 15 * 60_000,  # past 12-min floor
     }]
-    # Position previously hit 0.7R favorable — has shown edge, don't kill.
-    bot.position_max_favor["POS1"] = 0.7
+    # Position previously hit 0.4R favorable — has shown edge above 0.2R floor.
+    bot.position_max_favor["POS1"] = 0.4
     bot._tick()
 
     bot.client.flash_close_position.assert_not_called()

@@ -105,14 +105,17 @@ risk:
   # Dynamic SL — once price moves in your favor, ratchet the SL forward to
   # lock in profit. The "give-back" killer for high-leverage scalping.
   #
-  # At +1R favorable: SL moves to entry + buffer (trade becomes "free").
-  # At +1.5R favorable: SL starts trailing 0.5R behind current price.
+  # At +0.5R favorable: SL moves to entry + buffer (trade becomes "free").
+  # At +1.0R favorable: SL starts trailing 0.5R behind current price.
   #
-  # Example at 50x leverage, 0.25% SL:
-  #   Price moves +1.0% favorable (4R) → SL trails at +0.75% (3R) → locks +37.5% margin.
-  breakeven_at_r: 1.0
+  # Lowered from 1.0 / 1.5 (Grok review v9): live data showed median max-favor
+  # of 0.07R across 89 trades — almost no trade ever reached the old 1R BE
+  # threshold, so SL never ratcheted and every trade either hit stop or
+  # stale-exited. Bringing BE in to 0.5R locks in winners as soon as the move
+  # actually develops; trailing at 1R lets confirmed runners breathe.
+  breakeven_at_r: 0.5
   breakeven_buffer_pct: 0.05    # tiny cushion above entry to cover round-trip fees
-  trailing_activate_r: 1.5
+  trailing_activate_r: 1.0
   trailing_distance_r: 0.5
   # Round-trip fee + slippage estimate as % of notional. With maker entries
   # (post-only LIMIT at top of book) most fills are maker (~0.04% per side
@@ -135,6 +138,14 @@ risk:
   partial_tp_enabled: true
   partial_tp_at_r: 1.0
   partial_tp_close_pct: 50.0
+  # Stale-trade exit (Grok v9 — relaxed from 6 min / 0.5R). The old aggressive
+  # cutoff was killing trades before they could develop favor. Live ETH 0.65-
+  # score trade hit max_favor=0.012R then got stale-killed at 6 min — never
+  # had a chance. 12 min gives signals time to actually unfold; 0.2R floor
+  # only kills genuinely dead trades that drifted sideways with zero conviction.
+  stale_exit_enabled: true
+  stale_exit_min: 12.0
+  stale_exit_max_favor_r: 0.2
 
 strategy:
   # 23 indicator votes + 30 patterns + 5 combo recipes. The combined score
