@@ -74,8 +74,15 @@ class TradingCfg:
     # selection. Skip new entries when min(bid_depth, ask_depth) < threshold.
     # Calibrate from observed Bitunix per-symbol liquidity. Symbols not
     # listed have no depth filter (None / 0 = disabled).
+    # Live-tuned 2026-04-26: BTC dropped 8.0 → 3.0. The 8.0 floor was
+    # calibrated against larger trade sizes; on a $35 account at 10x
+    # leverage our notional is ~$150 = 0.002 BTC. Top-5 depth of 3 BTC
+    # is still ~1500× our trade size — plenty of cushion against
+    # adverse selection on a maker fill. The 8.0 threshold was blocking
+    # ~70% of would-be entries (live data over 9.8h: 9 thin-book skips,
+    # 0 entries). Other symbols left at original calibration.
     symbol_min_depth: dict[str, float] = field(default_factory=lambda: {
-        "BTCUSDT": 8.0,
+        "BTCUSDT": 3.0,
         "ETHUSDT": 60.0,
         "SOLUSDT": 400.0,
         "XRPUSDT": 15000.0,

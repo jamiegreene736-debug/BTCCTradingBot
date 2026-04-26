@@ -3749,8 +3749,8 @@ def test_depth_filter_blocks_thin_book():
     bot = BitunixBot(cfg)
     bot.client = make_mock_client()
     bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
-    # Thin book: 5 BTC depth, threshold 8 BTC for BTC → skip.
-    bot.ob_feed = _FakeOBFeed(bid_depth=5.0, ask_depth=5.0)
+    # Thin book: 1 BTC depth, threshold 3 BTC for BTC → skip.
+    bot.ob_feed = _FakeOBFeed(bid_depth=1.0, ask_depth=1.0)
     bot._resolve_symbol_meta()
     bot._tick()
 
