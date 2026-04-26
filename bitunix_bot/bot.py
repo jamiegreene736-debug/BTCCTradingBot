@@ -1540,18 +1540,33 @@ class BitunixBot:
         bid, ask = tob
         is_long = plan.side == "BUY"
         meta = self.metas.get(symbol, _DEFAULT_META)
-        # Long → place at best bid (rest on the book as a maker).
-        # Short → place at best ask.
-        limit_px = round(bid if is_long else ask, meta.price_precision)
+        # Aggressive maker entry (Grok holistic review): when the spread is
+        # wider than 1 tick, step INSIDE the spread to become the new top
+        # of book — fills sooner than passively waiting at the existing TOB.
+        # When spread is exactly 1 tick (BTC most of the time), stepping
+        # inside would cross to taker, so we just join the existing best
+        # level. Falls back to TOB if tick_size is unavailable.
+        tick_size = 10 ** -meta.price_precision if meta.price_precision >= 0 else 0
+        spread = ask - bid
+        if tick_size > 0 and spread > tick_size * 1.5:
+            # Spread > 1 tick: step inside by 1 tick to become new TOB.
+            # Long → 1 tick above current bid (still below ask, still maker)
+            # Short → 1 tick below current ask (still above bid, still maker)
+            limit_px = round((bid + tick_size) if is_long else (ask - tick_size),
+                             meta.price_precision)
+        else:
+            # Tight spread or unknown precision: join existing TOB.
+            limit_px = round(bid if is_long else ask, meta.price_precision)
         # If our chosen price would already be a taker (rare race), bail to market.
-        if (is_long and limit_px > ask) or ((not is_long) and limit_px < bid):
+        if (is_long and limit_px >= ask) or ((not is_long) and limit_px <= bid):
             return False
 
         # Dynamic timeout — high tape activity = price moves fast = either
         # fill quickly or skip. Dead market = give the limit more time to
         # be hit. Inverted scaling so high activity → shorter timeout.
-        # Wider clamp range here ([0.5, 2.0]) than the score-multiplier
-        # version ([0.85, 1.10]) so we get meaningful timeout variation.
+        # Clamp range scales with base_timeout so 15m-timeframe configs
+        # (post_only_timeout_secs=60) get a meaningful range, not the old
+        # hardcoded [4, 12]s ceiling that capped at 12s regardless.
         base_timeout = self.cfg.trading.post_only_timeout_secs
         timeout_secs = base_timeout
         if self.tape_feed is not None:
@@ -1559,8 +1574,12 @@ class BitunixBot:
                 sym_u, clamp_min=0.5, clamp_max=2.0
             )
             if activity is not None and activity > 0:
-                # High activity → shorter timeout. Clamp final value to [4, 12]s.
-                timeout_secs = max(4, min(12, int(round(base_timeout / activity))))
+                # High activity → shorter timeout. Floor at half base_timeout
+                # so we don't truncate to nothing in fast markets; ceiling at
+                # 1.5× base so dead markets get a bit more breathing room.
+                lo = max(4, base_timeout // 2)
+                hi = max(lo + 1, int(base_timeout * 1.5))
+                timeout_secs = max(lo, min(hi, int(round(base_timeout / activity))))
 
         minute_bucket = int(time.time()) // 60
         client_id = f"bot-{symbol}-{minute_bucket}-{plan.side}-PO"

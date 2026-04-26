@@ -1619,9 +1619,13 @@ class _FakeOBFeed:
         return (self._bid_depth, self._ask_depth)
 
 
-def test_post_only_entry_places_limit_at_top_of_book():
-    """In live mode with a connected OB feed, the bot's first entry attempt
-    should be LIMIT POST_ONLY at top-of-book bid (long) — not market."""
+def test_post_only_entry_steps_inside_wide_spread():
+    """Aggressive maker (Grok holistic review): when spread > 1 tick, step
+    INSIDE the spread to become the new top of book — fills sooner than
+    passively joining the existing TOB.
+
+    Setup: bid=60000.0, ask=60002.0, spread=2.0, tick=0.1 (BTC precision=1).
+    Long entry should place at 60000.1 (1 tick above bid, still below ask)."""
     reset_state()
     cfg = fresh_cfg()
     cfg.mode = "live"
@@ -1634,19 +1638,40 @@ def test_post_only_entry_places_limit_at_top_of_book():
     bot._resolve_symbol_meta()
     bot._tick()
 
-    # place_order called with order_type=LIMIT.
     assert bot.client.place_order.called, "expected limit order placed"
     kw = bot.client.place_order.call_args.kwargs
     assert kw["order_type"] == "LIMIT", f"expected LIMIT, got {kw.get('order_type')}"
     assert kw["side"] == "BUY", f"expected BUY (long), got {kw.get('side')}"
-    # Long → place at best bid (becomes a maker).
-    assert float(kw["price"]) == 60_000.0, f"expected limit at bid 60000, got {kw['price']}"
-    # POST_ONLY clientId tag.
-    assert str(kw["client_id"]).endswith("-PO"), f"clientId should end with -PO: {kw['client_id']}"
-    # SL/TP attached natively to the entry.
-    assert kw.get("sl_price") and kw.get("tp_price"), f"SL/TP missing: {kw}"
-    # Pending-limits tracking populated.
+    # Long with wide spread → step inside: bid + 1 tick = 60_000.1.
+    assert float(kw["price"]) == 60_000.1, \
+        f"expected step-inside at 60000.1, got {kw['price']}"
+    assert str(kw["client_id"]).endswith("-PO")
+    assert kw.get("sl_price") and kw.get("tp_price")
     assert "BTCUSDT" in bot.pending_limits
+
+
+def test_post_only_entry_joins_tob_on_tight_spread():
+    """When spread is exactly 1 tick wide, stepping inside would cross to
+    taker. The aggressive-maker path must fall back to joining the existing
+    TOB (= the bid for long, the ask for short)."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.trading.use_post_only_entries = True
+    cfg.trading.symbols = ["BTCUSDT"]
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+    # Tight spread: bid=60000.0, ask=60000.1, spread=0.1 = 1 tick exactly.
+    bot.ob_feed = _FakeOBFeed(bid=60_000.0, ask=60_000.1)
+    bot._resolve_symbol_meta()
+    bot._tick()
+
+    assert bot.client.place_order.called
+    kw = bot.client.place_order.call_args.kwargs
+    # 1-tick spread → join existing bid (no room to step inside).
+    assert float(kw["price"]) == 60_000.0, \
+        f"expected join-TOB at 60000.0, got {kw['price']}"
 
 
 def test_post_only_falls_back_to_market_when_ob_feed_disconnected():
