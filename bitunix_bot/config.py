@@ -213,13 +213,19 @@ class StrategyCfg:
     # vote is classified into one of four groups; counts within a group are
     # capped at the saturation value (so 6 correlated trend votes don't
     # inflate confidence vs 1 strong signal). Weighted-average across
-    # groups gives the indicator-half of combined score. Tunable per regime
-    # if desired by editing the dicts at runtime.
+    # groups gives the indicator-half of combined score.
+    #
+    # Weights re-tuned per Grok review v7: Flow promoted (0.30 → 0.45) as
+    # the dominant factor, Trend demoted (0.30 → 0.20) because it's
+    # lagging by definition. Context demoted (0.15 → 0.10) — modulators
+    # shouldn't carry as much weight as flow itself. MeanRev unchanged.
+    # Sum still 1.0. Heavily penalizes zero-flow signals while
+    # rewarding flow-confirmed continuation.
     factor_weights: dict[str, float] = field(default_factory=lambda: {
-        "trend": 0.30,      # foundational direction
+        "trend": 0.20,      # lagging by nature; describes past bar
         "mean_rev": 0.25,   # counterbalance / reversal setups
-        "flow": 0.30,       # real order-flow alpha (highest scalper edge)
-        "context": 0.15,    # vol / regime / session modulators
+        "flow": 0.45,       # leading order-flow alpha — highest scalper edge
+        "context": 0.10,    # vol / regime / session modulators
     })
     factor_saturation: dict[str, int] = field(default_factory=lambda: {
         "trend": 6,         # 6 distinct trend votes saturate to 1.0

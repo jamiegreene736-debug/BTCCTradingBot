@@ -259,30 +259,31 @@ def _continuation_confirmed(
     highs: np.ndarray,
     lows: np.ndarray,
     closes: np.ndarray,
+    aggression_10s: float | None = None,
+    real_cvd: float | None = None,
 ) -> bool:
-    """Block 'exhaustion entry' setups (Grok review v6 fix).
+    """Block 'exhaustion entry' setups (Grok reviews v6 + v7).
 
     Live data showed the bot firing SHORT on bearish reversal candle
     patterns + lagging bearish trend indicators at local lows — exactly
-    when the down-move was already exhausted. 0/25 trades hit positive
+    when the down-move was already exhausted. 0/48 trades hit positive
     realized PnL because the entry direction was systematically wrong.
+    The fundamental issue: confirmation signals are by definition
+    LAGGING, so by the time they all align, the move has resolved.
 
-    Confirmation requires TWO signs of continuation in trade direction:
+    Confirmation requires SIGNS of continuation in trade direction:
 
       (a) Last bar's close in the top 25% of its range (long) /
-          bottom 25% (short). Bar itself is impulsive in our direction.
-          (Bearish reversal patterns on a long entry → close near low →
-          close_pos low → blocked.)
+          bottom 25% (short). Bar itself impulsive in our direction.
 
       (b) Last close beyond prior close in trade direction. Net price
-          movement on the entry bar is the same direction we're betting.
-          (Catches small-bar reversal sequences where the bar AFTER the
-          impulsive move is small but still above the prior close.)
+          movement on the entry bar matches our bet.
 
-    Tape direction agreement is intentionally NOT checked here — that's
-    the tape-veto layer's job in bot._execute (at threshold ±0.45) and
-    the absorption veto's job in this same evaluate() call. Keeping
-    concerns separated avoids overlapping rejection paths.
+      (c) Tape alignment when available (Grok v7) — the leading signal:
+          aggression_10s in trade direction at ≥0.25 magnitude AND
+          real_cvd sign matches direction. If tape data is None,
+          gracefully degrades (allows). This catches cases where
+          lagging trend confluence aligns but live flow is contrary.
 
     Returns True if all checks pass. Insufficient data → True (allow).
     """
@@ -297,14 +298,24 @@ def _continuation_confirmed(
         return True
     close_pos = (last_close - last_low) / bar_range  # 0=at low, 1=at high
     if direction == "long":
+        # Bar mechanics
         if close_pos < 0.75:
             return False
         if last_close <= prev_close:
+            return False
+        # Tape alignment — only applied when data available (graceful degrade)
+        if aggression_10s is not None and aggression_10s < 0.25:
+            return False
+        if real_cvd is not None and real_cvd < 0:
             return False
     else:
         if close_pos > 0.25:
             return False
         if last_close >= prev_close:
+            return False
+        if aggression_10s is not None and aggression_10s > -0.25:
+            return False
+        if real_cvd is not None and real_cvd > 0:
             return False
     return True
 
@@ -817,9 +828,11 @@ def evaluate(
             log.info("ABSORPTION VETO long signal (buyflow being absorbed → "
                      "expect reversal down, not continuation up)")
             return None
-        if not _continuation_confirmed("long", h, l, c):
-            log.info("CONTINUATION VETO long (last bar not impulsive up "
-                     "or close ≤ prior — likely exhaustion fade)")
+        if not _continuation_confirmed("long", h, l, c,
+                                         aggression_10s=aggression_10s,
+                                         real_cvd=real_cvd):
+            log.info("CONTINUATION VETO long (bar mechanics or tape alignment "
+                     "missing — likely exhaustion fade or contrary flow)")
             return None
         sig = _build("long")
         sig.fire_threshold_used = eff_threshold
@@ -829,9 +842,11 @@ def evaluate(
             log.info("ABSORPTION VETO short signal (sellflow being absorbed → "
                      "expect reversal up, not continuation down)")
             return None
-        if not _continuation_confirmed("short", h, l, c):
-            log.info("CONTINUATION VETO short (last bar not impulsive down "
-                     "or close ≥ prior — likely exhaustion fade)")
+        if not _continuation_confirmed("short", h, l, c,
+                                         aggression_10s=aggression_10s,
+                                         real_cvd=real_cvd):
+            log.info("CONTINUATION VETO short (bar mechanics or tape alignment "
+                     "missing — likely exhaustion fade or contrary flow)")
             return None
         sig = _build("short")
         sig.fire_threshold_used = eff_threshold

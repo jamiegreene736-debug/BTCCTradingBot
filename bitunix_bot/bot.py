@@ -1362,22 +1362,22 @@ class BitunixBot:
 
     def _execute(self, symbol: str, plan: OrderPlan) -> bool:
         # Tape veto — "don't fight the flow". If the most recent 10s of trade
-        # tape is strongly contrary to our intended direction (≥72/28 split),
-        # skip the trade. Threshold tightened from ±0.50 → ±0.45 to catch
-        # more borderline contrary-flow setups. Signals that look right on
-        # indicators but fall into active reversals of order flow are
-        # statistically the worst trades. Pro desks veto these before
-        # placement. Applied in BOTH paper and live so the simulation
-        # accurately reflects live behavior.
+        # tape is contrary to our intended direction at ≥0.30 magnitude
+        # (~65/35 split or worse), skip the trade. Threshold tightened to
+        # ±0.30 (Grok review v7) after live data showed Trade #1 firing
+        # SHORT with agg=+0.342 — slipped through the previous ±0.45 gate
+        # then immediately reversed for a loss. Lagging trend indicators
+        # were drowning out the leading flow signal. At ±0.30 we trade
+        # less but with dramatically higher signal quality.
         if self.tape_feed is not None:
             agg = self.tape_feed.get_aggression_ratio(symbol, window_secs=10)
             if agg is not None:
-                if plan.side == "BUY" and agg <= -0.45:
+                if plan.side == "BUY" and agg <= -0.30:
                     self.state.record_skip(
                         f"{symbol}: tape veto — long signal but {agg:+.2f} sell flow"
                     )
                     return False
-                if plan.side == "SELL" and agg >= 0.45:
+                if plan.side == "SELL" and agg >= 0.30:
                     self.state.record_skip(
                         f"{symbol}: tape veto — short signal but {agg:+.2f} buy flow"
                     )

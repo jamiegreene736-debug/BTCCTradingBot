@@ -2107,17 +2107,17 @@ def _bot_with_tape_and_signal():
 
 
 def test_tape_veto_blocks_long_against_strong_sell_flow():
-    """If 10s tape aggression ≤ -0.50, a LONG signal must be skipped."""
+    """If 10s tape aggression is contrary to the trade direction, the
+    long signal must be blocked by SOMEONE in the pipeline.
+
+    Post-Grok-v7: continuation gate (in evaluate) catches contrary tape
+    BEFORE tape veto (in _execute) — so the rejection happens at the
+    strategy level rather than the execution level. Either way, no
+    order should be placed."""
     bot, tape = _bot_with_tape_and_signal()
     tape.aggression = -0.65   # 82/18 sell-side, hostile to long
     bot._tick()
-
-    # Should not have placed any order.
     bot.client.place_order.assert_not_called()
-    # Should record a tape veto skip.
-    skips = [e for e in bot.state.snapshot()["events"] if e["kind"] == "skip"]
-    assert any("tape veto" in s["text"] for s in skips), \
-        f"expected tape veto skip; got {[s['text'] for s in skips]}"
 
 
 def test_tape_veto_blocks_short_against_strong_buy_flow():
@@ -2162,23 +2162,35 @@ def test_tape_veto_blocks_short_against_strong_buy_flow():
     bot._tick()
 
     bot.client.place_order.assert_not_called()
-    skips = [e for e in bot.state.snapshot()["events"] if e["kind"] == "skip"]
-    assert any("tape veto" in s["text"] for s in skips)
 
 
-def test_tape_veto_respects_neutral_flow():
-    """Neutral or mildly-directional flow should NOT veto."""
+def test_neutral_flow_now_blocks_directional_signal():
+    """Grok review v7: neutral tape (between -0.25 and +0.25) is now
+    INSUFFICIENT for a directional signal — the continuation gate
+    requires positive flow alignment in the trade direction at ≥0.25
+    magnitude. Previously neutral flow was OK; under v7 it's a 'no edge,
+    no trade' state."""
     bot, tape = _bot_with_tape_and_signal()
-    tape.aggression = 0.10  # mostly balanced — should not veto
+    tape.aggression = 0.10  # neutral
     bot._tick()
-    # Long signal should fire and place_order should be called.
-    assert bot.client.place_order.called, \
-        "neutral flow must not veto; bot should still place the order"
+    # No order — continuation gate blocks because flow doesn't confirm.
+    bot.client.place_order.assert_not_called()
+
+
+def test_confirming_flow_allows_signal():
+    """Mirror of the above: when tape DOES confirm direction at ≥0.25
+    magnitude, the long signal fires normally."""
+    bot, tape = _bot_with_tape_and_signal()
+    tape.aggression = 0.40  # buy-side confirmation ≥ 0.25
+    bot._tick()
+    bot.client.place_order.assert_called(), \
+        "confirming flow must allow trade through continuation gate"
 
 
 def test_tape_veto_skipped_when_no_data():
-    """When tape feed returns None for aggression, veto should NOT fire
-    (graceful degradation when tape is cold or feed is offline)."""
+    """When tape feed returns None for aggression, neither the
+    continuation gate nor tape veto blocks (graceful degradation when
+    tape is cold or feed is offline)."""
     bot, tape = _bot_with_tape_and_signal()
     tape.aggression = None
     bot._tick()
@@ -2287,6 +2299,41 @@ def test_continuation_blocks_when_close_doesnt_advance():
     c = np.array([99.5, 99.5])     # last close == prev close
     assert _continuation_confirmed("long", h, l_, c) is False, \
         "long must require last close > prior close"
+
+
+def test_continuation_blocks_long_with_contrary_tape():
+    """Grok v7: continuation gate now requires tape alignment ≥0.25 in
+    direction. Contrary tape at -0.50 blocks even on a clean bullish bar."""
+    from bitunix_bot.strategy import _continuation_confirmed
+    import numpy as np
+    h = np.array([100.0, 100.0])
+    l_ = np.array([95.0, 96.0])
+    c = np.array([97.0, 99.8])  # bullish bar, ascending close
+    # No tape data → allow.
+    assert _continuation_confirmed("long", h, l_, c) is True
+    # Confirming tape → allow.
+    assert _continuation_confirmed("long", h, l_, c, aggression_10s=0.40) is True
+    # Contrary tape → BLOCK.
+    assert _continuation_confirmed("long", h, l_, c, aggression_10s=-0.50) is False
+    # Neutral tape (in -0.25..+0.25 range) → BLOCK (no flow confirmation).
+    assert _continuation_confirmed("long", h, l_, c, aggression_10s=0.10) is False
+
+
+def test_continuation_blocks_long_with_contrary_cvd():
+    """real_cvd sign must match direction when set."""
+    from bitunix_bot.strategy import _continuation_confirmed
+    import numpy as np
+    h = np.array([100.0, 100.0])
+    l_ = np.array([95.0, 96.0])
+    c = np.array([97.0, 99.8])
+    # Confirming aggression but contrary CVD → block.
+    assert _continuation_confirmed("long", h, l_, c,
+                                     aggression_10s=0.40,
+                                     real_cvd=-5.0) is False
+    # Both confirming → allow.
+    assert _continuation_confirmed("long", h, l_, c,
+                                     aggression_10s=0.40,
+                                     real_cvd=+5.0) is True
 
 
 def test_continuation_allows_clean_marubozu():
@@ -3716,22 +3763,22 @@ def test_dynamic_post_only_timeout_clamps_to_4_12():
         f"dead market should clamp to 12s, got {info2['timeout_secs']}"
 
 
-def test_tighter_tape_veto_threshold():
-    """Tape veto now fires at ±0.45 (was ±0.50)."""
+def test_tighter_tape_veto_threshold_grok_v7():
+    """Tape veto threshold tightened to ±0.30 (was ±0.45) per Grok v7.
+    Combined with the new continuation gate's tape-alignment requirement
+    (need ≥0.25 in direction), contrary tape blocks at multiple layers.
+    Test that aggression at -0.31 blocks long signal (was -0.46 cutoff)."""
     bot, tape = _bot_with_tape_and_signal()
-    # -0.46 is below the new threshold (-0.45) → should veto.
-    tape.aggression = -0.46
+    tape.aggression = -0.31  # past new -0.30 tape veto threshold
     bot._tick()
     bot.client.place_order.assert_not_called()
-    skips = [e for e in bot.state.snapshot()["events"] if e["kind"] == "skip"]
-    assert any("tape veto" in s["text"] for s in skips), \
-        "tighter veto must catch -0.46"
 
-    # -0.44 should NOT veto (just below new threshold).
+    # Confirming flow at +0.25 (the continuation-gate alignment threshold)
+    # should allow the long signal through.
     bot, tape = _bot_with_tape_and_signal()
-    tape.aggression = -0.44
+    tape.aggression = 0.30  # past +0.25 alignment requirement
     bot._tick()
-    assert bot.client.place_order.called, "−0.44 should NOT veto under tighter threshold"
+    assert bot.client.place_order.called, "confirming +0.30 flow must allow long"
 
 
 def test_tradetape_get_price_change_pct():
@@ -4216,7 +4263,8 @@ def main() -> int:
         test_strategy_activity_multiplier_scales_combined_score,
         test_tape_veto_blocks_long_against_strong_sell_flow,
         test_tape_veto_blocks_short_against_strong_buy_flow,
-        test_tape_veto_respects_neutral_flow,
+        test_neutral_flow_now_blocks_directional_signal,
+        test_confirming_flow_allows_signal,
         test_tape_veto_skipped_when_no_data,
         test_reset_streaks_endpoint_clears_in_memory_state,
         test_reset_streaks_requires_auth,
@@ -4224,6 +4272,8 @@ def main() -> int:
         test_continuation_blocks_long_on_bearish_close_pattern,
         test_continuation_blocks_short_on_bullish_close_pattern,
         test_continuation_blocks_when_close_doesnt_advance,
+        test_continuation_blocks_long_with_contrary_tape,
+        test_continuation_blocks_long_with_contrary_cvd,
         test_continuation_allows_clean_marubozu,
         test_trend_dominance_dampens_opposite_side,
         test_min_adx_skips_deep_chop,
@@ -4279,7 +4329,7 @@ def main() -> int:
         test_dynamic_post_only_timeout_shortens_with_high_activity,
         test_dynamic_post_only_timeout_lengthens_in_dead_market,
         test_dynamic_post_only_timeout_clamps_to_4_12,
-        test_tighter_tape_veto_threshold,
+        test_tighter_tape_veto_threshold_grok_v7,
         test_tradetape_get_price_change_pct,
         test_orderbook_get_depth,
         test_atr_hybrid_floor_wins_in_calm_markets,
