@@ -209,6 +209,16 @@ class StrategyCfg:
     # 22 matches the existing chop band (used to raise fire_threshold);
     # going below the band = fully skip rather than just raise the bar.
     min_adx_for_trade: float = 22.0
+    # Post-signal confirmation gate (Grok review v8). After a signal
+    # passes all gates, fetch the live ticker and require price to have
+    # moved in the trade direction past the signal-bar close. This is
+    # the missing piece that the in-bar continuation gate didn't catch:
+    # the signal bar's close is by definition the LAST data we have, so
+    # checking it confirms what just happened. Live tape continuation
+    # checks what's happening NOW, post-signal — the only way to filter
+    # exhaustion entries that look perfect on the bar that just closed
+    # but immediately reverse on the bar that's now opening.
+    confirm_with_ticker: bool = True
     # Factor-group scoring — replaces raw vote-count normalization. Each
     # vote is classified into one of four groups; counts within a group are
     # capped at the saturation value (so 6 correlated trend votes don't

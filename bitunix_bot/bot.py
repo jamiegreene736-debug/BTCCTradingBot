@@ -955,6 +955,80 @@ class BitunixBot:
                 self.state.record_skip(f"{sym}: risk manager rejected (volume below min)")
                 continue
 
+            # Post-signal ticker confirmation (Grok review v8). The signal
+            # bar's close is the LAST data we used to evaluate. Before
+            # placing the order, fetch the live ticker price and require
+            # it to have moved in the trade direction since the bar close.
+            # This catches "perfect signal bar that immediately reverses
+            # on the next bar" — the exhaustion-fade pattern that the
+            # in-bar continuation gate can't catch (it's looking at the
+            # bar that just closed, not what's happening now).
+            if getattr(self.cfg.strategy, "confirm_with_ticker", False):
+                try:
+                    ticker = self.client.ticker(sym)
+                except BitunixError as e:
+                    self.state.record_skip(
+                        f"{sym}: ticker confirmation failed ({e.code} {e.msg})"
+                    )
+                    continue
+                except Exception as e:
+                    self.state.record_skip(
+                        f"{sym}: ticker confirmation network error ({e})"
+                    )
+                    continue
+                try:
+                    live_px = float(ticker.get("lastPrice") or 0)
+                except (TypeError, ValueError):
+                    live_px = 0.0
+                bar_close = float(closes[-1])
+                if live_px <= 0 or bar_close <= 0:
+                    self.state.record_skip(
+                        f"{sym}: ticker price unavailable, no confirmation"
+                    )
+                    continue
+                if plan.side == "BUY" and live_px <= bar_close:
+                    self.state.record_skip(
+                        f"{sym}: ticker {live_px:.4f} ≤ signal close "
+                        f"{bar_close:.4f} — no continuation up, drop long"
+                    )
+                    continue
+                if plan.side == "SELL" and live_px >= bar_close:
+                    self.state.record_skip(
+                        f"{sym}: ticker {live_px:.4f} ≥ signal close "
+                        f"{bar_close:.4f} — no continuation down, drop short"
+                    )
+                    continue
+                # Ticker confirms direction. Re-derive SL/TP based on the
+                # actual fill price (current ticker) so the R-geometry is
+                # honored relative to where we're entering, not where the
+                # signal triggered.
+                rk = self.cfg.risk
+                sl_pct = rk.stop_loss_pct
+                if rk.use_atr and sig.atr > 0:
+                    atr_pct_now = (sig.atr / live_px) * 100.0
+                    sl_pct = max(sl_pct, rk.atr_multiplier_sl * atr_pct_now)
+                sl_dist = live_px * (sl_pct / 100.0)
+                tp_dist = sl_dist * rk.take_profit_r
+                if plan.side == "BUY":
+                    new_sl = round(live_px - sl_dist, meta.price_precision)
+                    new_tp = round(live_px + tp_dist, meta.price_precision)
+                else:
+                    new_sl = round(live_px + sl_dist, meta.price_precision)
+                    new_tp = round(live_px - tp_dist, meta.price_precision)
+                # Replace the plan with one calibrated to the live price.
+                from .risk import OrderPlan as _OP
+                plan = _OP(
+                    side=plan.side, volume=plan.volume,
+                    price=round(live_px, meta.price_precision),
+                    stop_loss=new_sl, take_profit=new_tp,
+                    leverage=plan.leverage, notes=plan.notes + ",ticker_confirmed",
+                )
+                log.info("TICKER CONFIRMS %s %s: bar_close=%s live=%s "
+                         "(%+.4f%%) — re-calibrated SL=%s TP=%s",
+                         sym, plan.side, bar_close, live_px,
+                         (live_px - bar_close) / bar_close * 100,
+                         new_sl, new_tp)
+
             # Execute.
             placed = self._execute(sym, plan)
             if placed:

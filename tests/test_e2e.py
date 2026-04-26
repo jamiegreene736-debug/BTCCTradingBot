@@ -122,6 +122,9 @@ def fresh_cfg():
     # Disable the ADX-floor filter for fixture tests (most tests don't care
     # about regime gating; specific min_adx tests set this explicitly).
     cfg.strategy.min_adx_for_trade = 0.0
+    # Disable post-signal ticker confirmation for fixture tests (most don't
+    # mock ticker; specific confirmation tests set this explicitly).
+    cfg.strategy.confirm_with_ticker = False
     return cfg
 
 
@@ -1578,6 +1581,7 @@ def test_post_only_timeout_cancels_and_skips():
     cfg.mode = "live"
     cfg.trading.symbols = ["BTCUSDT"]
     cfg.trading.post_only_timeout_secs = 8
+    cfg.trading.use_post_only_entries = True  # explicit opt-in (default is now False per Grok v8)
     bot = BitunixBot(cfg)
     bot.client = make_mock_client()
     bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
@@ -2740,6 +2744,132 @@ def test_reset_streaks_returns_503_when_no_bot():
     assert r.status_code == 503
 
 
+# ----------------------------------------------------------------- Grok review v8
+
+
+def test_ticker_confirmation_blocks_long_when_price_didnt_move_up():
+    """When confirm_with_ticker=True, a LONG signal must be dropped if
+    the live ticker price has NOT moved above the signal-bar close.
+    Catches exhaustion-fade where signal bar was bullish but immediately
+    reverses on the next bar."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.strategy.confirm_with_ticker = True
+    cfg.trading.symbols = ["BTCUSDT"]
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    klines = make_uptrend_klines()
+    bot.client.klines.side_effect = lambda *a, **kw: klines
+    last_close = klines[-1]["close"]
+    # Ticker BELOW the signal bar's close → confirmation should fail.
+    bot.client.ticker.return_value = {"lastPrice": str(last_close - 5.0)}
+    bot._resolve_symbol_meta()
+    bot._tick()
+
+    bot.client.place_order.assert_not_called()
+    skips = [e for e in bot.state.snapshot()["events"] if e["kind"] == "skip"]
+    assert any("no continuation up" in s["text"] for s in skips), \
+        f"expected ticker-confirmation skip; got {[s['text'] for s in skips]}"
+
+
+def test_ticker_confirmation_allows_long_when_price_moved_up():
+    """LONG signal proceeds when live ticker price > signal-bar close."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.strategy.confirm_with_ticker = True
+    cfg.trading.symbols = ["BTCUSDT"]
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    klines = make_uptrend_klines()
+    bot.client.klines.side_effect = lambda *a, **kw: klines
+    last_close = klines[-1]["close"]
+    # Ticker meaningfully above → confirmation passes.
+    bot.client.ticker.return_value = {"lastPrice": str(last_close + 5.0)}
+    bot._resolve_symbol_meta()
+    bot._tick()
+
+    bot.client.place_order.assert_called()
+
+
+def test_ticker_confirmation_recalibrates_sl_tp():
+    """When ticker confirms direction, SL/TP must be re-derived from
+    the actual fill price (ticker), not the stale signal-bar close."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.strategy.confirm_with_ticker = True
+    cfg.strategy.min_adx_for_trade = 0.0
+    cfg.trading.symbols = ["BTCUSDT"]
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    klines = make_uptrend_klines()
+    bot.client.klines.side_effect = lambda *a, **kw: klines
+    last_close = klines[-1]["close"]
+    confirmed_px = last_close + 10.0
+    bot.client.ticker.return_value = {"lastPrice": str(confirmed_px)}
+    bot._resolve_symbol_meta()
+    bot._tick()
+
+    bot.client.place_order.assert_called()
+    kw = bot.client.place_order.call_args.kwargs
+    sl = float(kw["sl_price"])
+    tp = float(kw["tp_price"])
+    # SL should be re-calibrated from confirmed_px, not stale close.
+    # SL ≈ confirmed_px × (1 - 0.0025), bounded by ATR-hybrid.
+    expected_sl = confirmed_px * (1 - 0.0025)
+    # Allow some tolerance for ATR-hybrid widening + price precision rounding.
+    assert abs(sl - expected_sl) < confirmed_px * 0.01, \
+        f"SL {sl} not re-calibrated from confirmed {confirmed_px}; expected ~{expected_sl}"
+    assert tp > confirmed_px, "TP should be above confirmed entry for long"
+
+
+def test_ticker_confirmation_drops_when_ticker_fetch_fails():
+    """If the ticker call raises (network error, exchange down), the
+    signal is dropped — better safe than entering blind."""
+    from bitunix_bot.client import BitunixError
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.strategy.confirm_with_ticker = True
+    cfg.trading.symbols = ["BTCUSDT"]
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+    bot.client.ticker.side_effect = BitunixError(503, "service down", {})
+    bot._resolve_symbol_meta()
+    bot._tick()
+
+    bot.client.place_order.assert_not_called()
+    skips = [e for e in bot.state.snapshot()["events"] if e["kind"] == "skip"]
+    assert any("ticker confirmation" in s["text"] for s in skips), \
+        f"expected ticker-confirmation skip; got {[s['text'] for s in skips]}"
+
+
+def test_post_only_entries_disabled_by_default():
+    """Default cfg.trading.use_post_only_entries=false (Grok v8) means
+    new entries go straight to MARKET — no maker post-only path."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.trading.symbols = ["BTCUSDT"]
+    # Production default loaded from config.yaml — should be False.
+    assert cfg.trading.use_post_only_entries is False, \
+        "post-only entries must be DISABLED by default after Grok v8"
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+    bot._resolve_symbol_meta()
+    bot._tick()
+
+    bot.client.place_order.assert_called()
+    kw = bot.client.place_order.call_args.kwargs
+    assert kw["order_type"] == "MARKET", \
+        f"expected MARKET entry under v8 default; got {kw.get('order_type')}"
+    assert "BTCUSDT" not in bot.pending_limits
+
+
 # ----------------------------------------------------------------- ChatGPT review v5 (factor groups)
 
 
@@ -3651,6 +3781,7 @@ def test_dynamic_post_only_timeout_shortens_with_high_activity():
     cfg = fresh_cfg()
     cfg.mode = "live"
     cfg.trading.post_only_timeout_secs = 8
+    cfg.trading.use_post_only_entries = True  # explicit opt-in (default is now False per Grok v8)
     cfg.trading.symbols = ["BTCUSDT"]
     bot = BitunixBot(cfg)
     bot.client = make_mock_client()
@@ -3687,6 +3818,7 @@ def test_dynamic_post_only_timeout_lengthens_in_dead_market():
     cfg = fresh_cfg()
     cfg.mode = "live"
     cfg.trading.post_only_timeout_secs = 8
+    cfg.trading.use_post_only_entries = True  # explicit opt-in (default is now False per Grok v8)
     cfg.trading.symbols = ["BTCUSDT"]
     bot = BitunixBot(cfg)
     bot.client = make_mock_client()
@@ -3718,6 +3850,7 @@ def test_dynamic_post_only_timeout_clamps_to_4_12():
     cfg = fresh_cfg()
     cfg.mode = "live"
     cfg.trading.post_only_timeout_secs = 8
+    cfg.trading.use_post_only_entries = True  # explicit opt-in (default is now False per Grok v8)
     cfg.trading.symbols = ["BTCUSDT"]
     bot = BitunixBot(cfg)
     bot.client = make_mock_client()
@@ -4287,6 +4420,11 @@ def main() -> int:
         test_journal_endpoint_handles_missing_file,
         test_journal_endpoint_requires_auth,
         test_journal_download_returns_file,
+        test_ticker_confirmation_blocks_long_when_price_didnt_move_up,
+        test_ticker_confirmation_allows_long_when_price_moved_up,
+        test_ticker_confirmation_recalibrates_sl_tp,
+        test_ticker_confirmation_drops_when_ticker_fetch_fails,
+        test_post_only_entries_disabled_by_default,
         test_factor_classification_routes_votes_correctly,
         test_factor_score_breakdown_dedups_within_group,
         test_factor_score_caps_at_one,
