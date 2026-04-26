@@ -1349,20 +1349,68 @@ class BitunixBot:
                 # Push update — modify the SPECIFIC SL trigger order by its id.
                 # The position-level modify endpoint doesn't actually persist;
                 # this targets the SL trigger directly.
-                self.client.modify_tpsl_order(
-                    order_id=sl_order_id,
-                    sl_price=str(new_sl_rounded),
-                    sl_qty=sl_order.get("slQty"),
-                    sl_stop_type=sl_order.get("slStopType") or "LAST_PRICE",
-                    sl_order_type=sl_order.get("slOrderType") or "MARKET",
-                )
-                log.info(
-                    "SL ratchet %s: %s → %s (%s, entry=%s, current=%.6f)",
-                    symbol, current_sl, new_sl_rounded, reason, entry, current_price,
-                )
-                self.state.record_order(
-                    f"{symbol} SL {current_sl} → {new_sl_rounded} ({reason})"
-                )
+                #
+                # Race-condition fix (Grok review, Option C): r_favor is the
+                # MAX favor reached, but current_price for SL placement is
+                # the LIVE ticker. So a trade can hit r=0.37 (qualifying for
+                # BE) while live price has retraced to r=0.21 — the
+                # entry-buffer SL we just computed lands on the wrong side
+                # of last price. Bitunix correctly rejects with code 30030.
+                # On that specific failure, retry with SL clamped to
+                # current_price ± 1 tick — locks in whatever profit is
+                # still on the table at the moment of the API call.
+                try:
+                    self.client.modify_tpsl_order(
+                        order_id=sl_order_id,
+                        sl_price=str(new_sl_rounded),
+                        sl_qty=sl_order.get("slQty"),
+                        sl_stop_type=sl_order.get("slStopType") or "LAST_PRICE",
+                        sl_order_type=sl_order.get("slOrderType") or "MARKET",
+                    )
+                    log.info(
+                        "SL ratchet %s: %s → %s (%s, entry=%s, current=%.6f)",
+                        symbol, current_sl, new_sl_rounded, reason, entry, current_price,
+                    )
+                    self.state.record_order(
+                        f"{symbol} SL {current_sl} → {new_sl_rounded} ({reason})"
+                    )
+                except BitunixError as e_inner:
+                    # Bitunix code 30030: "SL price must be greater/less than
+                    # last price" — the intended new_sl is on the wrong side
+                    # of live price due to retracement. Retry with a tight
+                    # clamp at current_price ± 1 tick (still better than
+                    # original SL because we already passed the ratchet check).
+                    if e_inner.code != 30030:
+                        raise
+                    tick = 10 ** -meta.price_precision
+                    clamp_sl = (current_price - tick) if is_long else (current_price + tick)
+                    clamp_sl_rounded = round(clamp_sl, meta.price_precision)
+                    # Still must ratchet forward — if even the clamp isn't
+                    # better than current_sl, skip rather than move backward.
+                    if (is_long and clamp_sl_rounded <= current_sl) or \
+                       ((not is_long) and clamp_sl_rounded >= current_sl):
+                        log.info(
+                            "SL clamp skipped %s: %s not better than current %s "
+                            "(price retraced past ratchet point)",
+                            symbol, clamp_sl_rounded, current_sl,
+                        )
+                        continue
+                    self.client.modify_tpsl_order(
+                        order_id=sl_order_id,
+                        sl_price=str(clamp_sl_rounded),
+                        sl_qty=sl_order.get("slQty"),
+                        sl_stop_type=sl_order.get("slStopType") or "LAST_PRICE",
+                        sl_order_type=sl_order.get("slOrderType") or "MARKET",
+                    )
+                    log.info(
+                        "SL clamped %s: %s → %s (current=%.6f, %s — retraced past intended %s)",
+                        symbol, current_sl, clamp_sl_rounded, current_price,
+                        reason, new_sl_rounded,
+                    )
+                    self.state.record_order(
+                        f"{symbol} SL {current_sl} → {clamp_sl_rounded} "
+                        f"({reason}, clamped from {new_sl_rounded})"
+                    )
             except BitunixError as e_sl:
                 # SL ratchet may benignly fail if the position closed.
                 msg = (e_sl.msg or "").lower()

@@ -579,6 +579,86 @@ def test_breakeven_sl_short():
     assert abs(new_sl - 99_950.0) < 1.0, f"short BE SL wrong: {new_sl}"
 
 
+def test_breakeven_sl_clamps_on_30030_short():
+    """Race: BE-protect computes new_sl from ENTRY, but live price has
+    retraced toward entry — new_sl lands on wrong side of last price.
+    Bitunix returns code 30030. Bot must retry with SL clamped to
+    current_price + 1 tick (locks in remaining profit).
+
+    Setup: short entry 100_000, current_price 99_950 (just retraced from
+    peak), buffer 0.10% → intended new_sl = 99_900 (below current → invalid
+    for short)."""
+    from bitunix_bot.client import BitunixError
+    bot, _, _ = _setup_bot_with_open_position(
+        side="SELL", entry=100_000.0, current_price=99_950.0,  # r=0.20
+        breakeven_at_r=0.20, buffer_pct=0.10,
+    )
+    # First modify call raises 30030; second succeeds.
+    bot.client.modify_tpsl_order.side_effect = [
+        BitunixError(30030, "SL price must be greater than last price: 99950", {}),
+        None,
+    ]
+    bot._tick()
+
+    assert bot.client.modify_tpsl_order.call_count == 2, \
+        "expected first call + retry"
+    first = bot.client.modify_tpsl_order.call_args_list[0].kwargs
+    second = bot.client.modify_tpsl_order.call_args_list[1].kwargs
+    # First call used the entry-anchored SL (99_900).
+    assert abs(float(first["sl_price"]) - 99_900.0) < 1.0
+    # Second call clamped to current_price + 1 tick (just above 99_950).
+    clamped = float(second["sl_price"])
+    assert clamped > 99_950.0, \
+        f"clamped SL {clamped} must be strictly above current 99_950 (short)"
+    assert clamped < 100_000.0, \
+        f"clamped SL {clamped} must still lock in some profit (below entry)"
+
+
+def test_breakeven_sl_clamps_on_30030_long():
+    """Long mirror: when intended new_sl lands ABOVE last price (retracement
+    toward entry), retry with SL clamped to current_price - 1 tick."""
+    from bitunix_bot.client import BitunixError
+    bot, _, _ = _setup_bot_with_open_position(
+        side="BUY", entry=100_000.0, current_price=100_050.0,  # r=0.20
+        breakeven_at_r=0.20, buffer_pct=0.10,
+    )
+    bot.client.modify_tpsl_order.side_effect = [
+        BitunixError(30030, "SL price must be less than last price: 100050", {}),
+        None,
+    ]
+    bot._tick()
+
+    assert bot.client.modify_tpsl_order.call_count == 2
+    first = bot.client.modify_tpsl_order.call_args_list[0].kwargs
+    second = bot.client.modify_tpsl_order.call_args_list[1].kwargs
+    # First call used entry+buffer = 100_100 (above current → invalid for long).
+    assert abs(float(first["sl_price"]) - 100_100.0) < 1.0
+    # Second call clamped just below current_price.
+    clamped = float(second["sl_price"])
+    assert clamped < 100_050.0, \
+        f"clamped SL {clamped} must be below current 100_050 (long)"
+    assert clamped > 100_000.0, \
+        f"clamped SL {clamped} must still lock in some profit (above entry)"
+
+
+def test_breakeven_sl_30030_non30030_errors_propagate():
+    """A non-30030 BitunixError (e.g. position closed) must NOT trigger the
+    retry path — it should propagate to the outer benign-or-real handler."""
+    from bitunix_bot.client import BitunixError
+    bot, _, _ = _setup_bot_with_open_position(
+        side="SELL", entry=100_000.0, current_price=99_950.0,
+        breakeven_at_r=0.20, buffer_pct=0.10,
+    )
+    bot.client.modify_tpsl_order.side_effect = BitunixError(
+        99999, "some other error", {}
+    )
+    # Should not raise — outer handler catches and records the error.
+    bot._tick()
+    # Only ONE call attempted (no retry on non-30030).
+    assert bot.client.modify_tpsl_order.call_count == 1, \
+        f"non-30030 errors must not retry; got {bot.client.modify_tpsl_order.call_count} calls"
+
+
 def test_sl_never_moves_against_position():
     bot, _, _ = _setup_bot_with_open_position(
         side="BUY", entry=100_000.0, current_price=100_250.0,
