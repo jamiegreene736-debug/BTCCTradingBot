@@ -1,9 +1,22 @@
 """Trade-quality journal — JSONL log of structured per-trade context.
 
-Every entry is one line of JSON, written to logs/trades.jsonl. After ~200-300
-trades the journal becomes the data source for the next layer of tuning:
-factor-group weight calibration, dynamic threshold by recent WR, conviction
-multiplier validation, regime-specific parameter tuning.
+Every entry is one line of JSON, written to logs/trades.jsonl by default.
+
+Persistence on Railway:
+  Railway's filesystem is EPHEMERAL — every redeploy (every git push)
+  wipes the file. To survive redeploys, mount a Railway persistent
+  volume in the service Settings (e.g. at `/data`) and set the env var
+  JOURNAL_PATH=/data/trades.jsonl. The journal will then accumulate
+  across deploys.
+
+  Without the volume + env var, expect the file to reset every push.
+  Trade history is NOT lost (Bitunix retains it server-side); only the
+  rich entry context (score, factor breakdown, ADX, tape signals, etc.)
+  is journal-only and reset.
+
+After ~200-300 trades the journal becomes the data source for the next
+layer of tuning: factor-group weight calibration, dynamic threshold by
+recent WR, conviction multiplier validation, regime-specific parameters.
 
 Two event kinds:
   - "entry": logged when an order is placed (signal context + sizing)
@@ -20,12 +33,27 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import threading
 import time
 from pathlib import Path
 from typing import Any
 
 log = logging.getLogger(__name__)
+
+
+def _default_journal_path() -> Path:
+    """Resolve the journal file path with env-var override.
+
+    JOURNAL_PATH env var, if set, takes precedence — Railway / Docker /
+    other deployments can point this at a persistent volume mount (e.g.
+    `/data/trades.jsonl`) so the file survives redeploys. Falls back to
+    `logs/trades.jsonl` (relative) which IS wiped on Railway redeploys.
+    """
+    override = os.environ.get("JOURNAL_PATH", "").strip()
+    if override:
+        return Path(override)
+    return Path("logs/trades.jsonl")
 
 
 class TradeJournal:
@@ -37,14 +65,23 @@ class TradeJournal:
     grow linearly with trade volume; the user can rotate offline.
     """
 
-    def __init__(self, path: str | Path = "logs/trades.jsonl"):
-        self.path = Path(path)
+    def __init__(self, path: str | Path | None = None):
+        # If no explicit path given, resolve from env var or default.
+        # This keeps tests' explicit-path constructors working while
+        # letting production read JOURNAL_PATH for Railway volume mounts.
+        if path is None:
+            self.path = _default_journal_path()
+        else:
+            self.path = Path(path)
         self._lock = threading.Lock()
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         except Exception as e:
             log.warning("TradeJournal: could not create dir %s: %s",
                         self.path.parent, e)
+        log.info("TradeJournal writing to %s%s", self.path,
+                 " (from JOURNAL_PATH env var)"
+                 if os.environ.get("JOURNAL_PATH") else "")
 
     def _write(self, record: dict[str, Any]) -> None:
         record.setdefault("ts", time.time())
