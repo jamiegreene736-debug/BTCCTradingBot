@@ -144,14 +144,37 @@ run.py                    # Spawns the trading worker thread + Flask app on $POR
 The bot serves a dashboard on Railway's auto-assigned `*.up.railway.app` URL.
 Routes:
 
-| Path          | What it returns                                         |
-|---------------|----------------------------------------------------------|
-| `/`           | HTML dashboard (auth required)                          |
-| `/api/state`  | JSON snapshot — account, positions, history, events     |
-| `/healthz`    | Plain `ok`, no auth — for uptime checks                 |
+| Path                 | What it returns                                         |
+|----------------------|----------------------------------------------------------|
+| `/`                  | HTML dashboard (auth required)                          |
+| `/api/state`         | JSON snapshot — account, positions, history, events     |
+| `/api/feeds/status`  | WebSocket feed health (OB + tape connection state)      |
+| `/api/journal`       | Trade journal events (entries + exits, JSONL-backed)    |
+| `/healthz`           | Plain `ok`, no auth — for uptime checks                 |
 
 Set `DASHBOARD_PASSWORD` in Railway → Variables. The username is `admin`.
 If the env var is unset, every route except `/healthz` returns 503.
+
+### Asking AI reviewers for feedback
+
+`scripts/ask_reviewers.py` pulls live state from the dashboard, builds a
+Markdown export, and POSTs it to Grok (xAI) and/or ChatGPT (OpenAI) for
+review. The reviews are saved to `logs/exports/reviews/<provider>-<ts>.md`
+and printed to stdout. **The script never edits config or code** — you
+read the recommendations and choose what to apply.
+
+```bash
+# Set keys in your shell or .env
+export BOT_DASHBOARD_PASSWORD='<dashboard password>'
+export XAI_API_KEY='<key from console.x.ai>'
+export OPENAI_API_KEY='<key from platform.openai.com>'
+
+scripts/ask_reviewers.py                 # ask both
+scripts/ask_reviewers.py --grok          # ask Grok only
+scripts/ask_reviewers.py --openai        # ask OpenAI only
+scripts/ask_reviewers.py --question "..." # custom prompt
+scripts/ask_reviewers.py --dry-run       # build the export, skip API calls
+```
 
 ## Safety notes
 
