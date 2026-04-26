@@ -794,22 +794,24 @@ class BitunixBot:
                 )
                 continue
 
-            # Depth filter — reject if top-5 book is too thin. Standard
-            # microstructure filter: thin books cause post-only limits to
-            # sit forever or get picked off by HFT-style adverse selection.
-            # Threshold is per-symbol (calibrated from observed liquidity).
-            min_depth = self.cfg.trading.symbol_min_depth.get(sym_u, 0.0)
-            if min_depth > 0 and self.ob_feed is not None:
-                depth = self.ob_feed.get_depth(sym, top_n=5)
-                if depth is not None:
-                    bid_d, ask_d = depth
-                    thinnest = min(bid_d, ask_d)
-                    if thinnest < min_depth:
-                        self.state.record_skip(
-                            f"{sym}: thin book ({thinnest:.1f} < {min_depth:.0f} "
-                            f"min) — post-only would sit"
-                        )
-                        continue
+            # Depth filter — only relevant for post-only entries (thin
+            # books cause limits to sit forever or get adversely selected).
+            # When entering at market (Grok v8), top-of-book takeable
+            # liquidity matters but the calibrated post-only threshold
+            # is far too aggressive — skip the filter entirely.
+            if self.cfg.trading.use_post_only_entries:
+                min_depth = self.cfg.trading.symbol_min_depth.get(sym_u, 0.0)
+                if min_depth > 0 and self.ob_feed is not None:
+                    depth = self.ob_feed.get_depth(sym, top_n=5)
+                    if depth is not None:
+                        bid_d, ask_d = depth
+                        thinnest = min(bid_d, ask_d)
+                        if thinnest < min_depth:
+                            self.state.record_skip(
+                                f"{sym}: thin book ({thinnest:.1f} < {min_depth:.0f} "
+                                f"min) — post-only would sit"
+                            )
+                            continue
 
             # Klines.
             try:

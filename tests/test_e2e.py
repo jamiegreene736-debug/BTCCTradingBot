@@ -3714,10 +3714,14 @@ def test_absorption_vote_does_not_fire_when_aggression_weak():
 
 def test_depth_filter_blocks_thin_book():
     """Per-symbol depth threshold: a book with min(bid_depth, ask_depth)
-    below threshold must skip the trade with a 'thin book' reason."""
+    below threshold must skip the trade with a 'thin book' reason.
+
+    Depth filter only runs when post-only entries are enabled (Grok v8 —
+    market entries don't have the 'sit forever' problem)."""
     reset_state()
     cfg = fresh_cfg()
     cfg.mode = "live"
+    cfg.trading.use_post_only_entries = True  # depth filter is post-only specific
     cfg.trading.symbols = ["BTCUSDT"]
     bot = BitunixBot(cfg)
     bot.client = make_mock_client()
@@ -3732,6 +3736,27 @@ def test_depth_filter_blocks_thin_book():
     skips = [e for e in bot.state.snapshot()["events"] if e["kind"] == "skip"]
     assert any("thin book" in s["text"] for s in skips), \
         f"expected thin book skip; got {[s['text'] for s in skips]}"
+
+
+def test_depth_filter_skipped_for_market_entries():
+    """When use_post_only_entries=False (Grok v8 default), the thin-book
+    gate must NOT block market entries — market takes top-of-book and
+    'sit forever' is not a concern."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.trading.use_post_only_entries = False
+    cfg.trading.symbols = ["BTCUSDT"]
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+    # Razor-thin book that would block under post-only mode.
+    bot.ob_feed = _FakeOBFeed(bid_depth=1.0, ask_depth=1.0)
+    bot._resolve_symbol_meta()
+    bot._tick()
+    skips = [e for e in bot.state.snapshot()["events"] if e["kind"] == "skip"]
+    assert not any("thin book" in s["text"] for s in skips), \
+        f"market entries shouldn't trigger thin-book skip: {skips}"
 
 
 def test_depth_filter_allows_normal_book():
