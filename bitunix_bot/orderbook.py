@@ -35,6 +35,12 @@ RECONNECT_BACKOFF_SECS = 5.0
 # If no messages received for this long, the connection looks dead even though
 # the socket may report itself open. Force a reconnect.
 SILENCE_TIMEOUT_SECS = 60.0
+# Bitunix's `depth_books` channel sends a SNAPSHOT once per subscription
+# rather than continuous updates. To get fresh book data, we re-subscribe
+# every RESUBSCRIBE_INTERVAL_SECS seconds. Diagnosed from /api/feeds/status:
+# initial connect produces 4 book updates, then silence on depth while the
+# trade feed keeps streaming normally.
+RESUBSCRIBE_INTERVAL_SECS = 5.0
 
 
 @dataclass
@@ -259,16 +265,27 @@ class OrderBookFeed:
                  self._disconnect_count, args[:2] if args else "")
 
     def _pinger(self) -> None:
-        """Send heartbeats AND watchdog the connection — if no messages have
-        arrived for SILENCE_TIMEOUT_SECS, force-close so _run reconnects.
-        Sometimes WS sockets stay nominally open but stop delivering data."""
+        """Combined heartbeat + watchdog + periodic re-subscription thread.
+
+        Wakes on a tight 1s loop and decides per-tick:
+          - Ping every PING_INTERVAL seconds (15s default)
+          - Re-subscribe every RESUBSCRIBE_INTERVAL_SECS seconds (5s default)
+            because Bitunix's depth_books channel sends a single snapshot
+            per subscription, NOT continuous updates. Without re-subscribe
+            the books go stale ~30s after connect.
+          - Watchdog: silence > SILENCE_TIMEOUT_SECS forces reconnect.
+        """
+        last_ping = time.time()
+        last_resub = time.time()
         while not self._stop.is_set():
-            time.sleep(PING_INTERVAL)
+            time.sleep(1.0)  # tight wake; per-action timers below
             if self._stop.is_set() or not self._ws:
                 return
-            # Watchdog: silence implies dead connection. Force a reconnect.
+            now = time.time()
+
+            # Watchdog.
             if self._last_message_at and (
-                time.time() - self._last_message_at > SILENCE_TIMEOUT_SECS
+                now - self._last_message_at > SILENCE_TIMEOUT_SECS
             ):
                 log.warning("OB WS silent for >%.0fs; forcing reconnect",
                             SILENCE_TIMEOUT_SECS)
@@ -277,10 +294,28 @@ class OrderBookFeed:
                 except Exception:
                     pass
                 return
-            try:
-                self._ws.send(json.dumps({"op": "ping", "ping": int(time.time())}))
-            except Exception:
-                return  # connection dead; _run will reconnect
+
+            # Heartbeat.
+            if now - last_ping >= PING_INTERVAL:
+                last_ping = now
+                try:
+                    self._ws.send(json.dumps({"op": "ping",
+                                               "ping": int(now)}))
+                except Exception:
+                    return  # connection dead; _run will reconnect
+
+            # Re-subscribe to refresh book snapshots.
+            if now - last_resub >= RESUBSCRIBE_INTERVAL_SECS:
+                last_resub = now
+                sub_msg = {
+                    "op": "subscribe",
+                    "args": [{"symbol": s, "ch": CHANNEL} for s in self.symbols],
+                }
+                try:
+                    self._ws.send(json.dumps(sub_msg))
+                except Exception as e:
+                    log.warning("OB WS re-subscribe send failed: %s", e)
+                    return
 
     # ------------------------------------------------------------------ parsing
 
