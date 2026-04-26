@@ -252,6 +252,18 @@ strategy:
   # reverse on the next bar. Set to false to disable (one HTTP call
   # latency per entry).
   confirm_with_ticker: true
+  # Signal inversion — forward-looking experiment. When true, every signal
+  # that would otherwise fire LONG fires SHORT and vice versa. Use this if
+  # live data shows the bot has systematic negative direction edge (i.e.
+  # net-PnL win rate consistently below 35-40% across 20+ fills under the
+  # current fee regime). All upstream gates (continuation, absorption,
+  # ticker confirmation, score threshold) still run on the ORIGINAL
+  # direction — we trust the signal's strength, just bet the opposite
+  # side. Inverted entries are tagged with reason "INVERTED" in the journal
+  # so we can A/B compare. KEEP FALSE until 20-30 fills under maker-first
+  # have been observed; flipping prematurely conflates direction-edge with
+  # fee-economics changes.
+  invert_signals: false
 
 loop:
   tick_seconds: 10

@@ -234,6 +234,16 @@ class StrategyCfg:
     # exhaustion entries that look perfect on the bar that just closed
     # but immediately reverse on the bar that's now opening.
     confirm_with_ticker: bool = True
+    # Signal inversion — wire for forward-looking experiment. When True,
+    # every signal that would otherwise fire LONG fires SHORT and vice versa.
+    # Use case: if 130+ live trades show the bot is systematically entering at
+    # exhaustion points (high net-loss rate after fees, but with directional
+    # bias detectable in net_pnl distribution), inverting empirically tests
+    # whether the strategy has negative direction edge. Set in config.yaml as
+    # `invert_signals: true` to enable. All other gates (continuation, ticker
+    # confirmation, absorption veto) still run on the ORIGINAL direction —
+    # we trust the signal's strength, just bet the opposite side.
+    invert_signals: bool = False
     # Factor-group scoring — replaces raw vote-count normalization. Each
     # vote is classified into one of four groups; counts within a group are
     # capped at the saturation value (so 6 correlated trend votes don't

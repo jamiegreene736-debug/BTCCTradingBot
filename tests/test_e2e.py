@@ -2391,6 +2391,106 @@ def test_trend_dominance_dampens_opposite_side():
     assert sig.direction == "long"
 
 
+def test_invert_signals_flips_long_to_short():
+    """When cfg.strategy.invert_signals=True, a setup that would fire LONG
+    fires SHORT instead — preserving score, factors, reasons (with INVERTED
+    tag prepended), but flipping the direction. Used to A/B test direction
+    edge if live data shows systematic exhaustion-fade entries."""
+    from bitunix_bot.config import StrategyCfg
+    from bitunix_bot.strategy import evaluate
+    klines = make_uptrend_klines()
+    o = [k["open"] for k in klines]
+    h = [k["high"] for k in klines]
+    l_ = [k["low"] for k in klines]
+    c = [k["close"] for k in klines]
+    cfg = StrategyCfg(
+        ema_fast=9, ema_mid=21, ema_slow=50,
+        rsi_period=14, rsi_long_min=40, rsi_long_max=80,
+        rsi_short_min=20, rsi_short_max=60,
+        macd_fast=12, macd_slow=26, macd_signal=9,
+        bb_period=20, bb_std=2.0, atr_period=14,
+        adx_period=14, adx_min=15.0,
+        supertrend_period=10, supertrend_mult=3.0,
+        pattern_weight=0.55, pattern_norm=2.0, fire_threshold=0.05,
+        invert_signals=True,
+    )
+    sig = evaluate(o, h, l_, c, cfg)
+    assert sig is not None, "uptrend should still produce a signal under inversion"
+    # Direction flipped from long → short
+    assert sig.direction == "short", \
+        f"expected inverted short on uptrend; got {sig.direction}"
+    # side_code follows direction
+    assert sig.side_code == "SELL"
+    # INVERTED tag prepended to reasons so journal can A/B
+    assert sig.reasons and sig.reasons[0] == "INVERTED", \
+        f"expected leading INVERTED reason; got {sig.reasons[:3]}"
+
+
+def test_invert_signals_flips_short_to_long():
+    """Symmetric: a setup that would fire SHORT under invert=True fires LONG.
+    Uses a synthetic downtrend with bearish marubozu last-3-bars to ensure
+    the continuation gate passes for the SHORT side."""
+    from bitunix_bot.config import StrategyCfg
+    from bitunix_bot.strategy import evaluate
+    rng = np.random.default_rng(7)
+    n = 250
+    closes = 60_000.0 + np.cumsum(rng.normal(-12, 25, n))
+    opens = closes + rng.uniform(5, 20, n)
+    highs = np.maximum(opens, closes) + rng.uniform(0.5, 3, n)
+    lows = np.minimum(opens, closes) - rng.uniform(0.5, 3, n)
+    # Last 3 bars: clean bear marubozu, descending closes.
+    for i in range(n - 3, n):
+        closes[i] = closes[i - 1] - 30 - rng.uniform(0, 5)
+        opens[i] = closes[i] + 30 + rng.uniform(0, 5)
+        highs[i] = opens[i] + rng.uniform(0.1, 1.5)
+        lows[i] = closes[i] - rng.uniform(0.1, 1.5)
+    o = list(opens); h = list(highs); l_ = list(lows); c = list(closes)
+    cfg = StrategyCfg(
+        ema_fast=9, ema_mid=21, ema_slow=50,
+        rsi_period=14, rsi_long_min=40, rsi_long_max=80,
+        rsi_short_min=20, rsi_short_max=60,
+        macd_fast=12, macd_slow=26, macd_signal=9,
+        bb_period=20, bb_std=2.0, atr_period=14,
+        adx_period=14, adx_min=15.0,
+        supertrend_period=10, supertrend_mult=3.0,
+        pattern_weight=0.55, pattern_norm=2.0, fire_threshold=0.05,
+        invert_signals=True,
+    )
+    sig = evaluate(o, h, l_, c, cfg)
+    assert sig is not None, "downtrend should still produce a signal under inversion"
+    assert sig.direction == "long", \
+        f"expected inverted long on downtrend; got {sig.direction}"
+    assert sig.side_code == "BUY"
+    assert sig.reasons[0] == "INVERTED"
+
+
+def test_invert_signals_default_off_preserves_direction():
+    """When invert_signals is left at its default (False), an uptrend fires
+    LONG normally with no INVERTED tag — the flag doesn't affect non-opt-in callers."""
+    from bitunix_bot.config import StrategyCfg
+    from bitunix_bot.strategy import evaluate
+    klines = make_uptrend_klines()
+    o = [k["open"] for k in klines]
+    h = [k["high"] for k in klines]
+    l_ = [k["low"] for k in klines]
+    c = [k["close"] for k in klines]
+    cfg = StrategyCfg(
+        ema_fast=9, ema_mid=21, ema_slow=50,
+        rsi_period=14, rsi_long_min=40, rsi_long_max=80,
+        rsi_short_min=20, rsi_short_max=60,
+        macd_fast=12, macd_slow=26, macd_signal=9,
+        bb_period=20, bb_std=2.0, atr_period=14,
+        adx_period=14, adx_min=15.0,
+        supertrend_period=10, supertrend_mult=3.0,
+        pattern_weight=0.55, pattern_norm=2.0, fire_threshold=0.05,
+        # invert_signals omitted — uses dataclass default (False)
+    )
+    sig = evaluate(o, h, l_, c, cfg)
+    assert sig is not None
+    assert sig.direction == "long"
+    assert "INVERTED" not in sig.reasons
+
+
 def test_min_adx_skips_deep_chop():
     """When ADX is below cfg.min_adx_for_trade (default 22), evaluate()
     must return None regardless of how strong the score would otherwise be.

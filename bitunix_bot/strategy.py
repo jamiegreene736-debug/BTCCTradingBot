@@ -823,6 +823,22 @@ def evaluate(
     absorption_vetoes_long = any(r.startswith("absorb(buyflow")
                                   for r in short_reasons)
 
+    # Optional signal-inversion gate (forward-looking experiment). All
+    # gates above (continuation, absorption, threshold) run on the
+    # ORIGINAL direction so we only invert genuine high-conviction setups.
+    invert = bool(getattr(cfg, "invert_signals", False))
+
+    def _emit(direction: Direction) -> Signal:
+        sig = _build(direction)
+        sig.fire_threshold_used = eff_threshold
+        if invert:
+            flipped: Direction = "short" if direction == "long" else "long"
+            sig.direction = flipped
+            sig.reasons = ["INVERTED"] + sig.reasons
+            log.info("INVERTED signal: %s → %s (score=%.2f)",
+                     direction, flipped, sig.score)
+        return sig
+
     if combined_long >= eff_threshold and combined_long > combined_short:
         if absorption_vetoes_long:
             log.info("ABSORPTION VETO long signal (buyflow being absorbed → "
@@ -834,9 +850,7 @@ def evaluate(
             log.info("CONTINUATION VETO long (bar mechanics or tape alignment "
                      "missing — likely exhaustion fade or contrary flow)")
             return None
-        sig = _build("long")
-        sig.fire_threshold_used = eff_threshold
-        return sig
+        return _emit("long")
     if combined_short >= eff_threshold and combined_short > combined_long:
         if absorption_vetoes_short:
             log.info("ABSORPTION VETO short signal (sellflow being absorbed → "
@@ -848,7 +862,5 @@ def evaluate(
             log.info("CONTINUATION VETO short (bar mechanics or tape alignment "
                      "missing — likely exhaustion fade or contrary flow)")
             return None
-        sig = _build("short")
-        sig.fire_threshold_used = eff_threshold
-        return sig
+        return _emit("short")
     return None
