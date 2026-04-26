@@ -104,6 +104,104 @@ def vwap(high: np.ndarray, low: np.ndarray, close: np.ndarray, volumes: np.ndarr
     return out
 
 
+def volume_profile_hvns(
+    high: np.ndarray,
+    low: np.ndarray,
+    volumes: np.ndarray,
+    current_price: float,
+    *,
+    lookback: int = 100,
+    num_bins: int = 50,
+    hvn_percentile: float = 80.0,
+) -> tuple[float | None, float | None]:
+    """Build a price-volume histogram from the last `lookback` bars and
+    return the nearest high-volume nodes (HVNs) above and below
+    `current_price`.
+
+    HVNs are price levels where lots of volume has traded — strong
+    structural support/resistance. For a long entry, the nearest HVN
+    BELOW is a natural SL anchor (support); the nearest HVN ABOVE is a
+    natural TP target (resistance). Mirror for shorts.
+
+    Algorithm:
+      1. Define `num_bins` evenly-spaced price bins covering [min_low, max_high]
+         over the last `lookback` bars.
+      2. For each bar, distribute its volume uniformly across the bins
+         that overlap its [low, high] range (volume-by-price approximation
+         since we don't have intra-bar tick data).
+      3. Identify "high-volume" bins as those above the `hvn_percentile`
+         threshold. Pick the nearest such bin centers above and below
+         `current_price`.
+
+    Returns (hvn_below, hvn_above). Either may be None when:
+      - Insufficient bars (< lookback // 2)
+      - No volume in the lookback window (synthetic / paper-mode data)
+      - No HVNs found on that side of current price
+
+    This is the "volume profile" piece of the Grok holistic review SL/TP
+    redesign — gives `risk.build_order` real market-structure anchors
+    instead of pure %-of-price stops.
+    """
+    if len(high) < lookback // 2 or len(volumes) != len(high):
+        return None, None
+
+    # Slice last `lookback` bars (or fewer if not enough data).
+    n = min(lookback, len(high))
+    h = high[-n:]
+    l = low[-n:]
+    v = volumes[-n:].astype(float)
+    if v.sum() <= 0:
+        return None, None
+
+    p_min = float(l.min())
+    p_max = float(h.max())
+    if p_max <= p_min:
+        return None, None
+
+    bins = np.linspace(p_min, p_max, num_bins + 1)
+    bin_centers = (bins[:-1] + bins[1:]) / 2.0
+    profile = np.zeros(num_bins)
+
+    # Distribute each bar's volume across overlapping bins.
+    for i in range(n):
+        bar_lo = float(l[i])
+        bar_hi = float(h[i])
+        bar_range = bar_hi - bar_lo
+        if bar_range <= 0:
+            # Doji or tiny bar — assign all volume to the bin containing close.
+            idx = int(np.searchsorted(bins, bar_lo) - 1)
+            if 0 <= idx < num_bins:
+                profile[idx] += float(v[i])
+            continue
+        for j in range(num_bins):
+            bin_lo = bins[j]
+            bin_hi = bins[j + 1]
+            overlap = max(0.0, min(bar_hi, bin_hi) - max(bar_lo, bin_lo))
+            if overlap > 0:
+                profile[j] += float(v[i]) * (overlap / bar_range)
+
+    if profile.max() <= 0:
+        return None, None
+
+    # HVN threshold: bins above the given percentile.
+    threshold = float(np.percentile(profile, hvn_percentile))
+    hvn_mask = profile >= threshold
+
+    # Nearest HVN below current_price.
+    below_indices = np.where(hvn_mask & (bin_centers < current_price))[0]
+    hvn_below: float | None = None
+    if len(below_indices) > 0:
+        hvn_below = float(bin_centers[below_indices[-1]])  # rightmost = closest below
+
+    # Nearest HVN above current_price.
+    above_indices = np.where(hvn_mask & (bin_centers > current_price))[0]
+    hvn_above: float | None = None
+    if len(above_indices) > 0:
+        hvn_above = float(bin_centers[above_indices[0]])   # leftmost = closest above
+
+    return hvn_below, hvn_above
+
+
 def stoch_rsi(
     close: np.ndarray,
     rsi_period: int = 14,

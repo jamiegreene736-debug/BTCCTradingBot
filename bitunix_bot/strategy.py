@@ -104,6 +104,7 @@ from .indicators import bollinger, cvd, ema, keltner_channels, macd, mfi, obv, r
 from .indicators import stoch_rsi as stoch_rsi_fn
 from .indicators import supertrend as supertrend_fn
 from .indicators import volume_ma as volume_ma_fn
+from .indicators import volume_profile_hvns
 from .indicators import vwap as vwap_fn
 
 log = logging.getLogger(__name__)
@@ -144,6 +145,17 @@ class Signal:
     # fair value and broke through, structural invalidation of the trend
     # thesis (Grok holistic review).
     vwap: float = 0.0
+    # Volume-profile HVNs around current price (Grok holistic review).
+    # Strong structural levels where lots of volume has traded over the
+    # lookback window. Used by risk.build_order as additional SL/TP
+    # anchors:
+    #   - For long: hvn_below = nearest HVN below entry → SL anchor
+    #               (support level), hvn_above = nearest HVN above → TP target
+    #   - For short: mirror.
+    # Either or both may be 0.0 when insufficient volume data (paper mode,
+    # synthetic klines, etc.) — risk.py falls through gracefully.
+    hvn_below: float = 0.0
+    hvn_above: float = 0.0
 
     @property
     def side_code(self) -> str:
@@ -405,6 +417,16 @@ def evaluate(
     p = c[i]
     if p <= 0:
         return None
+
+    # Volume-profile HVNs around current price (Grok holistic review).
+    # Computed once per evaluate() call; passed to risk.build_order via
+    # the Signal so it can anchor SL/TP to real structural levels.
+    # Returns (None, None) when volume data is insufficient — fine, the
+    # build_order caller falls through gracefully.
+    hvn_below_v, hvn_above_v = volume_profile_hvns(
+        h, l, v, current_price=float(p), lookback=100, num_bins=50,
+        hvn_percentile=80.0,
+    )
 
     # ATR is still required for SL/TP sizing (not as a gate).
     atr_now = atr_v[i] if i < len(atr_v) else np.nan
@@ -789,6 +811,8 @@ def evaluate(
             last_bar_low=float(l[-1]),
             vwap=float(vwap_v[i]) if (vwap_v is not None and i < len(vwap_v)
                                         and not np.isnan(vwap_v[i])) else 0.0,
+            hvn_below=float(hvn_below_v) if hvn_below_v is not None else 0.0,
+            hvn_above=float(hvn_above_v) if hvn_above_v is not None else 0.0,
         )
 
     # Hard ADX floor — don't trade in deep chop. Live drawdown analysis

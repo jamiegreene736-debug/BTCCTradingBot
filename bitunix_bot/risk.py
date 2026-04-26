@@ -187,11 +187,46 @@ def build_order(
             vwap_anchor = (sig_vwap - price) + price * (structure_buffer_pct / 100.0)
             stop_dist = max(stop_dist, vwap_anchor)
 
+    # Volume-profile HVN anchor (Grok holistic review): high-volume nodes
+    # are price levels with significant historical trading activity —
+    # strong structural support/resistance. For SL placement:
+    #   long  → SL extends below nearest HVN below entry (support level
+    #           breaks = thesis breaks)
+    #   short → SL extends above nearest HVN above entry (resistance
+    #           level breaks = thesis breaks)
+    # When the HVN is on the wrong side (long with hvn_below = 0, etc.),
+    # the anchor doesn't fire; falls through to other anchors.
+    hvn_below = getattr(signal, "hvn_below", 0.0) or 0.0
+    hvn_above = getattr(signal, "hvn_above", 0.0) or 0.0
+    if signal.direction == "long" and hvn_below > 0 and hvn_below < price:
+        hvn_anchor = (price - hvn_below) + price * (structure_buffer_pct / 100.0)
+        stop_dist = max(stop_dist, hvn_anchor)
+    elif signal.direction == "short" and hvn_above > 0 and hvn_above > price:
+        hvn_anchor = (hvn_above - price) + price * (structure_buffer_pct / 100.0)
+        stop_dist = max(stop_dist, hvn_anchor)
+
     # TP is always an R-multiple of effective SL distance — keeps geometry
     # consistent regardless of which SL formula bound. The legacy
     # atr_multiplier_tp config is retained for backwards-compat but unused
     # in the hybrid path; remove from config to fully decommission.
     tp_dist = stop_dist * risk.take_profit_r
+
+    # Volume-profile TP anchor: when HVN exists in the trade direction,
+    # use it as a TP target (resistance for long = where price is likely
+    # to bounce off; support for short = where shorts typically cover).
+    # We TIGHTEN the TP toward the HVN if the HVN is closer than the
+    # R-multiple target — capturing the realistic move instead of
+    # holding for an unrealistic R-multiple. NEVER expand TP past the
+    # R-multiple (hvn-anchor only constrains down, not up).
+    if signal.direction == "long" and hvn_above > 0 and hvn_above > price:
+        # Take profit just below the HVN (price likely bounces off resistance).
+        hvn_tp_dist = (hvn_above - price) - price * (structure_buffer_pct / 100.0)
+        if hvn_tp_dist > 0:
+            tp_dist = min(tp_dist, hvn_tp_dist)
+    elif signal.direction == "short" and hvn_below > 0 and hvn_below < price:
+        hvn_tp_dist = (price - hvn_below) - price * (structure_buffer_pct / 100.0)
+        if hvn_tp_dist > 0:
+            tp_dist = min(tp_dist, hvn_tp_dist)
 
     if stop_dist <= 0:
         return None

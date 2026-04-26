@@ -4561,6 +4561,149 @@ def test_structure_anchored_sl_short_widens_for_deep_wick_high():
         f"expected anchored SL near 60_360, got {plan.stop_loss}"
 
 
+def test_volume_profile_finds_hvn_below_and_above():
+    """volume_profile_hvns must identify the bins with the most volume
+    activity over the lookback window and return the nearest HVNs above
+    and below the current price."""
+    import numpy as np
+    from bitunix_bot.indicators import volume_profile_hvns
+    rng = np.random.default_rng(42)
+    n = 100
+    # Synthetic data: price oscillates around 100; LOTS of volume traded
+    # near 95 (support) and 105 (resistance), little volume elsewhere.
+    h = np.full(n, 0.0)
+    l = np.full(n, 0.0)
+    v = np.full(n, 0.0)
+    for i in range(n):
+        if i % 3 == 0:
+            # Heavy-volume bar near 95 (the HVN below).
+            l[i] = 94.5
+            h[i] = 95.5
+            v[i] = 1000
+        elif i % 3 == 1:
+            # Heavy-volume bar near 105 (the HVN above).
+            l[i] = 104.5
+            h[i] = 105.5
+            v[i] = 1000
+        else:
+            # Light-volume bar in mid-range.
+            l[i] = 99.0
+            h[i] = 101.0
+            v[i] = 50
+    hvn_below, hvn_above = volume_profile_hvns(
+        h, l, v, current_price=100.0, lookback=100, num_bins=20,
+    )
+    assert hvn_below is not None
+    assert hvn_above is not None
+    assert 94 < hvn_below < 96, f"expected HVN below near 95, got {hvn_below}"
+    assert 104 < hvn_above < 106, f"expected HVN above near 105, got {hvn_above}"
+
+
+def test_volume_profile_returns_none_on_no_volume():
+    """Synthetic data with zero volume → returns (None, None)."""
+    import numpy as np
+    from bitunix_bot.indicators import volume_profile_hvns
+    h = np.full(100, 100.5)
+    l = np.full(100, 99.5)
+    v = np.zeros(100)
+    hvn_below, hvn_above = volume_profile_hvns(
+        h, l, v, current_price=100.0, lookback=100,
+    )
+    assert hvn_below is None and hvn_above is None
+
+
+def test_volume_profile_returns_none_on_insufficient_bars():
+    """< lookback / 2 bars → returns (None, None)."""
+    import numpy as np
+    from bitunix_bot.indicators import volume_profile_hvns
+    h = np.array([100.5, 101.0, 100.8])
+    l = np.array([99.5, 100.0, 100.2])
+    v = np.array([100, 100, 100])
+    hvn_below, hvn_above = volume_profile_hvns(
+        h, l, v, current_price=100.0, lookback=100,
+    )
+    assert hvn_below is None and hvn_above is None
+
+
+def test_hvn_anchored_sl_long_extends_to_below_hvn():
+    """Long entry: SL extends to below the nearest HVN below entry +
+    structure buffer."""
+    from bitunix_bot.config import RiskCfg, TradingCfg
+    from bitunix_bot.risk import build_order
+    from bitunix_bot.strategy import Signal
+
+    tc = TradingCfg(symbols=["BTCUSDT"], timeframe="15m", leverage=10,
+                    margin_coin="USDT", margin_mode="ISOLATION",
+                    risk_per_trade_pct=1.0)
+    rc = RiskCfg(stop_loss_pct=0.25, take_profit_r=1.0, use_atr=False,
+                 atr_multiplier_sl=1.0, atr_multiplier_tp=4.0,
+                 round_trip_fee_pct=0.0)
+    # Entry at 60_000 with HVN below at 59_500 (300bps below entry).
+    # Fixed SL: 0.25% = 150 below = 59_850.
+    # HVN anchor: 60_000 - 59_500 = 500 + 60 (10bp buffer) = 560 → SL @ 59_440.
+    # HVN anchor wins (widest of all anchors).
+    sig = Signal(direction="long", score=0.7, indicator_score=12,
+                 pattern_score=2.0, reasons=["x"], price=60_000.0,
+                 atr=120.0, hvn_below=59_500.0)
+    plan = build_order(sig, free_margin=200.0, trading=tc, risk=rc,
+                       min_volume=0.0001, volume_step=0.0001, digits=1)
+    assert plan is not None
+    assert 59_400 < plan.stop_loss < 59_500, \
+        f"expected HVN-anchored SL near 59_440, got {plan.stop_loss}"
+
+
+def test_hvn_anchored_tp_long_targets_below_hvn_above():
+    """Long entry: when HVN exists ABOVE entry, TP tightens toward it
+    (don't ride past resistance)."""
+    from bitunix_bot.config import RiskCfg, TradingCfg
+    from bitunix_bot.risk import build_order
+    from bitunix_bot.strategy import Signal
+
+    tc = TradingCfg(symbols=["BTCUSDT"], timeframe="15m", leverage=10,
+                    margin_coin="USDT", margin_mode="ISOLATION",
+                    risk_per_trade_pct=1.0)
+    rc = RiskCfg(stop_loss_pct=0.25, take_profit_r=2.5, use_atr=False,
+                 atr_multiplier_sl=1.0, atr_multiplier_tp=4.0,
+                 round_trip_fee_pct=0.0)
+    # SL = 0.25% = 150 → R-multiple TP = 2.5R = 375 above = 60_375.
+    # HVN above at 60_200 (resistance ~333bps above).
+    # HVN-tp anchor: 60_200 - 60_000 - 60 (buffer) = 140 → TP @ 60_140.
+    # 60_140 < 60_375, so HVN tightens TP.
+    sig = Signal(direction="long", score=0.7, indicator_score=12,
+                 pattern_score=2.0, reasons=["x"], price=60_000.0,
+                 atr=120.0, hvn_above=60_200.0)
+    plan = build_order(sig, free_margin=200.0, trading=tc, risk=rc,
+                       min_volume=0.0001, volume_step=0.0001, digits=1)
+    assert plan is not None
+    assert 60_100 < plan.take_profit < 60_200, \
+        f"expected HVN-tightened TP near 60_140, got {plan.take_profit}"
+
+
+def test_hvn_tp_skipped_when_r_multiple_is_closer():
+    """When R-multiple TP is CLOSER than the HVN, R-multiple wins (HVN
+    only constrains down, never expands TP)."""
+    from bitunix_bot.config import RiskCfg, TradingCfg
+    from bitunix_bot.risk import build_order
+    from bitunix_bot.strategy import Signal
+
+    tc = TradingCfg(symbols=["BTCUSDT"], timeframe="15m", leverage=10,
+                    margin_coin="USDT", margin_mode="ISOLATION",
+                    risk_per_trade_pct=1.0)
+    rc = RiskCfg(stop_loss_pct=0.25, take_profit_r=1.0, use_atr=False,
+                 atr_multiplier_sl=1.0, atr_multiplier_tp=4.0,
+                 round_trip_fee_pct=0.0)
+    # SL = 0.25% = 150 → R=1.0 TP = 150 above = 60_150.
+    # HVN above at 60_500 (much farther). HVN doesn't tighten — R-multiple wins.
+    sig = Signal(direction="long", score=0.7, indicator_score=12,
+                 pattern_score=2.0, reasons=["x"], price=60_000.0,
+                 atr=120.0, hvn_above=60_500.0)
+    plan = build_order(sig, free_margin=200.0, trading=tc, risk=rc,
+                       min_volume=0.0001, volume_step=0.0001, digits=1)
+    assert plan is not None
+    assert abs(plan.take_profit - 60_150.0) < 1.0, \
+        f"expected R-multiple TP near 60_150, got {plan.take_profit}"
+
+
 def test_vwap_anchored_sl_long_above_vwap():
     """Long entry above VWAP: SL must extend below VWAP + buffer (thesis
     invalidates if price returns to and breaks fair value)."""
