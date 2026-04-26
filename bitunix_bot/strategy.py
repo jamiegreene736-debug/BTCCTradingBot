@@ -138,6 +138,12 @@ class Signal:
     # just happened on the chart (Grok holistic review).
     last_bar_high: float = 0.0
     last_bar_low: float = 0.0
+    # Current VWAP value at signal-emit time. Used as an additional SL
+    # anchor when VWAP is on the protective side of entry (below for long,
+    # above for short) — getting stopped at VWAP means price returned to
+    # fair value and broke through, structural invalidation of the trend
+    # thesis (Grok holistic review).
+    vwap: float = 0.0
 
     @property
     def side_code(self) -> str:
@@ -781,6 +787,8 @@ def evaluate(
             factor_context=breakdown.get("context", 0.0),
             last_bar_high=float(h[-1]),
             last_bar_low=float(l[-1]),
+            vwap=float(vwap_v[i]) if (vwap_v is not None and i < len(vwap_v)
+                                        and not np.isnan(vwap_v[i])) else 0.0,
         )
 
     # Hard ADX floor — don't trade in deep chop. Live drawdown analysis

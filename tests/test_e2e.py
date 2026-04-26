@@ -4561,6 +4561,84 @@ def test_structure_anchored_sl_short_widens_for_deep_wick_high():
         f"expected anchored SL near 60_360, got {plan.stop_loss}"
 
 
+def test_vwap_anchored_sl_long_above_vwap():
+    """Long entry above VWAP: SL must extend below VWAP + buffer (thesis
+    invalidates if price returns to and breaks fair value)."""
+    from bitunix_bot.config import RiskCfg, TradingCfg
+    from bitunix_bot.risk import build_order
+    from bitunix_bot.strategy import Signal
+
+    tc = TradingCfg(symbols=["BTCUSDT"], timeframe="15m", leverage=10,
+                    margin_coin="USDT", margin_mode="ISOLATION",
+                    risk_per_trade_pct=1.0)
+    rc = RiskCfg(stop_loss_pct=0.25, take_profit_r=1.0, use_atr=False,
+                 atr_multiplier_sl=1.0, atr_multiplier_tp=4.0,
+                 round_trip_fee_pct=0.0)
+    # Entry at 60_000 with VWAP at 59_700 (below entry, on protective side).
+    # Fixed SL: 0.25% = 150 below = 59_850.
+    # VWAP anchor: 60_000 - 59_700 = 300 + 60 (10bp buffer) = 360 → SL @ 59_640.
+    # Anchor wins.
+    sig = Signal(direction="long", score=0.7, indicator_score=12,
+                 pattern_score=2.0, reasons=["x"], price=60_000.0,
+                 atr=120.0, vwap=59_700.0)
+    plan = build_order(sig, free_margin=100.0, trading=tc, risk=rc,
+                       min_volume=0.0001, volume_step=0.0001, digits=1)
+    assert plan is not None
+    assert 59_600 < plan.stop_loss < 59_700, \
+        f"expected VWAP-anchored SL near 59_640, got {plan.stop_loss}"
+
+
+def test_vwap_anchored_sl_skipped_when_vwap_above_long_entry():
+    """Mean-reversion long (price BELOW fair value, expecting return):
+    VWAP is the TARGET not the SL. Anchor must be skipped — fall back
+    to fixed-pct."""
+    from bitunix_bot.config import RiskCfg, TradingCfg
+    from bitunix_bot.risk import build_order
+    from bitunix_bot.strategy import Signal
+
+    tc = TradingCfg(symbols=["BTCUSDT"], timeframe="15m", leverage=10,
+                    margin_coin="USDT", margin_mode="ISOLATION",
+                    risk_per_trade_pct=1.0)
+    rc = RiskCfg(stop_loss_pct=0.25, take_profit_r=1.0, use_atr=False,
+                 atr_multiplier_sl=1.0, atr_multiplier_tp=4.0,
+                 round_trip_fee_pct=0.0)
+    # Entry at 60_000 with VWAP at 60_300 (ABOVE entry — mean-rev long).
+    # VWAP anchor must NOT fire (would compute negative distance).
+    # Fixed SL: 0.25% = 59_850.
+    sig = Signal(direction="long", score=0.7, indicator_score=12,
+                 pattern_score=2.0, reasons=["x"], price=60_000.0,
+                 atr=120.0, vwap=60_300.0)
+    plan = build_order(sig, free_margin=100.0, trading=tc, risk=rc,
+                       min_volume=0.0001, volume_step=0.0001, digits=1)
+    assert plan is not None
+    assert abs(plan.stop_loss - 59_850.0) < 1.0, \
+        f"VWAP above long entry should skip anchor; got SL {plan.stop_loss}"
+
+
+def test_vwap_anchored_sl_short_below_vwap():
+    """Short entry below VWAP: SL must extend above VWAP + buffer (mirror
+    of the long case)."""
+    from bitunix_bot.config import RiskCfg, TradingCfg
+    from bitunix_bot.risk import build_order
+    from bitunix_bot.strategy import Signal
+
+    tc = TradingCfg(symbols=["BTCUSDT"], timeframe="15m", leverage=10,
+                    margin_coin="USDT", margin_mode="ISOLATION",
+                    risk_per_trade_pct=1.0)
+    rc = RiskCfg(stop_loss_pct=0.25, take_profit_r=1.0, use_atr=False,
+                 atr_multiplier_sl=1.0, atr_multiplier_tp=4.0,
+                 round_trip_fee_pct=0.0)
+    sig = Signal(direction="short", score=0.7, indicator_score=12,
+                 pattern_score=2.0, reasons=["x"], price=60_000.0,
+                 atr=120.0, vwap=60_400.0)
+    plan = build_order(sig, free_margin=100.0, trading=tc, risk=rc,
+                       min_volume=0.0001, volume_step=0.0001, digits=1)
+    assert plan is not None
+    # 60_400 - 60_000 = 400 + 60 (buffer) = 460 above entry → SL @ ~60_460.
+    assert 60_400 < plan.stop_loss < 60_500, \
+        f"expected VWAP-anchored SL near 60_460, got {plan.stop_loss}"
+
+
 def test_structure_anchored_sl_falls_through_when_no_bar_data():
     """Legacy callers without last_bar_high/low (or 0/missing values)
     must fall back to the existing fixed-pct + ATR hybrid — no crash,

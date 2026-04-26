@@ -170,6 +170,23 @@ def build_order(
         anchor_dist = max(anchor_dist, 0.0)
         stop_dist = max(stop_dist, anchor_dist)
 
+    # VWAP anchor (Grok holistic review): when VWAP is on the protective
+    # side of entry (below for long, above for short), use it as an
+    # additional structural SL. Logic: price extended away from fair
+    # value gets stopped if it returns and breaks fair value. SKIP when
+    # VWAP is on the SAME side as direction (e.g. long with VWAP above
+    # entry = mean-reversion long where VWAP is the target, not the SL).
+    sig_vwap = getattr(signal, "vwap", 0.0) or 0.0
+    if sig_vwap > 0:
+        if signal.direction == "long" and sig_vwap < price:
+            # Long above VWAP: SL must reach below-VWAP for thesis-break.
+            vwap_anchor = (price - sig_vwap) + price * (structure_buffer_pct / 100.0)
+            stop_dist = max(stop_dist, vwap_anchor)
+        elif signal.direction == "short" and sig_vwap > price:
+            # Short below VWAP: SL must reach above-VWAP for thesis-break.
+            vwap_anchor = (sig_vwap - price) + price * (structure_buffer_pct / 100.0)
+            stop_dist = max(stop_dist, vwap_anchor)
+
     # TP is always an R-multiple of effective SL distance — keeps geometry
     # consistent regardless of which SL formula bound. The legacy
     # atr_multiplier_tp config is retained for backwards-compat but unused
