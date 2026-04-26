@@ -125,6 +125,10 @@ def fresh_cfg():
     # Disable post-signal ticker confirmation for fixture tests (most don't
     # mock ticker; specific confirmation tests set this explicitly).
     cfg.strategy.confirm_with_ticker = False
+    # Permissive score threshold so synthetic uptrend/downtrend klines reliably
+    # produce signals regardless of how aggressively production fire_threshold
+    # is tuned. Specific threshold tests set this explicitly.
+    cfg.strategy.fire_threshold = 0.30
     # Restore multi-symbol + multi-position defaults that pre-existed the
     # ChatGPT review. Production config.yaml is now BTCUSDT-only with
     # max_open_positions=1 and use_post_only_entries=true, but most tests
@@ -3282,10 +3286,10 @@ def test_stale_exit_skipped_for_young_position():
     bot, _, _ = _setup_bot_with_open_position(
         side="BUY", entry=100_000.0, current_price=100_050.0,
     )
-    # Just opened 2 minutes ago — too young.
+    # Just opened 1 minute ago — too young (Grok review: stale_exit_min=2.0).
     bot.client.pending_positions.return_value = [{
         **bot.client.pending_positions.return_value[0],
-        "ctime": int(time.time() * 1000) - 2 * 60_000,
+        "ctime": int(time.time() * 1000) - 1 * 60_000,
     }]
     bot.position_max_favor["POS1"] = 0.1
     bot._tick()

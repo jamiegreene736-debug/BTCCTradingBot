@@ -4,12 +4,16 @@
 mode: live               # paper | live  (paper never sends orders)
 
 trading:
-  # ChatGPT review (gpt-5): trade BTCUSDT only while validating maker-first
-  # logic on the deepest book. Add ETH/SOL/XRP back AFTER realized PnL turns
-  # positive on BTC. Adding wider-spread alts before that point amplifies
-  # the same fee-drag problem on shallower books.
+  # Grok review (post-N=10 fills): expand to majors. Tighter filters
+  # (fire_threshold 0.75, ADX 35) reduce per-symbol qualifying setups,
+  # so adding ETH and SOL maintains overall trade frequency. Liquidity
+  # filter (max_entry_spread_pct 0.10) blocks entries when alt spreads
+  # widen beyond healthy range. AVAX/LINK explicitly NOT added — too
+  # thin on Bitunix per Grok.
   symbols:
     - BTCUSDT
+    - ETHUSDT
+    - SOLUSDT
   timeframe: 1m          # 1m / 5m / 15m / 30m / 1h / 2h / 4h
   # ChatGPT review (gpt-5): leverage 25 → 10. Lower leverage on a $35 account
   # cuts fee-bite as percent of margin while keeping liquidation buffer wide.
@@ -41,10 +45,11 @@ trading:
   # smaller per-trade footprint while it earns back trust. Compounds with
   # conviction_mult (0.7-1.5) and dd_risk_mult (1.0-0.0) as before.
   risk_per_trade_pct: 0.75
-  # ChatGPT review (gpt-5): max_open_positions 4 → 1, cooldown 60 → 180.
-  # Concurrency multiplies fees and variance on a $35 account; one clean
-  # position at a time. 3-min cooldown chokes off churn on noise.
-  max_open_positions: 1         # was 4 — global cap; total across all symbols
+  # Grok review: bump to 2 to allow concurrent positions on the broader
+  # symbol set [BTC, ETH, SOL]. Cooldown stays at 180s per-symbol so one
+  # signal can't keep firing on the same pair, but two different pairs
+  # can be in play simultaneously.
+  max_open_positions: 2         # was 1 (ChatGPT) — global cap across all symbols
   max_positions_per_symbol: 1   # never pyramid into the same trade
   max_same_direction: 2         # max concurrent LONGs (or SHORTs) — anti-correlation
   cooldown_seconds: 180         # was 60 — chokes churn on noise
@@ -71,7 +76,11 @@ trading:
   # Spread filter — reject signals when (ask-bid)/mid exceeds this %.
   # At 50x with 0.25% SL, a 0.05% adverse spread eats 20% of risk budget
   # on entry alone. Wide spreads = bad time to enter.
-  max_entry_spread_pct: 0.05
+  # Grok review: 0.05 → 0.10 to accommodate ETH/SOL natural spreads.
+  # BTC normally has ~0.01% spread (well under threshold); ETH ~0.01-0.03%;
+  # SOL ~0.05-0.08%. 0.10% blocks anomalous-wide entries without rejecting
+  # alt majors during normal conditions.
+  max_entry_spread_pct: 0.10
   # ChatGPT review (gpt-5): RE-ENABLED. The Grok v8 argument (adverse
   # selection on maker entries) was right in spirit but wrong on the
   # arithmetic for a $35 account: market round-trip fees of 0.117% are
@@ -114,13 +123,17 @@ risk:
   # Dynamic SL — once price moves in your favor, ratchet the SL forward to
   # lock in profit. The "give-back" killer for high-leverage scalping.
   #
-  # ChatGPT review (gpt-5): BE 0.5 → 0.30R. With take_profit_r now 1.0R,
-  # the BE/TP ladder needs to come in proportionally. 0.30R BE captures
-  # winners that show life without waiting for the move that rarely comes.
-  # Trailing kept at 1.0R since that's now equal to TP — effectively a
-  # belt-and-suspenders catch if the take-profit limit gets jumped.
-  breakeven_at_r: 0.30   # was 0.5 — earlier BE for shorter-target regime
-  breakeven_buffer_pct: 0.05    # tiny cushion above entry to cover round-trip fees
+  # Grok review (post-N=10 fills): BE 0.30 → 0.20 to capture the dead
+  # zone. Live data showed Trade 8 (max_favor 0.26R) just below the 0.30R
+  # threshold — never triggered BE, reversed to full SL = -$0.43.
+  # Bringing BE in to 0.20R closes that gap while still letting the
+  # 0.83R-style winners ratchet cleanly.
+  breakeven_at_r: 0.20   # was 0.30 (ChatGPT)
+  # Buffer 0.05% → 0.10% so BE stops actually clear maker+taker fees
+  # (round-trip ~0.08%). Trade 7 hit BE-protect, exited at +5bps but
+  # 0.119 fees made it -$0.05 net realized — with 0.10% buffer it'd
+  # have netted ~+$0.02.
+  breakeven_buffer_pct: 0.10    # was 0.05 — covers round-trip fees
   trailing_activate_r: 1.0
   trailing_distance_r: 0.5
   # Round-trip fee + slippage estimate as % of notional. With maker entries
@@ -150,15 +163,15 @@ risk:
   # score trade hit max_favor=0.012R then got stale-killed at 6 min — never
   # had a chance. 12 min gives signals time to actually unfold; 0.2R floor
   # only kills genuinely dead trades that drifted sideways with zero conviction.
-  # ChatGPT review (gpt-5): 12m / 0.2R was too lenient. With take_profit_r
-  # now 1.0R and BE at 0.30R, a trade that hasn't put on 0.15R of favor in
-  # 3 minutes has clearly missed the move — bail cheaply (maker scratch
-  # would be ideal; current code uses flash_close which is taker exit).
-  # Kept short to free the slot for the next signal; the 180s cooldown
-  # prevents immediate re-entry on the same bar.
+  # Grok review (post-N=10 fills): tighten further to close the dead
+  # zone. With BE now at 0.20R, trades that hit 0.20R+ get BE-protect.
+  # Trades that hover at 0.15-0.20R favor without breaking through
+  # should be killed quickly (Trade 6: max_favor 0.17R, held 9.4 min,
+  # eventually reversed to -$0.37). Raising max_favor_r to 0.25 + cutting
+  # stale_min to 2 min catches these earlier.
   stale_exit_enabled: true
-  stale_exit_min: 3.0           # was 12 (Grok v9) — back to short
-  stale_exit_max_favor_r: 0.15  # was 0.2 — tighter no-edge floor
+  stale_exit_min: 2.0           # was 3.0 — faster kill of dead trades
+  stale_exit_max_favor_r: 0.25  # was 0.15 — kill anything that hasn't reached BE-protect
 
 strategy:
   # 23 indicator votes + 30 patterns + 5 combo recipes. The combined score
@@ -236,15 +249,17 @@ strategy:
   # for confluence (multi-bar shapes aggregate price action).
   pattern_weight: 0.60
   pattern_norm: 2.0      # 2 mid-strength patterns = saturation
-  # ChatGPT review (gpt-5): RAISE both thresholds. Previous 0.42 / ADX 20
-  # was meant to "make it trade" but the resulting trades had no edge
-  # (median max-favor 0.07R, never reached 0.5R). Tighter filters paired
-  # with maker-first entries means fewer trades but each one with real
-  # momentum behind it — exactly what's needed to overcome the fee floor.
-  fire_threshold: 0.60   # was 0.42 — only strong-confluence setups
-  # ADX 26 = solid directional trend territory (vs 20 = chop+).
-  # Pairs with continuation gate + ticker confirmation downstream.
-  min_adx_for_trade: 26.0  # was 20.0
+  # Grok review (post-N=10 fills): tighten further. Recent fills showed
+  # the 0.65-0.84 score range produced both the big winner (0.89, +$0.26)
+  # and the big losers (0.66, 0.81 — both ended -$0.40+). Score 0.75
+  # filters the bottom of that range; combined with the broader symbol
+  # set (BTC + ETH + SOL), trade frequency stays similar with higher
+  # quality.
+  fire_threshold: 0.75   # was 0.60 (ChatGPT) — strongest setups only
+  # ADX 35 = decisive directional move, not just trend territory. Pairs
+  # with the broader symbol set: of 3 majors, usually one is in clean
+  # trend at any given hour even when others chop.
+  min_adx_for_trade: 35.0  # was 26.0 (ChatGPT) — strong trend only
   # Post-signal ticker confirmation (Grok review v8). After signal fires,
   # fetch the live ticker price and require it to have moved in the trade
   # direction since the signal-bar close. Catches exhaustion-fade
