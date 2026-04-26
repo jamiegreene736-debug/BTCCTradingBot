@@ -1373,6 +1373,125 @@ def test_adaptive_tp_tightens_with_age_and_respects_floor():
     assert abs(r - 0.7) < 0.01, f"with low fees, floor=0.7R, got {r}"
 
 
+def test_adaptive_tp_tier_scales_with_bar_minutes():
+    """Grok holistic review: adaptive_tp_r tiers are expressed in BARS,
+    converted via bar_minutes. On 15m timeframe, the 5-bar tier sits at
+    75 minutes — a position 50 minutes old should still be in the
+    'fresh' bucket, returning the original target."""
+    from bitunix_bot.risk import adaptive_tp_r
+
+    # 50 minutes on a 15m timeframe = 3.3 bars in → still 'fresh' (< 5 bars).
+    r = adaptive_tp_r(
+        age_minutes=50, original_tp_r=1.5, fee_pct=0.17, sl_pct=0.25,
+        floor_r=0.7, bar_minutes=15.0,
+    )
+    assert abs(r - 1.5) < 0.01, \
+        f"50m on 15m timeframe should still be 'fresh'; got {r}"
+
+    # 100 minutes = 6.6 bars → 80% tier.
+    r = adaptive_tp_r(
+        age_minutes=100, original_tp_r=1.5, fee_pct=0.17, sl_pct=0.25,
+        floor_r=0.7, bar_minutes=15.0,
+    )
+    assert abs(r - 1.2) < 0.01, \
+        f"100m on 15m (≈6.6 bars) should be 80% tier (1.2R); got {r}"
+
+    # 700 minutes = 46 bars → past 40-bar tier → safety floor.
+    r = adaptive_tp_r(
+        age_minutes=700, original_tp_r=1.5, fee_pct=0.17, sl_pct=0.25,
+        floor_r=0.7, bar_minutes=15.0,
+    )
+    # Fee floor wins: (0.17/0.25)*1.5 = 1.02
+    assert r >= 1.0 and r < 1.5, \
+        f"old 15m trade should hit fee-aware floor; got {r}"
+
+    # Default bar_minutes=1.0 preserves legacy 1m behavior.
+    r_default = adaptive_tp_r(
+        age_minutes=50, original_tp_r=1.5, fee_pct=0.17, sl_pct=0.25, floor_r=0.7,
+    )
+    assert r_default < 1.5, \
+        f"default bar_minutes=1.0 → 50m should hit late tier; got {r_default}"
+
+
+def test_parse_timeframe_minutes():
+    """Bitunix timeframe strings parse to minutes correctly."""
+    from bitunix_bot.risk import parse_timeframe_minutes
+
+    assert parse_timeframe_minutes("1m") == 1.0
+    assert parse_timeframe_minutes("5m") == 5.0
+    assert parse_timeframe_minutes("15m") == 15.0
+    assert parse_timeframe_minutes("30m") == 30.0
+    assert parse_timeframe_minutes("1h") == 60.0
+    assert parse_timeframe_minutes("4h") == 240.0
+    assert parse_timeframe_minutes("1d") == 1440.0
+    # Bad input → 1.0 fallback (conservative legacy behavior).
+    assert parse_timeframe_minutes("") == 1.0
+    assert parse_timeframe_minutes("foo") == 1.0
+    assert parse_timeframe_minutes("15x") == 1.0
+
+
+def test_factor_score_weighted_clamps_to_one():
+    """Defensive: if config weights sum > 1.0 (typo or misconfiguration),
+    factor_score_weighted output must still be ≤ 1.0 to prevent score
+    from silently exceeding fire_threshold via inflated factor half."""
+    from bitunix_bot.strategy import factor_score_weighted
+
+    # All groups maxed (1.0 score each), weights sum to 1.5 (broken config).
+    breakdown = {"trend": 1.0, "mean_rev": 1.0, "flow": 1.0, "context": 1.0}
+    weights = {"trend": 0.40, "mean_rev": 0.40, "flow": 0.40, "context": 0.30}  # sums 1.5
+    result = factor_score_weighted(breakdown, weights)
+    assert result <= 1.0, f"clamp must cap at 1.0 even with broken weights; got {result}"
+
+    # Sane weights that sum to 1.0 — clamp is no-op.
+    weights_sane = {"trend": 0.15, "mean_rev": 0.25, "flow": 0.50, "context": 0.10}
+    result = factor_score_weighted(breakdown, weights_sane)
+    assert abs(result - 1.0) < 0.001, \
+        f"with sane weights and full saturation, score should be exactly 1.0; got {result}"
+
+
+def test_recent_trade_r_excludes_flat_trades():
+    """Adaptive self-defense rolling tally must SKIP flat trades
+    (|trade_r| < 0.10) so genuine losing streaks aren't diluted by
+    near-zero exits from the BE-ratchet-then-reverse pattern."""
+    reset_state()
+    from unittest.mock import MagicMock
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.trading.symbols = ["BTCUSDT"]
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    # Seed three "closed" positions in the history endpoint:
+    # one big loss (−0.8R), one big win (+0.8R), and one flat (+0.05R).
+    # The flat must NOT make it into recent_trade_r.
+    sl_dist = 100.0 * (cfg.risk.stop_loss_pct / 100.0)  # 0.25 if entry=100
+    big_loss_close = 100.0 - sl_dist * 0.8     # 99.8 → trade_r = -0.8
+    big_win_close = 100.0 + sl_dist * 0.8      # 100.2 → trade_r = +0.8
+    flat_close = 100.0 + sl_dist * 0.05        # 100.0125 → trade_r = +0.05
+    now_ms = int(time.time() * 1000)
+    bot.client.history_positions.return_value = {"positionList": [
+        {"positionId": "P_LOSS", "symbol": "BTCUSDT", "side": "BUY",
+         "qty": "1", "avgOpenPrice": "100.0", "avgClosePrice": str(big_loss_close),
+         "ctime": now_ms - 60000, "mtime": now_ms - 1000,
+         "realizedPNL": "-0.20", "fee": "0.0", "funding": "0.0"},
+        {"positionId": "P_WIN", "symbol": "BTCUSDT", "side": "BUY",
+         "qty": "1", "avgOpenPrice": "100.0", "avgClosePrice": str(big_win_close),
+         "ctime": now_ms - 60000, "mtime": now_ms - 500,
+         "realizedPNL": "0.20", "fee": "0.0", "funding": "0.0"},
+        {"positionId": "P_FLAT", "symbol": "BTCUSDT", "side": "BUY",
+         "qty": "1", "avgOpenPrice": "100.0", "avgClosePrice": str(flat_close),
+         "ctime": now_ms - 60000, "mtime": now_ms - 100,
+         "realizedPNL": "0.0125", "fee": "0.0", "funding": "0.0"},
+    ]}
+    bot._update_streak_state()
+    # Should have exactly 2 entries — the flat is excluded.
+    assert len(bot.recent_trade_r) == 2, \
+        f"expected 2 entries (loss, win); flat excluded — got {len(bot.recent_trade_r)}: {list(bot.recent_trade_r)}"
+    # Verify the actual values are the loss and win, NOT the flat.
+    rs = sorted(list(bot.recent_trade_r))
+    assert rs[0] < -0.5  # the loss
+    assert rs[1] > 0.5   # the win
+
+
 def test_cvd_indicator_signs_by_body_position():
     """CVD should be POSITIVE when bars close near the high (buyer-led),
     negative when they close near the low (seller-led)."""

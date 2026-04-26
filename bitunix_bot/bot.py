@@ -411,12 +411,9 @@ class BitunixBot:
             funding = _f(p.get("funding"))
             net = realized + fee + funding
 
-            # Adaptive self-defense: append trade R to the rolling tally
-            # before any other state updates. If this drives the tally below
-            # the drawdown threshold, the next signal evaluation will see
-            # a higher fire_threshold via _adaptive_threshold_adjustment.
+            # Compute trade-R first so we can use it for both flat detection
+            # and the adaptive self-defense tally.
             trade_r = self._compute_trade_r(p, self.cfg.risk.stop_loss_pct)
-            self.recent_trade_r.append(trade_r)
 
             # Flat-trade detection. The BE ratchet at +1R favorable + price
             # reversal frequently produces "near-zero" exits where realized
@@ -427,6 +424,14 @@ class BitunixBot:
             # |trade_r| < FLAT_R_THRESHOLD = "essentially flat"
             FLAT_R_THRESHOLD = 0.10   # within ±10% of one R = flat
             is_flat = abs(trade_r) < FLAT_R_THRESHOLD
+
+            # Adaptive self-defense: append trade R to the rolling tally —
+            # but EXCLUDE flat trades (Grok holistic review). Flats dilute
+            # the rolling tally toward zero and make the drawdown trigger
+            # less responsive to actual losing streaks. The tally exists to
+            # detect "we're bleeding" — flats are not bleeding.
+            if not is_flat:
+                self.recent_trade_r.append(trade_r)
 
             # Journal exit. exit_reason is best-effort; without per-trade
             # closeReason from Bitunix we tag generically. Future improvement:

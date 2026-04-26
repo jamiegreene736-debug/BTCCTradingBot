@@ -44,18 +44,26 @@ def adaptive_tp_r(
     fee_pct: float,
     sl_pct: float,
     floor_r: float = 0.7,
+    bar_minutes: float = 1.0,
 ) -> float:
     """Return the desired TP distance in R-multiples based on position age.
 
     Methodology: as a flat trade ages, lower the bar on what counts as a
     "win" — but never below a level that's still profitable after fees.
 
-    Tier ladder (1m timeframe assumed):
-      0–5 min:   original (e.g. 1.5R = full target)
-      5–10 min:  80% of original (still ambitious)
-      10–20 min: 60% of original
-      20–40 min: 40% of original (or floor, whichever is higher)
-      40+ min:   floor_r (minimum profitable after fees)
+    Tier ladder is expressed in BARS (not minutes), then converted to
+    minutes via `bar_minutes`. This keeps the ladder semantics consistent
+    across timeframes — "5 bars in" means the same thing regardless of
+    whether each bar is 1m, 5m, 15m, or 1h:
+      0–5 bars:   original (full target — still ambitious)
+      5–10 bars:  80% of original
+      10–20 bars: 60% of original
+      20–40 bars: 40% of original (or floor, whichever is higher)
+      40+ bars:   floor_r (minimum profitable after fees)
+
+    Examples:
+      bar_minutes=1.0  → tiers at 5/10/20/40 minutes (legacy 1m behavior)
+      bar_minutes=15.0 → tiers at 75/150/300/600 minutes (15m timeframe)
 
     Floor is enforced: TP must stay ≥ floor_r × SL distance, AND must
     cover fees with a small margin (fee_pct + 50% buffer in % of price).
@@ -66,15 +74,38 @@ def adaptive_tp_r(
     fee_r = (fee_pct / sl_pct) if sl_pct > 0 else 0.0
     safety_floor = max(floor_r, fee_r * 1.5)
 
-    if age_minutes < 5:
+    # Convert bar-based tiers to minutes via timeframe scale.
+    bar_min = max(0.001, float(bar_minutes))
+    if age_minutes < 5 * bar_min:
         return max(original_tp_r, safety_floor)
-    if age_minutes < 10:
+    if age_minutes < 10 * bar_min:
         return max(original_tp_r * 0.80, safety_floor)
-    if age_minutes < 20:
+    if age_minutes < 20 * bar_min:
         return max(original_tp_r * 0.60, safety_floor)
-    if age_minutes < 40:
+    if age_minutes < 40 * bar_min:
         return max(original_tp_r * 0.40, safety_floor)
     return safety_floor
+
+
+def parse_timeframe_minutes(tf: str) -> float:
+    """Parse a Bitunix timeframe string (e.g. '15m', '1h', '4h', '1d')
+    into minutes. Defaults to 1.0 on unrecognized input — caller code
+    that uses this for tier scaling falls back to the legacy 1m
+    behavior, which is conservative."""
+    if not tf or len(tf) < 2:
+        return 1.0
+    try:
+        n = float(tf[:-1])
+    except (ValueError, TypeError):
+        return 1.0
+    unit = tf[-1].lower()
+    if unit == "m":
+        return n
+    if unit == "h":
+        return n * 60.0
+    if unit == "d":
+        return n * 1440.0
+    return 1.0
 
 
 def build_order(

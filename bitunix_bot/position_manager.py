@@ -20,7 +20,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from .client import BitunixError
-from .risk import adaptive_tp_r
+from .risk import adaptive_tp_r, parse_timeframe_minutes
 from .symbol_meta import DEFAULT_META as _DEFAULT_META
 
 if TYPE_CHECKING:
@@ -342,6 +342,7 @@ class PositionManager:
                     fee_pct=rk.round_trip_fee_pct,
                     sl_pct=rk.stop_loss_pct,
                     floor_r=rk.adaptive_tp_floor_r,
+                    bar_minutes=parse_timeframe_minutes(bot.cfg.trading.timeframe),
                 )
                 desired_tp = (entry + desired_r * sl_distance) if is_long \
                              else (entry - desired_r * sl_distance)

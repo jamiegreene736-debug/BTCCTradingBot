@@ -271,11 +271,19 @@ def factor_score_weighted(
     breakdown: dict[str, float],
     weights: dict[str, float],
 ) -> float:
-    """Weighted average of factor-group scores. Returns 0..max(weights_sum)."""
+    """Weighted average of factor-group scores. Returns 0..1 (clamped).
+
+    The clamp is defensive: if weights sum > 1.0 (config typo, or someone
+    edits config.yaml without checking the constraint), unclamped output
+    could exceed 1.0 and combine with the pattern half to silently push
+    `combined_score` over `fire_threshold` even when no group is fully
+    saturated. The min(1.0, total) clamp prevents that bypass — with
+    correctly-summing weights it's a no-op.
+    """
     total = 0.0
     for grp in _FACTOR_GROUPS:
         total += weights.get(grp, 0.0) * breakdown.get(grp, 0.0)
-    return total
+    return min(1.0, total)
 
 
 def _continuation_confirmed(

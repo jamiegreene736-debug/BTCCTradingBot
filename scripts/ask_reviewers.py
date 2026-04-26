@@ -450,7 +450,45 @@ def parse_args() -> argparse.Namespace:
                    help="Build the export, save it, but skip API calls.")
     p.add_argument("--show-export", action="store_true",
                    help="Print the full export to stdout before/instead of asking.")
+    p.add_argument("--include-source", action="store_true",
+                   help="Bundle the core bot source files (strategy.py, bot.py, "
+                        "risk.py, config.py) into the prompt so the reviewer can "
+                        "evaluate framework/logic/strategy holistically. Adds "
+                        "~80K tokens — only useful for deep architectural review.")
     return p.parse_args()
+
+
+# ----------------------------------------------------------------- source bundle
+
+CORE_SOURCE_FILES = [
+    "bitunix_bot/config.py",
+    "bitunix_bot/symbol_meta.py",
+    "bitunix_bot/indicators.py",
+    "bitunix_bot/strategy.py",
+    "bitunix_bot/risk.py",
+    "bitunix_bot/position_manager.py",
+    "bitunix_bot/order_executor.py",
+    "bitunix_bot/bot.py",
+]
+
+
+def bundle_source(file_paths: list[str]) -> str:
+    """Read each file and concatenate with clear separators."""
+    parts: list[str] = []
+    for rel in file_paths:
+        path = REPO_ROOT / rel
+        if not path.exists():
+            parts.append(f"# (file not found: {rel})\n")
+            continue
+        content = path.read_text()
+        line_count = content.count("\n") + 1
+        parts.append(
+            f"\n\n{'=' * 70}\n"
+            f"FILE: {rel}  ({line_count} lines)\n"
+            f"{'=' * 70}\n\n"
+            f"{content}"
+        )
+    return "".join(parts)
 
 
 def _env(name: str, default: str | None = None) -> str | None:
@@ -476,10 +514,12 @@ def main() -> int:
     else:
         base_url = _env("BOT_BASE_URL", DEFAULT_BASE_URL)
         user = _env("BOT_DASHBOARD_USER", DEFAULT_USER)
-        password = _env("BOT_DASHBOARD_PASSWORD")
+        # Accept either name — Railway's existing var is DASHBOARD_PASSWORD,
+        # the script's own convention is BOT_DASHBOARD_PASSWORD. Either works.
+        password = _env("BOT_DASHBOARD_PASSWORD") or _env("DASHBOARD_PASSWORD")
         if not password:
-            print("ERROR: BOT_DASHBOARD_PASSWORD env var not set.\n"
-                  "  export BOT_DASHBOARD_PASSWORD='...'  (Railway dashboard password)",
+            print("ERROR: dashboard password env var not set.\n"
+                  "  export BOT_DASHBOARD_PASSWORD='...'  (or DASHBOARD_PASSWORD — same value)",
                   file=sys.stderr)
             return 1
 
@@ -517,6 +557,20 @@ def main() -> int:
 
     question = args.question or DEFAULT_QUESTION
     user_content = f"{export_md}\n\n---\n\n{question}"
+
+    if args.include_source:
+        src_bundle = bundle_source(CORE_SOURCE_FILES)
+        approx_tokens = len(src_bundle) // 4
+        print(f"Bundling {len(CORE_SOURCE_FILES)} source files into prompt "
+              f"(~{len(src_bundle):,} chars, ~{approx_tokens:,} tokens).")
+        user_content = (
+            f"{user_content}\n\n"
+            f"---\n\n"
+            f"## Bot source code (for framework/logic/strategy review)\n\n"
+            f"The following are the core source files of the bot. Review them "
+            f"holistically alongside the live state above.\n"
+            f"{src_bundle}"
+        )
 
     REVIEWS_DIR.mkdir(parents=True, exist_ok=True)
     ts = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
