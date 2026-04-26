@@ -31,6 +31,7 @@ from .journal import TradeJournal
 from .orderbook import OrderBookFeed
 from .risk import OrderPlan, adaptive_tp_r, build_order
 from .state import get as get_state
+from .order_executor import OrderExecutor
 from .position_manager import PositionManager
 from .strategy import Signal, evaluate
 from .symbol_meta import DEFAULT_META as _DEFAULT_META
@@ -136,6 +137,11 @@ class BitunixBot:
         # the bot for compat with other call sites; PositionManager just
         # operates on it via composition.
         self.position_manager = PositionManager(self)
+        # Entry-execution subsystem (Grok holistic review — module split).
+        # Wraps tape veto, maker-first post-only, market fallback, and
+        # pending-limit timeout sweep. State (pending_limits) stays on the
+        # bot for compat with the _tick max_open_positions counting logic.
+        self.order_executor = OrderExecutor(self)
         self.stop_flag = False
         self.state = get_state()
 
@@ -1149,214 +1155,16 @@ class BitunixBot:
         self.position_manager.manage(open_positions)
 
 
+    # ------------------------------------------------------------------ entry execution
+    #
+    # Delegates to OrderExecutor (Grok holistic review — module split).
+    # The wrapper methods preserve existing signatures so test fixtures
+    # and call sites in _tick don't have to change. The legacy
+    # implementations have been moved to bitunix_bot/order_executor.py.
+
     def _execute(self, symbol: str, plan: OrderPlan) -> bool:
-        # Tape veto — "don't fight the flow". If the most recent 10s of trade
-        # tape is contrary to our intended direction at ≥0.30 magnitude
-        # (~65/35 split or worse), skip the trade. Threshold tightened to
-        # ±0.30 (Grok review v7) after live data showed Trade #1 firing
-        # SHORT with agg=+0.342 — slipped through the previous ±0.45 gate
-        # then immediately reversed for a loss. Lagging trend indicators
-        # were drowning out the leading flow signal. At ±0.30 we trade
-        # less but with dramatically higher signal quality.
-        if self.tape_feed is not None:
-            agg = self.tape_feed.get_aggression_ratio(symbol, window_secs=10)
-            if agg is not None:
-                if plan.side == "BUY" and agg <= -0.30:
-                    self.state.record_skip(
-                        f"{symbol}: tape veto — long signal but {agg:+.2f} sell flow"
-                    )
-                    return False
-                if plan.side == "SELL" and agg >= 0.30:
-                    self.state.record_skip(
-                        f"{symbol}: tape veto — short signal but {agg:+.2f} buy flow"
-                    )
-                    return False
-
-        prefix = "LIVE" if self.cfg.is_live else "PAPER"
-        order_text = (f"{prefix} {symbol} {plan.side} qty={plan.volume} "
-                      f"entry~{plan.price} SL={plan.stop_loss} TP={plan.take_profit} "
-                      f"lev={plan.leverage}x")
-        log.info("ORDER %s [%s]", order_text, plan.notes)
-        if not self.cfg.is_live:
-            self.state.record_order(order_text + " (paper)")
-            return True
-
-        # Try post-only maker entry first (saves ~0.04% per round-trip in fees).
-        # If the OB feed isn't ready or post-only is rejected, fall through to
-        # market. The pending limit is tracked; _check_pending_limits will
-        # cancel + market-fallback if it doesn't fill within timeout.
-        if (self.cfg.trading.use_post_only_entries
-                and self.ob_feed
-                and self.ob_feed.is_connected()):
-            if self._try_post_only(symbol, plan, order_text):
-                return True
-            log.info("Post-only path failed/skipped for %s; using market", symbol)
-
-        return self._place_market(symbol, plan, order_text)
-
-    def _try_post_only(self, symbol: str, plan: OrderPlan, order_text: str) -> bool:
-        """Attempt a POST_ONLY limit entry at top-of-book. Returns True if
-        successfully placed (tracked for timeout sweep), False on any failure
-        so caller can fall through to market."""
-        sym_u = symbol.upper()
-        tob = self.ob_feed.get_top_of_book(sym_u)
-        if not tob:
-            return False
-        bid, ask = tob
-        is_long = plan.side == "BUY"
-        meta = self.metas.get(symbol, _DEFAULT_META)
-        # Aggressive maker entry (Grok holistic review): when the spread is
-        # wider than 1 tick, step INSIDE the spread to become the new top
-        # of book — fills sooner than passively waiting at the existing TOB.
-        # When spread is exactly 1 tick (BTC most of the time), stepping
-        # inside would cross to taker, so we just join the existing best
-        # level. Falls back to TOB if tick_size is unavailable.
-        tick_size = 10 ** -meta.price_precision if meta.price_precision >= 0 else 0
-        spread = ask - bid
-        if tick_size > 0 and spread > tick_size * 1.5:
-            # Spread > 1 tick: step inside by 1 tick to become new TOB.
-            # Long → 1 tick above current bid (still below ask, still maker)
-            # Short → 1 tick below current ask (still above bid, still maker)
-            limit_px = round((bid + tick_size) if is_long else (ask - tick_size),
-                             meta.price_precision)
-        else:
-            # Tight spread or unknown precision: join existing TOB.
-            limit_px = round(bid if is_long else ask, meta.price_precision)
-        # If our chosen price would already be a taker (rare race), bail to market.
-        if (is_long and limit_px >= ask) or ((not is_long) and limit_px <= bid):
-            return False
-
-        # Dynamic timeout — high tape activity = price moves fast = either
-        # fill quickly or skip. Dead market = give the limit more time to
-        # be hit. Inverted scaling so high activity → shorter timeout.
-        # Clamp range scales with base_timeout so 15m-timeframe configs
-        # (post_only_timeout_secs=60) get a meaningful range, not the old
-        # hardcoded [4, 12]s ceiling that capped at 12s regardless.
-        base_timeout = self.cfg.trading.post_only_timeout_secs
-        timeout_secs = base_timeout
-        if self.tape_feed is not None:
-            activity = self.tape_feed.get_activity_multiplier(
-                sym_u, clamp_min=0.5, clamp_max=2.0
-            )
-            if activity is not None and activity > 0:
-                # High activity → shorter timeout. Floor at half base_timeout
-                # so we don't truncate to nothing in fast markets; ceiling at
-                # 1.5× base so dead markets get a bit more breathing room.
-                lo = max(4, base_timeout // 2)
-                hi = max(lo + 1, int(base_timeout * 1.5))
-                timeout_secs = max(lo, min(hi, int(round(base_timeout / activity))))
-
-        minute_bucket = int(time.time()) // 60
-        client_id = f"bot-{symbol}-{minute_bucket}-{plan.side}-PO"
-        try:
-            resp = self.client.place_order(
-                symbol=symbol,
-                side=plan.side,
-                qty=str(plan.volume),
-                order_type="LIMIT",
-                price=str(limit_px),
-                trade_side="OPEN",
-                tp_price=str(plan.take_profit),
-                sl_price=str(plan.stop_loss),
-                client_id=client_id,
-            )
-            order_id = resp.get("orderId")
-            if not order_id:
-                return False
-            self.pending_limits[sym_u] = {
-                "symbol": symbol,
-                "order_id": str(order_id),
-                "place_ts": int(time.time()),
-                "plan": plan,
-                "order_text": order_text,
-                "limit_px": limit_px,
-                "timeout_secs": timeout_secs,
-                # Top-of-book snapshot at placement — feeds the journal so
-                # downstream analysis can spot adverse-selection patterns
-                # (limit always at the bid/ask side that price walks away from).
-                "tob_bid": float(bid),
-                "tob_ask": float(ask),
-            }
-            log.info("MAKER %s LIMIT @ %s POST_ONLY orderId=%s timeout=%ds",
-                     symbol, limit_px, order_id, timeout_secs)
-            self.state.record_order(
-                f"{symbol} MAKER {plan.side} qty={plan.volume} @ {limit_px} "
-                f"(POST_ONLY, t/o={timeout_secs}s)"
-            )
-            return True
-        except BitunixError as e:
-            # POST_ONLY rejection (would-cross), validation, etc — fall through.
-            log.info("Post-only rejected for %s: %s — falling back to market", symbol, e.msg)
-            return False
-        except Exception as e:
-            log.warning("Post-only network error for %s: %s", symbol, e)
-            return False
-
-    def _place_market(self, symbol: str, plan: OrderPlan, order_text: str) -> bool:
-        """Market entry with deterministic clientId and full error handling."""
-        minute_bucket = int(time.time()) // 60
-        client_id = f"bot-{symbol}-{minute_bucket}-{plan.side}"
-        try:
-            resp = self.client.place_order(
-                symbol=symbol,
-                side=plan.side,
-                qty=str(plan.volume),
-                order_type="MARKET",
-                trade_side="OPEN",
-                tp_price=str(plan.take_profit),
-                sl_price=str(plan.stop_loss),
-                client_id=client_id,
-            )
-            log.info("Placed orderId=%s clientId=%s", resp.get("orderId"), resp.get("clientId"))
-            self.state.record_order(f"{order_text} → orderId={resp.get('orderId')}")
-            return True
-        except BitunixError as e:
-            log.error("Order rejected: %s (payload=%s)", e, e.payload)
-            self.state.record_error(f"{symbol} order rejected: {e.code} {e.msg}")
-            return False
-        except Exception as e:
-            log.error("place_order network/unknown failure for %s: %s", symbol, e)
-            self.state.record_error(f"{symbol} order failure (unknown state): {e}")
-            return False
+        return self.order_executor.execute(symbol, plan)
 
     def _check_pending_limits(self, all_open_positions: list[dict[str, Any]]) -> None:
-        """Sweep pending post-only limit entries:
-          - if a position now exists for the symbol → entry filled, clear tracking
-          - if timeout exceeded → cancel limit and skip (no market fallback)
-        """
-        if not self.pending_limits:
-            return
-        now = int(time.time())
-        open_by_sym = {str(p.get("symbol", "")).upper() for p in all_open_positions}
-        for sym_u, info in list(self.pending_limits.items()):
-            # Filled? A position now exists for this symbol.
-            if sym_u in open_by_sym:
-                log.info("MAKER fill confirmed for %s (orderId=%s)", sym_u, info["order_id"])
-                self.state.record_order(f"{sym_u} MAKER FILLED orderId={info['order_id']}")
-                del self.pending_limits[sym_u]
-                continue
-            # Per-order timeout (computed at placement time from activity).
-            timeout = info.get("timeout_secs", self.cfg.trading.post_only_timeout_secs)
-            # Timed out → cancel and SKIP. Do NOT market-fallback.
-            #
-            # Pro-desk rule: if your maker bid wasn't hit in the timeout window,
-            # the price moved AWAY from your bid. For a long, that means price
-            # went UP — marketing in now means CHASING, paying the worst possible
-            # price on a setup that already invalidated. Trust the next signal.
-            #
-            # The cooldown gets refreshed so the per-symbol loop later in this
-            # tick doesn't immediately re-fire the same trade.
-            age = now - info["place_ts"]
-            if age >= timeout:
-                try:
-                    self.client.cancel_order(symbol=info["symbol"], order_id=info["order_id"])
-                except Exception as e:
-                    log.warning("Cancel pending limit for %s failed: %s", sym_u, e)
-                log.info("MAKER timeout %s after %ds — signal failed, skip "
-                         "(no market fallback)", sym_u, age)
-                self.state.record_skip(
-                    f"{sym_u}: post-only didn't fill in {age}s — signal invalidated"
-                )
-                del self.pending_limits[sym_u]
-                # Refresh cooldown so we don't re-fire on the same bar.
-                self.last_action_at[sym_u] = now
+        self.order_executor.check_pending_limits(all_open_positions)
+
