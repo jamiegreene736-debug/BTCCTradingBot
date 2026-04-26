@@ -31,7 +31,10 @@ from .journal import TradeJournal
 from .orderbook import OrderBookFeed
 from .risk import OrderPlan, adaptive_tp_r, build_order
 from .state import get as get_state
+from .position_manager import PositionManager
 from .strategy import Signal, evaluate
+from .symbol_meta import DEFAULT_META as _DEFAULT_META
+from .symbol_meta import SymbolMeta
 from .tradetape import TradeFeed
 
 log = logging.getLogger(__name__)
@@ -53,15 +56,9 @@ def configure_logging(cfg: Config) -> None:
     root.addHandler(ch)
 
 
-@dataclass
-class SymbolMeta:
-    base_precision: float     # qty step (e.g. 0.001)
-    price_precision: int      # digits for price (e.g. 1 for BTCUSDT)
-    min_qty: float
-    max_leverage: int = 100   # Bitunix caps differ per symbol
-
-
-_DEFAULT_META = SymbolMeta(base_precision=0.001, price_precision=2, min_qty=0.001, max_leverage=100)
+# SymbolMeta + _DEFAULT_META extracted to bitunix_bot/symbol_meta.py so
+# position_manager / order_executor can reference them without importing
+# from bot.py (which would create a circular import).
 
 
 class BitunixBot:
@@ -133,6 +130,12 @@ class BitunixBot:
         # for offline analysis. Prerequisite for data-driven tuning of factor
         # weights, threshold dynamics, and conviction calibration.
         self.journal = TradeJournal()
+        # Position management subsystem (Grok holistic review — module split).
+        # Wraps SL ratchet, BE/trailing, stale exit, tape exit, partial TP,
+        # adaptive TP. State (position_max_favor, partial_tp_done) stays on
+        # the bot for compat with other call sites; PositionManager just
+        # operates on it via composition.
+        self.position_manager = PositionManager(self)
         self.stop_flag = False
         self.state = get_state()
 
@@ -1139,350 +1142,12 @@ class BitunixBot:
     # ------------------------------------------------------------------ position management
 
     def _manage_open_positions(self, open_positions: list[dict[str, Any]]) -> None:
-        """Ratchet SL forward as price moves favorably.
+        """Delegate to PositionManager (extracted to its own module per
+        Grok holistic review). Behavior unchanged; the wrapper preserves
+        the existing method signature so test fixtures and external
+        callers don't have to know about the split."""
+        self.position_manager.manage(open_positions)
 
-        For each open position:
-          - Derive current price from entry + unrealizedPNL/qty (no extra API call)
-          - Compute R-multiple favorable: (current - entry) / original_sl_distance
-          - If trailing region: SL = current_price ∓ trailing_distance_r × sl_dist
-          - Else if break-even region: SL = entry ± buffer
-          - Only update if new SL is MORE favorable than the existing SL
-            (never moves a stop AGAINST you).
-        """
-        try:
-            tpsl_rows = self.client.pending_tpsl()
-        except Exception as e:
-            log.warning("pending_tpsl fetch failed (skipping SL management): %s", e)
-            return
-        # Bitunix stores TPSL as separate trigger orders — find the SL-only
-        # AND TP-only rows per position so we can target each by its own id.
-        sl_orders: dict[str, dict[str, Any]] = {}    # positionId -> SL trigger row
-        tp_orders: dict[str, dict[str, Any]] = {}    # positionId -> TP trigger row
-        for r in tpsl_rows:
-            pid = str(r.get("positionId") or "")
-            if r.get("slPrice"):
-                sl_orders[pid] = r
-            if r.get("tpPrice"):
-                tp_orders[pid] = r
-
-        rk = self.cfg.risk
-        for p in open_positions:
-            try:
-                pid = str(p.get("positionId") or "")
-                if not pid:
-                    continue
-                symbol = str(p.get("symbol") or "")
-                side = str(p.get("side") or "").upper()
-                is_long = side in ("BUY", "LONG")
-                entry = float(p.get("avgOpenPrice") or 0)
-                qty = float(p.get("qty") or 0)
-                upnl = float(p.get("unrealizedPNL") or 0)
-                if entry <= 0 or qty <= 0:
-                    continue
-
-                # Derive current price from PnL.
-                # long:  upnl = (current - entry) * qty   →   current = entry + upnl/qty
-                # short: upnl = (entry - current) * qty   →   current = entry - upnl/qty
-                price_delta = upnl / qty if qty else 0.0
-                current_price = entry + price_delta if is_long else entry - price_delta
-
-                sl_order = sl_orders.get(pid)
-                if not sl_order:
-                    continue  # no SL trigger order; can't safely manage
-                current_sl = float(sl_order["slPrice"])
-                sl_order_id = str(sl_order["id"])
-
-                # Symbol meta needed early for both partial-TP qty quantization
-                # and SL price rounding.
-                meta = self.metas.get(symbol, _DEFAULT_META)
-
-                # R-multiple is measured from the ORIGINAL config-based SL
-                # distance, not the current SL — otherwise sl_distance shrinks
-                # as we ratchet, and r_favor inflates artificially.
-                sl_distance = entry * (rk.stop_loss_pct / 100.0)
-                if sl_distance <= 0:
-                    continue
-                if is_long:
-                    r_favor = (current_price - entry) / sl_distance
-                else:
-                    r_favor = (entry - current_price) / sl_distance
-
-                # Track per-position max favorable R for the stale-trade exit.
-                prev_max = self.position_max_favor.get(pid, float("-inf"))
-                if r_favor > prev_max:
-                    self.position_max_favor[pid] = r_favor
-
-                # Stale-trade early exit — if a position has aged past
-                # stale_exit_min without ever reaching stale_exit_max_favor_r,
-                # flash-close it. A 1m scalp signal that hasn't moved in 6
-                # minutes has lost its edge; pay the small loss and free the
-                # slot. Distinct from time_exit_only_if_losing (90-min profit-
-                # aware) and from tape-driven exit (immediate flow-flip).
-                if rk.stale_exit_enabled:
-                    ctime_ms_se = int(p.get("ctime") or 0)
-                    age_min_se = (time.time() * 1000 - ctime_ms_se) / 60000.0 \
-                                 if ctime_ms_se else 0
-                    max_seen = self.position_max_favor.get(pid, r_favor)
-                    if (age_min_se >= rk.stale_exit_min
-                            and max_seen < rk.stale_exit_max_favor_r):
-                        try:
-                            self.client.flash_close_position(pid)
-                            log.info("STALE EXIT %s: age=%.1fm max_favor=%.2fR "
-                                     "current=%.2fR", symbol, age_min_se,
-                                     max_seen, r_favor)
-                            self.state.record_order(
-                                f"{symbol} STALE_EXIT positionId={pid} "
-                                f"age={age_min_se:.0f}m max={max_seen:+.2f}R"
-                            )
-                            continue
-                        except BitunixError as e:
-                            log.warning("Stale exit failed for %s: %s",
-                                        symbol, e)
-                            # Fall through to normal management.
-
-                # Tape-driven exit — DISABLED by default after live data
-                # showed it firing within 10-15 seconds of entry on
-                # microstructure noise, closing trades at 25-50% of full
-                # SL distance instead of letting them develop. Aggression
-                # naturally swings in 10s windows; the ±0.50 threshold
-                # catches normal noise, not real regime flips.
-                #
-                # Re-enable via cfg.risk.tape_exit_enabled=True only after
-                # you've reviewed the journal and tuned threshold +
-                # min_hold_secs guard. The min-hold prevents sub-30s
-                # exits where the tape barely settled after the maker fill.
-                if (rk.tape_exit_enabled
-                        and r_favor < 1.0
-                        and self.tape_feed is not None):
-                    # Min hold gate — let the entry settle before measuring flow.
-                    ctime_ms_te = int(p.get("ctime") or 0)
-                    age_s_te = (time.time() * 1000 - ctime_ms_te) / 1000.0 \
-                               if ctime_ms_te else 0
-                    min_hold = float(getattr(rk, "tape_exit_min_hold_secs", 30))
-                    threshold = float(getattr(rk, "tape_exit_threshold", 0.50))
-                    if age_s_te >= min_hold:
-                        agg = self.tape_feed.get_aggression_ratio(symbol, window_secs=10)
-                        if agg is not None:
-                            flipped = ((is_long and agg <= -threshold)
-                                       or (not is_long and agg >= threshold))
-                            if flipped:
-                                try:
-                                    self.client.flash_close_position(pid)
-                                    log.info("TAPE EXIT %s %s: flow flipped "
-                                             "(agg=%+.2f, r=%.2f, age=%.0fs)",
-                                             symbol, "LONG" if is_long else "SHORT",
-                                             agg, r_favor, age_s_te)
-                                    self.state.record_order(
-                                        f"{symbol} TAPE_EXIT positionId={pid} "
-                                        f"agg={agg:+.2f} r={r_favor:.2f}"
-                                    )
-                                    continue   # skip SL/TP management for closed pos
-                                except BitunixError as e:
-                                    log.warning("Tape exit failed for %s: %s",
-                                            symbol, e)
-                                # Fall through to normal SL management.
-
-                # Partial TP at +1R favorable — close partial_tp_close_pct% of the
-                # position at market when r_favor first reaches partial_tp_at_r.
-                # Locks in a guaranteed fee-clearing profit on half the position
-                # while the runner trails toward the full TP target. Done ONCE
-                # per position; tracked in self.partial_tp_done.
-                if (rk.partial_tp_enabled
-                        and r_favor >= rk.partial_tp_at_r
-                        and pid not in self.partial_tp_done):
-                    partial_qty = qty * (rk.partial_tp_close_pct / 100.0)
-                    # Quantize to symbol's step.
-                    step = meta.base_precision
-                    n_steps = int(partial_qty / step) if step > 0 else 0
-                    partial_qty_q = round(n_steps * step, 6)
-                    if partial_qty_q >= meta.min_qty:
-                        opp_side = "SELL" if is_long else "BUY"
-                        try:
-                            self.client.place_order(
-                                symbol=symbol,
-                                side=opp_side,
-                                qty=str(partial_qty_q),
-                                order_type="MARKET",
-                                trade_side="CLOSE",
-                                reduce_only=True,
-                                client_id=f"ptp-{pid}",
-                            )
-                            self.partial_tp_done.add(pid)
-                            log.info("Partial TP fired %s: closed %s @ market (r=%.2f)",
-                                     symbol, partial_qty_q, r_favor)
-                            self.state.record_order(
-                                f"{symbol} PARTIAL_TP closed {partial_qty_q} "
-                                f"({rk.partial_tp_close_pct:.0f}% of position) at r={r_favor:.2f}"
-                            )
-                        except BitunixError as e:
-                            log.warning("Partial TP failed for %s: %s", symbol, e)
-                            self.partial_tp_done.add(pid)  # avoid retry storm
-
-                # Decide new SL: trailing region wins over break-even region.
-                new_sl: float | None = None
-                reason = ""
-                if rk.trailing_activate_r > 0 and r_favor >= rk.trailing_activate_r:
-                    trail_dist = rk.trailing_distance_r * sl_distance
-                    new_sl = (current_price - trail_dist) if is_long else (current_price + trail_dist)
-                    reason = f"trail (r={r_favor:.2f})"
-                elif rk.breakeven_at_r > 0 and r_favor >= rk.breakeven_at_r:
-                    buffer = entry * (rk.breakeven_buffer_pct / 100.0)
-                    new_sl = (entry + buffer) if is_long else (entry - buffer)
-                    reason = f"breakeven (r={r_favor:.2f})"
-
-                if new_sl is None:
-                    continue
-
-                # Only ratchet forward — never move SL against the position.
-                if is_long and new_sl <= current_sl:
-                    continue
-                if (not is_long) and new_sl >= current_sl:
-                    continue
-
-                # Round to symbol's price precision.
-                meta = self.metas.get(symbol, _DEFAULT_META)
-                new_sl_rounded = round(new_sl, meta.price_precision)
-                if (is_long and new_sl_rounded <= current_sl) or \
-                   ((not is_long) and new_sl_rounded >= current_sl):
-                    continue
-
-                # Push update — modify the SPECIFIC SL trigger order by its id.
-                # The position-level modify endpoint doesn't actually persist;
-                # this targets the SL trigger directly.
-                #
-                # Race-condition fix (Grok review, Option C): r_favor is the
-                # MAX favor reached, but current_price for SL placement is
-                # the LIVE ticker. So a trade can hit r=0.37 (qualifying for
-                # BE) while live price has retraced to r=0.21 — the
-                # entry-buffer SL we just computed lands on the wrong side
-                # of last price. Bitunix correctly rejects with code 30030.
-                # On that specific failure, retry with SL clamped to
-                # current_price ± 1 tick — locks in whatever profit is
-                # still on the table at the moment of the API call.
-                try:
-                    self.client.modify_tpsl_order(
-                        order_id=sl_order_id,
-                        sl_price=str(new_sl_rounded),
-                        sl_qty=sl_order.get("slQty"),
-                        sl_stop_type=sl_order.get("slStopType") or "LAST_PRICE",
-                        sl_order_type=sl_order.get("slOrderType") or "MARKET",
-                    )
-                    log.info(
-                        "SL ratchet %s: %s → %s (%s, entry=%s, current=%.6f)",
-                        symbol, current_sl, new_sl_rounded, reason, entry, current_price,
-                    )
-                    self.state.record_order(
-                        f"{symbol} SL {current_sl} → {new_sl_rounded} ({reason})"
-                    )
-                except BitunixError as e_inner:
-                    # Bitunix code 30030: "SL price must be greater/less than
-                    # last price" — the intended new_sl is on the wrong side
-                    # of live price due to retracement. Retry with a tight
-                    # clamp at current_price ± 1 tick (still better than
-                    # original SL because we already passed the ratchet check).
-                    if e_inner.code != 30030:
-                        raise
-                    tick = 10 ** -meta.price_precision
-                    clamp_sl = (current_price - tick) if is_long else (current_price + tick)
-                    clamp_sl_rounded = round(clamp_sl, meta.price_precision)
-                    # Still must ratchet forward — if even the clamp isn't
-                    # better than current_sl, skip rather than move backward.
-                    if (is_long and clamp_sl_rounded <= current_sl) or \
-                       ((not is_long) and clamp_sl_rounded >= current_sl):
-                        log.info(
-                            "SL clamp skipped %s: %s not better than current %s "
-                            "(price retraced past ratchet point)",
-                            symbol, clamp_sl_rounded, current_sl,
-                        )
-                        continue
-                    self.client.modify_tpsl_order(
-                        order_id=sl_order_id,
-                        sl_price=str(clamp_sl_rounded),
-                        sl_qty=sl_order.get("slQty"),
-                        sl_stop_type=sl_order.get("slStopType") or "LAST_PRICE",
-                        sl_order_type=sl_order.get("slOrderType") or "MARKET",
-                    )
-                    log.info(
-                        "SL clamped %s: %s → %s (current=%.6f, %s — retraced past intended %s)",
-                        symbol, current_sl, clamp_sl_rounded, current_price,
-                        reason, new_sl_rounded,
-                    )
-                    self.state.record_order(
-                        f"{symbol} SL {current_sl} → {clamp_sl_rounded} "
-                        f"({reason}, clamped from {new_sl_rounded})"
-                    )
-            except BitunixError as e_sl:
-                # SL ratchet may benignly fail if the position closed.
-                msg = (e_sl.msg or "").lower()
-                benign = any(s in msg for s in
-                             ("not found", "not exist", "closed", "expired", "canceled"))
-                if not benign:
-                    log.warning("SL update failed for %s: %s", p.get("symbol"), e_sl)
-                    self.state.record_error(f"SL update failed: {e_sl.code} {e_sl.msg}")
-                continue   # skip TP adjustment too — position likely gone
-
-            # ---------- ADAPTIVE TP TIGHTENING ----------
-            # As the trade ages, ratchet TP DOWN (closer to current price)
-            # toward a fee-aware floor. Always profitable; never below
-            # round-trip fees. Original TP only loosens, never tightens
-            # past floor.
-            try:
-                if not rk.adaptive_tp_enabled:
-                    continue
-                tp_order = tp_orders.get(pid)
-                if not tp_order:
-                    continue  # position has no TP trigger — skip
-                current_tp = float(tp_order["tpPrice"])
-                tp_order_id = str(tp_order["id"])
-                # Position age in minutes from ctime (Bitunix ms timestamp).
-                ctime_ms = int(p.get("ctime") or 0)
-                age_min = (time.time() * 1000 - ctime_ms) / 60000.0 if ctime_ms else 0
-                desired_r = adaptive_tp_r(
-                    age_minutes=age_min,
-                    original_tp_r=rk.take_profit_r,
-                    fee_pct=rk.round_trip_fee_pct,
-                    sl_pct=rk.stop_loss_pct,
-                    floor_r=rk.adaptive_tp_floor_r,
-                )
-                desired_tp = (entry + desired_r * sl_distance) if is_long \
-                             else (entry - desired_r * sl_distance)
-                desired_tp_rounded = round(desired_tp, meta.price_precision)
-                # Only TIGHTEN (move TP toward entry). Never expand TP.
-                tighter = (desired_tp_rounded < current_tp) if is_long \
-                          else (desired_tp_rounded > current_tp)
-                if not tighter:
-                    continue
-                # And only tighten meaningfully (>= 1 price tick).
-                if abs(desired_tp_rounded - current_tp) < 10 ** (-meta.price_precision):
-                    continue
-                self.client.modify_tpsl_order(
-                    order_id=tp_order_id,
-                    tp_price=str(desired_tp_rounded),
-                    tp_qty=tp_order.get("tpQty"),
-                    tp_stop_type=tp_order.get("tpStopType") or "LAST_PRICE",
-                    tp_order_type=tp_order.get("tpOrderType") or "MARKET",
-                )
-                log.info("TP tighten %s: %s → %s (age=%.1fm desired=%.2fR)",
-                         symbol, current_tp, desired_tp_rounded, age_min, desired_r)
-                self.state.record_order(
-                    f"{symbol} TP {current_tp} → {desired_tp_rounded} "
-                    f"(age={age_min:.0f}m, target={desired_r:.2f}R)"
-                )
-            except BitunixError as e:
-                # "Order not found" / "position closed" between our pending_tpsl
-                # read and the modify call is benign — the position closed
-                # naturally (TP/SL fired). Don't crowd the activity log with errors.
-                msg = (e.msg or "").lower()
-                benign = any(s in msg for s in
-                             ("not found", "not exist", "closed", "expired", "canceled"))
-                if benign:
-                    log.info("SL update skipped for %s (position closed): %s",
-                             p.get("symbol"), e.msg)
-                else:
-                    log.warning("SL update failed for %s: %s", p.get("symbol"), e)
-                    self.state.record_error(f"SL update failed: {e.code} {e.msg}")
-            except Exception as e:
-                log.exception("Position management error for %s: %s", p.get("symbol"), e)
 
     def _execute(self, symbol: str, plan: OrderPlan) -> bool:
         # Tape veto — "don't fight the flow". If the most recent 10s of trade
