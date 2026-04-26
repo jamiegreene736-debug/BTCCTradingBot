@@ -132,6 +132,12 @@ class Signal:
     factor_mean_rev: float = 0.0
     factor_flow: float = 0.0
     factor_context: float = 0.0
+    # Last bar's high/low — used by risk.build_order to anchor SL beyond
+    # the entry bar's structural extreme rather than pure %-of-entry.
+    # Captured at signal-emit time so SL placement reflects what actually
+    # just happened on the chart (Grok holistic review).
+    last_bar_high: float = 0.0
+    last_bar_low: float = 0.0
 
     @property
     def side_code(self) -> str:
@@ -773,6 +779,8 @@ def evaluate(
             factor_mean_rev=breakdown.get("mean_rev", 0.0),
             factor_flow=breakdown.get("flow", 0.0),
             factor_context=breakdown.get("context", 0.0),
+            last_bar_high=float(h[-1]),
+            last_bar_low=float(l[-1]),
         )
 
     # Hard ADX floor — don't trade in deep chop. Live drawdown analysis
@@ -823,14 +831,39 @@ def evaluate(
     absorption_vetoes_long = any(r.startswith("absorb(buyflow")
                                   for r in short_reasons)
 
+    # Continuation gate (Grok holistic review): SOFT penalty, not hard veto.
+    # Live data showed the hard-veto version was over-selective — killed
+    # genuine setups during minor noise pullbacks AND let weak setups
+    # through during high-vol expansions. Now: deduct 0.10 from combined
+    # score when continuation is missing, then re-check threshold. Strong
+    # signals (score 0.85+) survive the penalty; marginal signals (score
+    # 0.75-0.84) get filtered. This is a graceful filter — it weights
+    # continuation as ONE input among many rather than an absolute gate.
+    CONTINUATION_PENALTY = 0.10
+
+    cont_long_ok = _continuation_confirmed("long", h, l, c,
+                                              aggression_10s=aggression_10s,
+                                              real_cvd=real_cvd)
+    cont_short_ok = _continuation_confirmed("short", h, l, c,
+                                               aggression_10s=aggression_10s,
+                                               real_cvd=real_cvd)
+    effective_long = combined_long - (0.0 if cont_long_ok else CONTINUATION_PENALTY)
+    effective_short = combined_short - (0.0 if cont_short_ok else CONTINUATION_PENALTY)
+
     # Optional signal-inversion gate (forward-looking experiment). All
-    # gates above (continuation, absorption, threshold) run on the
+    # gates above (continuation penalty, absorption, threshold) run on the
     # ORIGINAL direction so we only invert genuine high-conviction setups.
     invert = bool(getattr(cfg, "invert_signals", False))
 
-    def _emit(direction: Direction) -> Signal:
+    def _emit(direction: Direction, cont_ok: bool) -> Signal:
         sig = _build(direction)
         sig.fire_threshold_used = eff_threshold
+        if not cont_ok:
+            sig.reasons = ["CONT_PENALTY"] + sig.reasons
+            log.info("Continuation penalty applied to %s signal (score %.2f → "
+                     "%.2f after -%.2f); still cleared threshold %.2f",
+                     direction, sig.score, sig.score - CONTINUATION_PENALTY,
+                     CONTINUATION_PENALTY, eff_threshold)
         if invert:
             flipped: Direction = "short" if direction == "long" else "long"
             sig.direction = flipped
@@ -839,28 +872,16 @@ def evaluate(
                      direction, flipped, sig.score)
         return sig
 
-    if combined_long >= eff_threshold and combined_long > combined_short:
+    if effective_long >= eff_threshold and effective_long > effective_short:
         if absorption_vetoes_long:
             log.info("ABSORPTION VETO long signal (buyflow being absorbed → "
                      "expect reversal down, not continuation up)")
             return None
-        if not _continuation_confirmed("long", h, l, c,
-                                         aggression_10s=aggression_10s,
-                                         real_cvd=real_cvd):
-            log.info("CONTINUATION VETO long (bar mechanics or tape alignment "
-                     "missing — likely exhaustion fade or contrary flow)")
-            return None
-        return _emit("long")
-    if combined_short >= eff_threshold and combined_short > combined_long:
+        return _emit("long", cont_long_ok)
+    if effective_short >= eff_threshold and effective_short > effective_long:
         if absorption_vetoes_short:
             log.info("ABSORPTION VETO short signal (sellflow being absorbed → "
                      "expect reversal up, not continuation down)")
             return None
-        if not _continuation_confirmed("short", h, l, c,
-                                         aggression_10s=aggression_10s,
-                                         real_cvd=real_cvd):
-            log.info("CONTINUATION VETO short (bar mechanics or tape alignment "
-                     "missing — likely exhaustion fade or contrary flow)")
-            return None
-        return _emit("short")
+        return _emit("short", cont_short_ok)
     return None

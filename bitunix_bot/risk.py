@@ -130,22 +130,45 @@ def build_order(
         conviction_mult = max(0.7, min(1.5, raw_ratio))
 
     # Stop distance in price units. Hybrid: fixed-pct FLOOR + ATR-derived
-    # widening in vol regimes. The floor (`stop_loss_pct`) protects calm-market
-    # entries from being stopped out on bar-internal noise; the ATR multiplier
-    # widens the stop when realized volatility expands (FOMC, news, cascades)
-    # so we don't get wicked out by the same setup that would normally work.
-    # Risk per trade stays constant — notional auto-adjusts to whichever
-    # SL distance ends up binding.
+    # widening + STRUCTURE-anchored extension (Grok holistic review).
     #
-    # Calm BTC (ATR ~0.05% × 1.2 = 0.06%): floor wins → SL at 0.40%.
-    # Vol expansion (ATR ~0.5% × 1.2 = 0.60%): ATR wins → SL widens to 0.60%.
+    # Three components, take MAX of all three:
+    #   (a) fixed_pct floor — protects calm markets from bar-internal noise
+    #   (b) atr_multiplier × ATR% — widens in vol regimes (news, cascades)
+    #   (c) structure-anchor — distance from entry to last bar's extreme
+    #       (low for longs, high for shorts) plus a small buffer. Ensures
+    #       SL sits BEYOND the bar that just confirmed our direction —
+    #       a real structural invalidation level, not an arbitrary % point.
+    #
+    # The structure anchor matters most when ATR is small but the entry
+    # bar had a long wick. Pure %-of-price SL would land INSIDE the wick
+    # and get hit on the next bar's natural retest. The anchor places SL
+    # safely beyond the wick.
     if risk.use_atr and signal.atr > 0:
         atr_pct = (signal.atr / price) * 100.0
         atr_derived_pct = risk.atr_multiplier_sl * atr_pct
         stop_dist_pct = max(risk.stop_loss_pct, atr_derived_pct)
-        stop_dist = price * (stop_dist_pct / 100.0)
     else:
-        stop_dist = price * (risk.stop_loss_pct / 100.0)
+        stop_dist_pct = risk.stop_loss_pct
+    stop_dist = price * (stop_dist_pct / 100.0)
+
+    # Structure-anchored component: distance from entry to last bar's
+    # opposing extreme + 10bps buffer (so SL is JUST beyond the wick).
+    # Falls back to 0 if Signal lacks bar high/low (legacy callers).
+    structure_buffer_pct = 0.10  # 10 bps beyond the bar's wick
+    last_high = getattr(signal, "last_bar_high", 0.0) or 0.0
+    last_low = getattr(signal, "last_bar_low", 0.0) or 0.0
+    if last_high > 0 and last_low > 0 and last_high > last_low:
+        if signal.direction == "long":
+            # SL must be below last_low (long invalidates if price breaks
+            # the low of the bar that just gave us our entry signal).
+            anchor_dist = (price - last_low) + price * (structure_buffer_pct / 100.0)
+        else:
+            # SL must be above last_high (short invalidates if price
+            # breaks above the entry-bar's high).
+            anchor_dist = (last_high - price) + price * (structure_buffer_pct / 100.0)
+        anchor_dist = max(anchor_dist, 0.0)
+        stop_dist = max(stop_dist, anchor_dist)
 
     # TP is always an R-multiple of effective SL distance — keeps geometry
     # consistent regardless of which SL formula bound. The legacy
@@ -166,7 +189,19 @@ def build_order(
                  * sym_mult * conviction_mult * dd_risk_mult)
     if risk_usdt <= 0:
         return None  # halted by DD breaker
-    volume = risk_usdt / stop_dist
+
+    # Fee reserve (Grok holistic review): risk_per_trade_pct represents the
+    # intended LOSS budget. But fees are paid REGARDLESS of outcome — so
+    # actual loss-on-SL = risk_usdt + round_trip_fee × notional. To keep
+    # actual loss ≈ risk_usdt budget, scale risk down by the fee burden in
+    # R-units: fee_burden = round_trip_fee_pct / stop_loss_pct. For 0.08%
+    # maker fees / 0.25% SL = 0.32 (fees consume 32% of risk budget).
+    # Capped at 50% — never zero out the trade entirely.
+    sl_pct_for_fee = max(0.001, risk.stop_loss_pct)
+    fee_burden_r = risk.round_trip_fee_pct / sl_pct_for_fee
+    fee_reserve_frac = min(0.5, fee_burden_r)
+    risk_usdt_after_fees = risk_usdt * (1.0 - fee_reserve_frac)
+    volume = risk_usdt_after_fees / stop_dist
 
     # Cap by available margin at the EFFECTIVE leverage.
     max_vol_by_margin = (free_margin * leverage) / price
@@ -176,8 +211,9 @@ def build_order(
     steps = math.floor(volume / volume_step)
     volume = steps * volume_step
     if volume < min_volume:
-        log.info("Order skipped: volume %.6f < min %.6f (risk=%.2f, stop_dist=%.6f)",
-                 volume, min_volume, risk_usdt, stop_dist)
+        log.info("Order skipped: volume %.6f < min %.6f (risk=%.2f, "
+                 "after_fees=%.2f, stop_dist=%.6f)",
+                 volume, min_volume, risk_usdt, risk_usdt_after_fees, stop_dist)
         return None
 
     # SL / TP prices.

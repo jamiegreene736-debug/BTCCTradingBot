@@ -250,21 +250,22 @@ class StrategyCfg:
     # inflate confidence vs 1 strong signal). Weighted-average across
     # groups gives the indicator-half of combined score.
     #
-    # Weights re-tuned per Grok review v7: Flow promoted (0.30 → 0.45) as
-    # the dominant factor, Trend demoted (0.30 → 0.20) because it's
-    # lagging by definition. Context demoted (0.15 → 0.10) — modulators
-    # shouldn't carry as much weight as flow itself. MeanRev unchanged.
-    # Sum still 1.0. Heavily penalizes zero-flow signals while
-    # rewarding flow-confirmed continuation.
+    # Grok holistic review: rebalance per the structural critique that
+    # trend-group dominance picks exhaustion. Flow promoted further (0.45
+    # → 0.50), Trend demoted further (0.20 → 0.15), and trend saturation
+    # cut from 6 → 3 so a chorus of correlated lagging signals (EMA stack
+    # + MACD + Supertrend all firing on the same move) can't inflate
+    # confidence above 3-vote saturation. Mean-rev saturation also cut
+    # 6 → 3 for symmetry with flow (the actual leading signal). Sum 1.0.
     factor_weights: dict[str, float] = field(default_factory=lambda: {
-        "trend": 0.20,      # lagging by nature; describes past bar
+        "trend": 0.15,      # was 0.20 — lagging confirmation only
         "mean_rev": 0.25,   # counterbalance / reversal setups
-        "flow": 0.45,       # leading order-flow alpha — highest scalper edge
+        "flow": 0.50,       # was 0.45 — leading edge dominates
         "context": 0.10,    # vol / regime / session modulators
     })
     factor_saturation: dict[str, int] = field(default_factory=lambda: {
-        "trend": 6,         # 6 distinct trend votes saturate to 1.0
-        "mean_rev": 6,
+        "trend": 3,         # was 6 — kill chorus-inflation of correlated trend votes
+        "mean_rev": 3,      # was 6 — symmetry with flow's 3-cap
         "flow": 3,          # only 4 flow inputs total → saturate at 3
         "context": 3,
     })

@@ -141,6 +141,10 @@ def fresh_cfg():
     cfg.trading.cooldown_seconds = 60
     cfg.risk.partial_tp_enabled = True
     cfg.risk.take_profit_r = 2.5
+    # Disable fee reserve in fixture so size-sensitive tests assert volumes
+    # against the pre-Grok-holistic budget. Specific fee-reserve tests
+    # set this explicitly.
+    cfg.risk.round_trip_fee_pct = 0.0
     return cfg
 
 
@@ -2264,17 +2268,24 @@ def test_tape_veto_blocks_short_against_strong_buy_flow():
     bot.client.place_order.assert_not_called()
 
 
-def test_neutral_flow_now_blocks_directional_signal():
-    """Grok review v7: neutral tape (between -0.25 and +0.25) is now
-    INSUFFICIENT for a directional signal — the continuation gate
-    requires positive flow alignment in the trade direction at ≥0.25
-    magnitude. Previously neutral flow was OK; under v7 it's a 'no edge,
-    no trade' state."""
+def test_neutral_flow_applies_continuation_penalty():
+    """Grok holistic review: continuation gate is now a SOFT score
+    penalty (-0.10), not a hard veto. Neutral tape (between -0.25 and
+    +0.25) deducts 0.10 from the combined score; if the signal still
+    clears the threshold, it fires with CONT_PENALTY tag in reasons.
+    Strong setups survive; marginal ones get filtered."""
+    from bitunix_bot.strategy import evaluate
     bot, tape = _bot_with_tape_and_signal()
-    tape.aggression = 0.10  # neutral
+    tape.aggression = 0.10  # neutral, fails ≥0.25 alignment check
     bot._tick()
-    # No order — continuation gate blocks because flow doesn't confirm.
-    bot.client.place_order.assert_not_called()
+    # Synthetic uptrend produces strong score that survives the 0.10 penalty,
+    # so the trade still fires — but with the penalty tag preserved.
+    bot.client.place_order.assert_called()
+    # Find the signal text recorded; CONT_PENALTY should appear.
+    signal_events = [e for e in bot.state.snapshot()["events"]
+                     if e["kind"] == "signal"]
+    assert any("CONT_PENALTY" in e.get("text", "") for e in signal_events), \
+        f"expected CONT_PENALTY tag in signal reasons; got {[e.get('text','')[:200] for e in signal_events]}"
 
 
 def test_confirming_flow_allows_signal():
@@ -3322,14 +3333,15 @@ def test_stale_exit_flattens_drifting_position():
     """Position older than stale_exit_min minutes with max_favor below
     stale_exit_max_favor_r → flash_close.
 
-    Grok v9 defaults: stale_exit_min=12m, stale_exit_max_favor_r=0.2R."""
+    Grok holistic review (15m timeframe): stale_exit_min=18m,
+    stale_exit_max_favor_r=0.25R."""
     bot, _, _ = _setup_bot_with_open_position(
         side="BUY", entry=100_000.0, current_price=100_025.0,  # +0.1R, drifting
     )
-    # Fast-forward the position's ctime so it's "15 minutes old" (past 12-min floor).
+    # Fast-forward the position's ctime so it's "20 minutes old" (past 18-min floor).
     bot.client.pending_positions.return_value = [{
         **bot.client.pending_positions.return_value[0],
-        "ctime": int(time.time() * 1000) - 15 * 60_000,
+        "ctime": int(time.time() * 1000) - 20 * 60_000,
     }]
     # Pre-seed max_favor at 0.1R (below 0.2R threshold) — drifted with no edge.
     # Live tick recomputes r_favor from current_price and only ratchets up,
@@ -3351,9 +3363,9 @@ def test_stale_exit_skipped_for_progressing_position():
     )
     bot.client.pending_positions.return_value = [{
         **bot.client.pending_positions.return_value[0],
-        "ctime": int(time.time() * 1000) - 15 * 60_000,  # past 12-min floor
+        "ctime": int(time.time() * 1000) - 20 * 60_000,  # past 18-min floor
     }]
-    # Position previously hit 0.4R favorable — has shown edge above 0.2R floor.
+    # Position previously hit 0.4R favorable — has shown edge above 0.25R floor.
     bot.position_max_favor["POS1"] = 0.4
     bot._tick()
 
@@ -3366,10 +3378,10 @@ def test_stale_exit_skipped_for_young_position():
     bot, _, _ = _setup_bot_with_open_position(
         side="BUY", entry=100_000.0, current_price=100_050.0,
     )
-    # Just opened 1 minute ago — too young (Grok review: stale_exit_min=2.0).
+    # Just opened 5 minutes ago — too young (15m timeframe: stale_exit_min=18.0).
     bot.client.pending_positions.return_value = [{
         **bot.client.pending_positions.return_value[0],
-        "ctime": int(time.time() * 1000) - 1 * 60_000,
+        "ctime": int(time.time() * 1000) - 5 * 60_000,
     }]
     bot.position_max_favor["POS1"] = 0.1
     bot._tick()
@@ -3773,7 +3785,8 @@ def test_conviction_sizing_clamps_to_floor():
                     margin_coin="USDT", margin_mode="ISOLATION",
                     risk_per_trade_pct=1.0)
     rc = RiskCfg(stop_loss_pct=0.40, take_profit_r=2.5, use_atr=False,
-                 atr_multiplier_sl=1.2, atr_multiplier_tp=4.0)
+                 atr_multiplier_sl=1.2, atr_multiplier_tp=4.0,
+                 round_trip_fee_pct=0.0)  # disable fee reserve for ratio test
     # Low-conviction (impossible in practice — would not pass threshold) but
     # tests the clamp: 0.10 / 0.50 = 0.20 → clamps to 0.7.
     low_sig = Signal(direction="long", score=0.10, indicator_score=2,
@@ -4218,8 +4231,11 @@ def test_atr_hybrid_widens_in_vol_regime():
     tc = TradingCfg(symbols=["BTCUSDT"], timeframe="1m", leverage=25,
                     margin_coin="USDT", margin_mode="ISOLATION",
                     risk_per_trade_pct=1.0)
+    # Disable fee reserve so risk-budget assertions are unmodified
+    # (specific fee-reserve tests assert that scaling separately).
     rc = RiskCfg(stop_loss_pct=0.40, take_profit_r=2.5, use_atr=True,
-                 atr_multiplier_sl=1.2, atr_multiplier_tp=4.0)
+                 atr_multiplier_sl=1.2, atr_multiplier_tp=4.0,
+                 round_trip_fee_pct=0.0)
     # ATR = 0.50% of 60000 = 300. Hybrid: 1.2 * 0.50 = 0.60% > floor 0.40%.
     sig = Signal(direction="long", score=0.7, indicator_score=12,
                  pattern_score=2.0, reasons=["x"], price=60_000.0, atr=300.0)
@@ -4340,7 +4356,8 @@ def test_correlation_sizing_alts_get_smaller_notional():
                     margin_coin="USDT", margin_mode="ISOLATION",
                     risk_per_trade_pct=1.0)
     rc = RiskCfg(stop_loss_pct=0.40, take_profit_r=2.5, use_atr=False,
-                 atr_multiplier_sl=1.2, atr_multiplier_tp=4.0)
+                 atr_multiplier_sl=1.2, atr_multiplier_tp=4.0,
+                 round_trip_fee_pct=0.0)  # disable fee reserve for ratio test
     # Same price/atr/score across symbols — only the symbol mult changes.
     sig = Signal(direction="long", score=0.7, indicator_score=12,
                  pattern_score=2.0, reasons=["x"], price=60_000.0, atr=120.0)
@@ -4377,7 +4394,8 @@ def test_correlation_sizing_unknown_symbol_defaults_to_full():
                     margin_coin="USDT", margin_mode="ISOLATION",
                     risk_per_trade_pct=1.0)
     rc = RiskCfg(stop_loss_pct=0.40, take_profit_r=2.5, use_atr=False,
-                 atr_multiplier_sl=1.2, atr_multiplier_tp=4.0)
+                 atr_multiplier_sl=1.2, atr_multiplier_tp=4.0,
+                 round_trip_fee_pct=0.0)
     sig = Signal(direction="long", score=0.7, indicator_score=12,
                  pattern_score=2.0, reasons=["x"], price=60_000.0, atr=120.0)
     btc_plan = build_order(sig, free_margin=46.0, trading=tc, risk=rc,
@@ -4389,6 +4407,158 @@ def test_correlation_sizing_unknown_symbol_defaults_to_full():
                              symbol="DOGEUSDT")
     # Same notional (both mult=1.0).
     assert abs(misc_plan.volume - btc_plan.volume) < 1e-9
+
+
+# ----------------------------------------------------------------- Grok holistic review
+
+
+def test_fee_reserve_scales_volume_down_proportional_to_fee_burden():
+    """When round_trip_fee_pct > 0, build_order must scale risk_usdt
+    down by fee_burden = fee_pct / sl_pct. A trade with 0.08% maker
+    round-trip and 0.25% SL should size at ~68% of the no-fee budget
+    (1 - 0.08/0.25 = 0.68)."""
+    from bitunix_bot.config import RiskCfg, TradingCfg
+    from bitunix_bot.risk import build_order
+    from bitunix_bot.strategy import Signal
+
+    tc = TradingCfg(symbols=["BTCUSDT"], timeframe="15m", leverage=10,
+                    margin_coin="USDT", margin_mode="ISOLATION",
+                    risk_per_trade_pct=1.0)
+    sig = Signal(direction="long", score=0.7, indicator_score=12,
+                 pattern_score=2.0, reasons=["x"], price=60_000.0, atr=120.0)
+
+    # No fee reserve — baseline.
+    rc_nofee = RiskCfg(stop_loss_pct=0.25, take_profit_r=1.0, use_atr=False,
+                       atr_multiplier_sl=1.0, atr_multiplier_tp=4.0,
+                       round_trip_fee_pct=0.0)
+    plan_nofee = build_order(sig, free_margin=100.0, trading=tc, risk=rc_nofee,
+                              min_volume=0.0001, volume_step=0.0001, digits=1,
+                              symbol="BTCUSDT")
+
+    # Maker fees 0.08% on 0.25% SL → fee_burden 0.32 → size 68% of nofee.
+    rc_fee = RiskCfg(stop_loss_pct=0.25, take_profit_r=1.0, use_atr=False,
+                     atr_multiplier_sl=1.0, atr_multiplier_tp=4.0,
+                     round_trip_fee_pct=0.08)
+    plan_fee = build_order(sig, free_margin=100.0, trading=tc, risk=rc_fee,
+                            min_volume=0.0001, volume_step=0.0001, digits=1,
+                            symbol="BTCUSDT")
+
+    ratio = plan_fee.volume / plan_nofee.volume
+    assert abs(ratio - 0.68) < 0.05, \
+        f"fee reserve should scale volume to 68% of no-fee budget; got {ratio:.3f}"
+
+
+def test_fee_reserve_caps_at_50_percent():
+    """If fee_burden exceeds 50% (e.g. 0.20% fees on 0.25% SL = 0.80),
+    the reserve caps at 50% so trades aren't zeroed out entirely."""
+    from bitunix_bot.config import RiskCfg, TradingCfg
+    from bitunix_bot.risk import build_order
+    from bitunix_bot.strategy import Signal
+
+    tc = TradingCfg(symbols=["BTCUSDT"], timeframe="15m", leverage=10,
+                    margin_coin="USDT", margin_mode="ISOLATION",
+                    risk_per_trade_pct=1.0)
+    sig = Signal(direction="long", score=0.7, indicator_score=12,
+                 pattern_score=2.0, reasons=["x"], price=60_000.0, atr=120.0)
+
+    rc_nofee = RiskCfg(stop_loss_pct=0.25, take_profit_r=1.0, use_atr=False,
+                       atr_multiplier_sl=1.0, atr_multiplier_tp=4.0,
+                       round_trip_fee_pct=0.0)
+    plan_nofee = build_order(sig, free_margin=100.0, trading=tc, risk=rc_nofee,
+                              min_volume=0.0001, volume_step=0.0001, digits=1,
+                              symbol="BTCUSDT")
+
+    # Extreme fee 0.30% > SL 0.25% → fee_burden=1.2, capped at 0.5.
+    rc_fee = RiskCfg(stop_loss_pct=0.25, take_profit_r=1.0, use_atr=False,
+                     atr_multiplier_sl=1.0, atr_multiplier_tp=4.0,
+                     round_trip_fee_pct=0.30)
+    plan_fee = build_order(sig, free_margin=100.0, trading=tc, risk=rc_fee,
+                            min_volume=0.0001, volume_step=0.0001, digits=1,
+                            symbol="BTCUSDT")
+
+    ratio = plan_fee.volume / plan_nofee.volume
+    assert 0.45 < ratio < 0.55, \
+        f"fee reserve should cap at 50% reduction; got {ratio:.3f}"
+
+
+def test_structure_anchored_sl_widens_when_bar_has_long_wick():
+    """SL should be the MAX of fixed%, ATR-derived, AND distance to last
+    bar's opposite extreme + buffer. A long entry with a deep wick low
+    on the entry bar should get a wider SL than the fixed% would give."""
+    from bitunix_bot.config import RiskCfg, TradingCfg
+    from bitunix_bot.risk import build_order
+    from bitunix_bot.strategy import Signal
+
+    tc = TradingCfg(symbols=["BTCUSDT"], timeframe="15m", leverage=10,
+                    margin_coin="USDT", margin_mode="ISOLATION",
+                    risk_per_trade_pct=1.0)
+    rc = RiskCfg(stop_loss_pct=0.25, take_profit_r=1.0, use_atr=False,
+                 atr_multiplier_sl=1.0, atr_multiplier_tp=4.0,
+                 round_trip_fee_pct=0.0)
+
+    # Long entry @ 60_000 with last bar low at 59_700 (wick down to -0.5%).
+    # Fixed SL = 0.25% = 60_000 * 0.0025 = 150 below entry.
+    # Anchor SL = (60_000 - 59_700) + 60_000*0.001 = 300 + 60 = 360 below.
+    # Anchor wins → SL placed at 60_000 - 360 = 59_640.
+    sig = Signal(direction="long", score=0.7, indicator_score=12,
+                 pattern_score=2.0, reasons=["x"], price=60_000.0,
+                 atr=120.0, last_bar_high=60_100.0, last_bar_low=59_700.0)
+    plan = build_order(sig, free_margin=100.0, trading=tc, risk=rc,
+                       min_volume=0.0001, volume_step=0.0001, digits=1)
+    assert plan is not None
+    # SL should be at 59_640 (anchored), not 59_850 (fixed-pct).
+    assert 59_600 < plan.stop_loss < 59_700, \
+        f"expected anchored SL near 59_640, got {plan.stop_loss}"
+
+
+def test_structure_anchored_sl_short_widens_for_deep_wick_high():
+    """Short mirror: when entry bar has a wick UP, SL should anchor
+    above the bar high + buffer."""
+    from bitunix_bot.config import RiskCfg, TradingCfg
+    from bitunix_bot.risk import build_order
+    from bitunix_bot.strategy import Signal
+
+    tc = TradingCfg(symbols=["BTCUSDT"], timeframe="15m", leverage=10,
+                    margin_coin="USDT", margin_mode="ISOLATION",
+                    risk_per_trade_pct=1.0)
+    rc = RiskCfg(stop_loss_pct=0.25, take_profit_r=1.0, use_atr=False,
+                 atr_multiplier_sl=1.0, atr_multiplier_tp=4.0,
+                 round_trip_fee_pct=0.0)
+    sig = Signal(direction="short", score=0.7, indicator_score=12,
+                 pattern_score=2.0, reasons=["x"], price=60_000.0,
+                 atr=120.0, last_bar_high=60_300.0, last_bar_low=59_900.0)
+    plan = build_order(sig, free_margin=100.0, trading=tc, risk=rc,
+                       min_volume=0.0001, volume_step=0.0001, digits=1)
+    assert plan is not None
+    # Anchor: 60_300 - 60_000 = 300 + 60 (10bps buffer) = 360 above.
+    # Fixed: 150 above. Anchor wins → SL at ~60_360.
+    assert 60_300 < plan.stop_loss < 60_400, \
+        f"expected anchored SL near 60_360, got {plan.stop_loss}"
+
+
+def test_structure_anchored_sl_falls_through_when_no_bar_data():
+    """Legacy callers without last_bar_high/low (or 0/missing values)
+    must fall back to the existing fixed-pct + ATR hybrid — no crash,
+    no zero-distance SL."""
+    from bitunix_bot.config import RiskCfg, TradingCfg
+    from bitunix_bot.risk import build_order
+    from bitunix_bot.strategy import Signal
+
+    tc = TradingCfg(symbols=["BTCUSDT"], timeframe="15m", leverage=10,
+                    margin_coin="USDT", margin_mode="ISOLATION",
+                    risk_per_trade_pct=1.0)
+    rc = RiskCfg(stop_loss_pct=0.25, take_profit_r=1.0, use_atr=False,
+                 atr_multiplier_sl=1.0, atr_multiplier_tp=4.0,
+                 round_trip_fee_pct=0.0)
+    # last_bar_high / last_bar_low default to 0.0 — anchor branch must
+    # gracefully skip rather than divide by zero or compute nonsense.
+    sig = Signal(direction="long", score=0.7, indicator_score=12,
+                 pattern_score=2.0, reasons=["x"], price=60_000.0, atr=120.0)
+    plan = build_order(sig, free_margin=100.0, trading=tc, risk=rc,
+                       min_volume=0.0001, volume_step=0.0001, digits=1)
+    assert plan is not None
+    # Pure fixed-pct path: SL at 60_000 * (1 - 0.0025) = 59_850.
+    assert abs(plan.stop_loss - 59_850.0) < 1.0
 
 
 # ----------------------------------------------------------------- tape-driven exit
