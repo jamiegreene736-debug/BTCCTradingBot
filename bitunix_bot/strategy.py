@@ -254,6 +254,61 @@ def factor_score_weighted(
     return total
 
 
+def _continuation_confirmed(
+    direction: Direction,
+    highs: np.ndarray,
+    lows: np.ndarray,
+    closes: np.ndarray,
+) -> bool:
+    """Block 'exhaustion entry' setups (Grok review v6 fix).
+
+    Live data showed the bot firing SHORT on bearish reversal candle
+    patterns + lagging bearish trend indicators at local lows — exactly
+    when the down-move was already exhausted. 0/25 trades hit positive
+    realized PnL because the entry direction was systematically wrong.
+
+    Confirmation requires TWO signs of continuation in trade direction:
+
+      (a) Last bar's close in the top 25% of its range (long) /
+          bottom 25% (short). Bar itself is impulsive in our direction.
+          (Bearish reversal patterns on a long entry → close near low →
+          close_pos low → blocked.)
+
+      (b) Last close beyond prior close in trade direction. Net price
+          movement on the entry bar is the same direction we're betting.
+          (Catches small-bar reversal sequences where the bar AFTER the
+          impulsive move is small but still above the prior close.)
+
+    Tape direction agreement is intentionally NOT checked here — that's
+    the tape-veto layer's job in bot._execute (at threshold ±0.45) and
+    the absorption veto's job in this same evaluate() call. Keeping
+    concerns separated avoids overlapping rejection paths.
+
+    Returns True if all checks pass. Insufficient data → True (allow).
+    """
+    if len(closes) < 2:
+        return True
+    last_high = float(highs[-1])
+    last_low = float(lows[-1])
+    last_close = float(closes[-1])
+    prev_close = float(closes[-2])
+    bar_range = last_high - last_low
+    if bar_range <= 0:
+        return True
+    close_pos = (last_close - last_low) / bar_range  # 0=at low, 1=at high
+    if direction == "long":
+        if close_pos < 0.75:
+            return False
+        if last_close <= prev_close:
+            return False
+    else:
+        if close_pos > 0.25:
+            return False
+        if last_close >= prev_close:
+            return False
+    return True
+
+
 def _effective_fire_threshold(adx_val: float, base_threshold: float) -> float:
     """Regime-adaptive fire threshold.
 
@@ -618,6 +673,19 @@ def evaluate(
     combined_long = pw * pattern_long_n + (1 - pw) * factor_long
     combined_short = pw * pattern_short_n + (1 - pw) * factor_short
 
+    # Trend-dominance dampener (Grok review v6 fix). When one side has
+    # strong trend confluence (factor_trend ≥ 0.67 = 4+ of 6 distinct
+    # trend categories firing), the OPPOSITE side's combined score is
+    # halved. Blocks the "established uptrend, but tweezer_top + double_top
+    # → fire SHORT" exhaustion-fade pattern that bled the prior session.
+    # Reversal trades aren't outright blocked (still allowed if they
+    # outscore the trend side), just dampened.
+    TREND_DOMINANCE_THRESHOLD = 0.67
+    if factor_breakdown_long.get("trend", 0.0) >= TREND_DOMINANCE_THRESHOLD:
+        combined_short *= 0.5
+    if factor_breakdown_short.get("trend", 0.0) >= TREND_DOMINANCE_THRESHOLD:
+        combined_long *= 0.5
+
     # ----------------- REGIME-AWARE WEIGHTING -----------------
     # ADX-based market regime: trend (>28), neutral, or range (<18). In a
     # trending regime, trend-aligned signals deserve a boost; in chop, mean-
@@ -749,6 +817,10 @@ def evaluate(
             log.info("ABSORPTION VETO long signal (buyflow being absorbed → "
                      "expect reversal down, not continuation up)")
             return None
+        if not _continuation_confirmed("long", h, l, c):
+            log.info("CONTINUATION VETO long (last bar not impulsive up "
+                     "or close ≤ prior — likely exhaustion fade)")
+            return None
         sig = _build("long")
         sig.fire_threshold_used = eff_threshold
         return sig
@@ -756,6 +828,10 @@ def evaluate(
         if absorption_vetoes_short:
             log.info("ABSORPTION VETO short signal (sellflow being absorbed → "
                      "expect reversal up, not continuation down)")
+            return None
+        if not _continuation_confirmed("short", h, l, c):
+            log.info("CONTINUATION VETO short (last bar not impulsive down "
+                     "or close ≥ prior — likely exhaustion fade)")
             return None
         sig = _build("short")
         sig.fire_threshold_used = eff_threshold

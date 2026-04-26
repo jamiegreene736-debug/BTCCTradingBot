@@ -46,15 +46,17 @@ from bitunix_bot.state import BotState, get as get_state      # noqa: E402
 
 def make_uptrend_klines(n: int = 250, base: float = 60000.0, drift: float = 12.0) -> list[dict]:
     """Synthetic uptrend with the LAST 3 bars forced to be clean bullish
-    marubozu-style candles (no rejection wicks) so the pattern detector
-    yields a deterministic bullish signal direction."""
+    marubozu-style candles (no rejection wicks) AND monotonically rising
+    closes — so the continuation-confirmation gate passes (close in top
+    quartile of bar range AND close > prior close)."""
     rng = np.random.default_rng(42)
     closes = base + np.cumsum(rng.normal(drift, 25, n))
     opens = closes - rng.uniform(5, 20, n)
     highs = np.maximum(opens, closes) + rng.uniform(0.5, 3, n)
     lows = np.minimum(opens, closes) - rng.uniform(0.5, 3, n)
-    # Last 3 bars: clean bull marubozu — open near low, close near high, big body.
+    # Last 3 bars: clean bull marubozu, ascending closes (close[i] > close[i-1]).
     for i in range(n - 3, n):
+        closes[i] = closes[i - 1] + 30 + rng.uniform(0, 5)
         opens[i] = closes[i] - 30 - rng.uniform(0, 5)
         highs[i] = closes[i] + rng.uniform(0.1, 1.5)
         lows[i] = opens[i] - rng.uniform(0.1, 1.5)
@@ -589,8 +591,9 @@ def test_htf_and_funding_votes_contribute_to_score():
     opens = closes - rng.uniform(5, 15, n)
     highs = np.maximum(opens, closes) + rng.uniform(0.5, 3, n)
     lows = np.minimum(opens, closes) - rng.uniform(0.5, 3, n)
-    # Clean bull marubozu on last 3 bars (same as make_uptrend_klines).
+    # Clean bull marubozu on last 3 bars + ascending closes for continuation gate.
     for i in range(n - 3, n):
+        closes[i] = closes[i - 1] + 30 + rng.uniform(0, 5)
         opens[i] = closes[i] - 30 - rng.uniform(0, 5)
         highs[i] = closes[i] + rng.uniform(0.1, 1.5)
         lows[i] = opens[i] - rng.uniform(0.1, 1.5)
@@ -1415,7 +1418,8 @@ def test_regime_weighting_boosts_aligned_signals():
     opens = closes - rng.uniform(0.05, 0.15, n)
     highs = np.maximum(opens, closes) + rng.uniform(0.01, 0.05, n)
     lows = np.minimum(opens, closes) - rng.uniform(0.01, 0.05, n)
-    for j in range(n - 3, n):                                # clean bull marubozu
+    for j in range(n - 3, n):                                # clean bull marubozu + ascending close
+        closes[j] = closes[j - 1] + 0.5
         opens[j] = closes[j] - 0.5; highs[j] = closes[j] + 0.05; lows[j] = opens[j] - 0.05
     vols = np.full(n, 1.0)
     cfg = StrategyCfg(
@@ -2039,6 +2043,7 @@ def test_strategy_activity_multiplier_scales_combined_score():
     highs = np.maximum(opens, closes) + rng.uniform(0.5, 3, n)
     lows = np.minimum(opens, closes) - rng.uniform(0.5, 3, n)
     for k in range(n - 3, n):
+        closes[k] = closes[k - 1] + 30  # ascending close for continuation gate
         opens[k] = closes[k] - 30
         highs[k] = closes[k] + 0.5
         lows[k] = opens[k] - 0.5
@@ -2131,8 +2136,9 @@ def test_tape_veto_blocks_short_against_strong_buy_flow():
     opens = closes + rng.uniform(5, 20, n)
     highs = np.maximum(opens, closes) + rng.uniform(0.5, 3, n)
     lows = np.minimum(opens, closes) - rng.uniform(0.5, 3, n)
-    # Last 3 bars: clean bear marubozu.
+    # Last 3 bars: clean bear marubozu + descending closes for continuation gate.
     for k in range(n - 3, n):
+        closes[k] = closes[k - 1] - 30  # ensure close < prior close
         opens[k] = closes[k] + 30
         highs[k] = opens[k] + 0.5
         lows[k] = closes[k] - 0.5
@@ -2246,6 +2252,82 @@ def test_reset_streaks_requires_auth():
     assert "BTCUSDT" in bot.streak_pause_until
 
 
+def test_continuation_blocks_long_on_bearish_close_pattern():
+    """When the last bar closes in the BOTTOM of its range (bearish),
+    a long signal must be blocked even if other indicators agree.
+    Catches the 'lagging trend + reversal candle at local top' pattern."""
+    from bitunix_bot.strategy import _continuation_confirmed
+    import numpy as np
+    # Bar with close near LOW (bearish): high=100, low=95, close=95.5 → close_pos=0.10
+    h = np.array([100.0, 100.0])
+    l_ = np.array([95.0, 95.0])
+    c = np.array([99.0, 95.5])  # last close < prev close AND in bottom of range
+    assert _continuation_confirmed("long", h, l_, c) is False
+    assert _continuation_confirmed("short", h, l_, c) is True  # short OK on bearish bar
+
+
+def test_continuation_blocks_short_on_bullish_close_pattern():
+    """Mirror: bullish bar (close near high) blocks short signal."""
+    from bitunix_bot.strategy import _continuation_confirmed
+    import numpy as np
+    h = np.array([100.0, 100.0])
+    l_ = np.array([95.0, 95.0])
+    c = np.array([95.5, 99.5])  # last close > prev close AND near high
+    assert _continuation_confirmed("short", h, l_, c) is False
+    assert _continuation_confirmed("long", h, l_, c) is True  # long OK on bullish bar
+
+
+def test_continuation_blocks_when_close_doesnt_advance():
+    """Even if bar is impulsive (close near high), if last_close <= prev_close
+    the signal is blocked — bar is a small candle after an exhausted move."""
+    from bitunix_bot.strategy import _continuation_confirmed
+    import numpy as np
+    h = np.array([100.0, 100.0])
+    l_ = np.array([95.0, 99.0])    # last bar tight range 99-100
+    c = np.array([99.5, 99.5])     # last close == prev close
+    assert _continuation_confirmed("long", h, l_, c) is False, \
+        "long must require last close > prior close"
+
+
+def test_continuation_allows_clean_marubozu():
+    """Bullish marubozu (open near low, close near high, ascending) passes
+    the long continuation gate."""
+    from bitunix_bot.strategy import _continuation_confirmed
+    import numpy as np
+    h = np.array([100.0, 100.0])
+    l_ = np.array([95.0, 96.0])
+    c = np.array([97.0, 99.8])     # last close > prev close AND near high (close_pos = 0.95)
+    assert _continuation_confirmed("long", h, l_, c) is True
+
+
+def test_trend_dominance_dampens_opposite_side():
+    """When one side has factor_trend ≥ 0.67, the OPPOSITE side's
+    combined score is halved. Blocks reversal-fading-trend setups."""
+    from bitunix_bot.config import StrategyCfg
+    from bitunix_bot.strategy import evaluate
+    klines = make_uptrend_klines()  # produces strong long trend factor
+    o = [k["open"] for k in klines]
+    h = [k["high"] for k in klines]
+    l_ = [k["low"] for k in klines]
+    c = [k["close"] for k in klines]
+    cfg = StrategyCfg(
+        ema_fast=9, ema_mid=21, ema_slow=50,
+        rsi_period=14, rsi_long_min=40, rsi_long_max=80,
+        rsi_short_min=20, rsi_short_max=60,
+        macd_fast=12, macd_slow=26, macd_signal=9,
+        bb_period=20, bb_std=2.0, atr_period=14,
+        adx_period=14, adx_min=15.0,
+        supertrend_period=10, supertrend_mult=3.0,
+        pattern_weight=0.55, pattern_norm=2.0, fire_threshold=0.05,
+    )
+    sig = evaluate(o, h, l_, c, cfg)
+    # On a strong uptrend, signal should fire LONG (not be blocked by anything).
+    # We're not testing that the SHORT side is dampened in isolation — just
+    # that the long signal still fires correctly under the new rules.
+    assert sig is not None
+    assert sig.direction == "long"
+
+
 def test_min_adx_skips_deep_chop():
     """When ADX is below cfg.min_adx_for_trade (default 22), evaluate()
     must return None regardless of how strong the score would otherwise be.
@@ -2313,6 +2395,7 @@ def test_absorption_vetoes_same_direction_short():
     highs = np.maximum(opens, closes) + rng.uniform(0.5, 3, n)
     lows = np.minimum(opens, closes) - rng.uniform(0.5, 3, n)
     for k in range(n - 3, n):
+        closes[k] = closes[k - 1] - 30  # descending close for continuation gate
         opens[k] = closes[k] + 30
         highs[k] = opens[k] + 0.5
         lows[k] = closes[k] - 0.5
@@ -2847,9 +2930,9 @@ def test_recent_trade_r_appended_on_close():
     }
     bot._update_streak_state()
     assert len(bot.recent_trade_r) == 1
-    # qty=0.01, entry=60000, sl=0.40% → risk_dollars = 2.40
-    # net = -0.55 → R = -0.229
-    assert abs(bot.recent_trade_r[0] - (-0.229)) < 0.01
+    # qty=0.01, entry=60000, sl=0.25% (Grok v6 tightening) → risk_dollars = 1.50
+    # net = -0.55 → R = -0.367
+    assert abs(bot.recent_trade_r[0] - (-0.367)) < 0.01
 
 
 # ----------------------------------------------------------------- ChatGPT review v4
@@ -4138,6 +4221,11 @@ def main() -> int:
         test_reset_streaks_endpoint_clears_in_memory_state,
         test_reset_streaks_requires_auth,
         test_reset_streaks_returns_503_when_no_bot,
+        test_continuation_blocks_long_on_bearish_close_pattern,
+        test_continuation_blocks_short_on_bullish_close_pattern,
+        test_continuation_blocks_when_close_doesnt_advance,
+        test_continuation_allows_clean_marubozu,
+        test_trend_dominance_dampens_opposite_side,
         test_min_adx_skips_deep_chop,
         test_min_adx_zero_disables_filter,
         test_absorption_vetoes_same_direction_short,

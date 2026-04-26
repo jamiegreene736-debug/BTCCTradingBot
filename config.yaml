@@ -75,15 +75,16 @@ trading:
 
 risk:
   # STOP LOSS — % of entry price.
-  # Widened from 0.25% → 0.40% as a structural fee reduction. Math:
-  #   notional = risk / sl_pct, fee = fee_pct × notional.
-  #   Halving sl_pct doubles notional, doubling fees per trade.
-  #   Going from 0.25% → 0.40% SL cuts notional from $184 → $115 on $46
-  #   account at 1% risk, dropping per-trade fees from $0.31 → $0.15.
-  #   Round-trip fee as % of risk budget: was 67%, now 33%. Big win.
-  # Also: 0.25% was inside typical 1m ATR for ETH/SOL/XRP, getting stopped
-  # out on bar-internal noise. 0.40% sits cleanly outside chop bands.
-  stop_loss_pct: 0.40
+  # Tightened back to 0.25% (Grok review v6) after live data showed:
+  # - 0.40% SL is 14-16× ATR for low-vol coins (XRP ATR ~0.024%)
+  # - Trades that DID hit SL took 6+ minutes via stale-exit (not real SL)
+  # - Tight SL with continuation-confirmation gate cuts losers fast on
+  #   bad entries instead of sitting through 6-min stale exits
+  # Risk-per-trade economics: $46 × 0.75% = $0.345 risk. Notional now
+  # = $0.345 / 0.0025 = $138 (was $115 at 0.4% SL). Slightly higher
+  # notional means slightly higher fees, but offset by faster bad-trade
+  # exits. Net expected value should improve.
+  stop_loss_pct: 0.25
   # TAKE PROFIT — R-multiple of SL distance.
   # 2.5R kept (drops breakeven from ~75% at 1.5R to ~38% at 0.40%×2.5R after
   # maker fees). With wider SL the TP target in price terms becomes 1.00%
@@ -97,7 +98,7 @@ risk:
   # widens the stop so we don't get wicked out by the regime that just
   # changed. Risk-per-trade stays constant; notional auto-adjusts.
   use_atr: true
-  atr_multiplier_sl: 1.2    # k × ATR% = SL pct in vol regimes
+  atr_multiplier_sl: 1.0    # k × ATR% = SL pct in vol regimes
   atr_multiplier_tp: 4.0    # legacy; TP now derives from effective SL × take_profit_r
   # Dynamic SL — once price moves in your favor, ratchet the SL forward to
   # lock in profit. The "give-back" killer for high-leverage scalping.
@@ -220,7 +221,7 @@ strategy:
   # showed the bot firing 0.64+ scores at ADX 15-20 and bleeding via 6-min
   # stale exits. In deep chop, confluence agreement DOESN'T predict direction.
   # 22 = lower bound of neutral/trending. Set to 0 to disable.
-  min_adx_for_trade: 22.0
+  min_adx_for_trade: 25.0
 
 loop:
   tick_seconds: 10
