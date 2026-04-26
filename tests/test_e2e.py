@@ -125,6 +125,18 @@ def fresh_cfg():
     # Disable post-signal ticker confirmation for fixture tests (most don't
     # mock ticker; specific confirmation tests set this explicitly).
     cfg.strategy.confirm_with_ticker = False
+    # Restore multi-symbol + multi-position defaults that pre-existed the
+    # ChatGPT review. Production config.yaml is now BTCUSDT-only with
+    # max_open_positions=1 and use_post_only_entries=true, but most tests
+    # were written against the original loose defaults — preserve them
+    # here so each test doesn't need to re-override.
+    cfg.trading.symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
+    cfg.trading.max_open_positions = 4
+    cfg.trading.max_same_direction = 2
+    cfg.trading.use_post_only_entries = False
+    cfg.trading.cooldown_seconds = 60
+    cfg.risk.partial_tp_enabled = True
+    cfg.risk.take_profit_r = 2.5
     return cfg
 
 
@@ -2847,16 +2859,23 @@ def test_ticker_confirmation_drops_when_ticker_fetch_fails():
         f"expected ticker-confirmation skip; got {[s['text'] for s in skips]}"
 
 
-def test_post_only_entries_disabled_by_default():
-    """Default cfg.trading.use_post_only_entries=false (Grok v8) means
-    new entries go straight to MARKET — no maker post-only path."""
+def test_post_only_entries_enabled_in_production_yaml():
+    """Production config.yaml sets use_post_only_entries=true (ChatGPT
+    review). Tests using fresh_cfg() get a loose override, but the YAML
+    file itself must enable maker entries by default."""
+    cfg = load("config.yaml", "/dev/null")
+    assert cfg.trading.use_post_only_entries is True, \
+        "post-only entries must be ENABLED in production config.yaml"
+
+
+def test_post_only_disabled_explicit_routes_to_market():
+    """When a caller explicitly sets use_post_only_entries=False (e.g. in
+    tests), entries go straight to MARKET — no maker post-only path."""
     reset_state()
     cfg = fresh_cfg()
     cfg.mode = "live"
     cfg.trading.symbols = ["BTCUSDT"]
-    # Production default loaded from config.yaml — should be False.
-    assert cfg.trading.use_post_only_entries is False, \
-        "post-only entries must be DISABLED by default after Grok v8"
+    cfg.trading.use_post_only_entries = False  # explicit opt-out
     bot = BitunixBot(cfg)
     bot.client = make_mock_client()
     bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
@@ -2866,7 +2885,7 @@ def test_post_only_entries_disabled_by_default():
     bot.client.place_order.assert_called()
     kw = bot.client.place_order.call_args.kwargs
     assert kw["order_type"] == "MARKET", \
-        f"expected MARKET entry under v8 default; got {kw.get('order_type')}"
+        f"expected MARKET entry with explicit opt-out; got {kw.get('order_type')}"
     assert "BTCUSDT" not in bot.pending_limits
 
 

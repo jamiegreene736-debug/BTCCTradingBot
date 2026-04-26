@@ -4,13 +4,17 @@
 mode: live               # paper | live  (paper never sends orders)
 
 trading:
-  symbols:               # universe — bot evaluates and trades each independently
+  # ChatGPT review (gpt-5): trade BTCUSDT only while validating maker-first
+  # logic on the deepest book. Add ETH/SOL/XRP back AFTER realized PnL turns
+  # positive on BTC. Adding wider-spread alts before that point amplifies
+  # the same fee-drag problem on shallower books.
+  symbols:
     - BTCUSDT
-    - ETHUSDT
-    - SOLUSDT
-    - XRPUSDT
   timeframe: 1m          # 1m / 5m / 15m / 30m / 1h / 2h / 4h
-  leverage: 25           # 25x — pro scalper sweet spot. NOTE on misconception:
+  # ChatGPT review (gpt-5): leverage 25 → 10. Lower leverage on a $35 account
+  # cuts fee-bite as percent of margin while keeping liquidation buffer wide.
+  # The maker fee improvement is the bigger lever; this is supporting.
+  leverage: 10           # 10x — was 25x — pro scalper sweet spot. NOTE on misconception:
                          # lowering leverage does NOT cut fees. Fees scale with
                          # NOTIONAL (= risk_per_trade / sl_pct), which is
                          # leverage-independent at fixed risk. A trade at 50x
@@ -37,10 +41,13 @@ trading:
   # smaller per-trade footprint while it earns back trust. Compounds with
   # conviction_mult (0.7-1.5) and dd_risk_mult (1.0-0.0) as before.
   risk_per_trade_pct: 0.75
-  max_open_positions: 4         # global cap; total across all symbols
+  # ChatGPT review (gpt-5): max_open_positions 4 → 1, cooldown 60 → 180.
+  # Concurrency multiplies fees and variance on a $35 account; one clean
+  # position at a time. 3-min cooldown chokes off churn on noise.
+  max_open_positions: 1         # was 4 — global cap; total across all symbols
   max_positions_per_symbol: 1   # never pyramid into the same trade
   max_same_direction: 2         # max concurrent LONGs (or SHORTs) — anti-correlation
-  cooldown_seconds: 60          # min seconds between trades on same symbol
+  cooldown_seconds: 180         # was 60 — chokes churn on noise
   # Force-close stale positions. Trades that sit in a range for hours are
   # dead capital paying funding fees. 90 min is the industry norm for 1m
   # scalping — long enough that valid TP setups still resolve, short
@@ -65,14 +72,15 @@ trading:
   # At 50x with 0.25% SL, a 0.05% adverse spread eats 20% of risk budget
   # on entry alone. Wide spreads = bad time to enter.
   max_entry_spread_pct: 0.05
-  # Post-only maker entries: DISABLED per Grok review v8.
-  # Live data showed maker entries introducing systematic adverse
-  # selection: a long limit at the bid only fills when sellers cross
-  # down to it = price moving DOWN = adverse for the long. The fee
-  # savings (~0.04% per round-trip) aren't worth the worse fill prices.
-  # Combined with the new post-signal ticker confirmation (Grok #1),
-  # market orders give us speed when we've already validated the move.
-  use_post_only_entries: false
+  # ChatGPT review (gpt-5): RE-ENABLED. The Grok v8 argument (adverse
+  # selection on maker entries) was right in spirit but wrong on the
+  # arithmetic for a $35 account: market round-trip fees of 0.117% are
+  # 0.468R against a 0.25% SL — the bot can't even cover fees, let alone
+  # profit. Maker entries cut fees to ~0.04% per side, dropping fee-R to
+  # ~0.16R. Bot already does post-only with skip-if-not-filled (no market
+  # fallback) — see _check_pending_limits in bot.py. If the bid wasn't
+  # hit, the signal failed; trust the next one.
+  use_post_only_entries: true   # was false (Grok v8) — reverted per ChatGPT
   post_only_timeout_secs: 8
 
 risk:
@@ -88,12 +96,13 @@ risk:
   # exits. Net expected value should improve.
   stop_loss_pct: 0.25
   # TAKE PROFIT — R-multiple of SL distance.
-  # 2.5R kept (drops breakeven from ~75% at 1.5R to ~38% at 0.40%×2.5R after
-  # maker fees). With wider SL the TP target in price terms becomes 1.00%
-  # (was 0.625%) — still well within typical 1m directional moves on alts.
-  # Adaptive TP ladder still tightens over time (5/10/20/40-min tiers) so
-  # flat trades settle at the 0.7R fee-aware floor rather than time-exiting.
-  take_profit_r: 2.5
+  # ChatGPT review (gpt-5): 2.5R is fantasy on 1m given live max-favor
+  # distribution (median 0.07R, p75 ~0.10R, max 0.23R across 89 trades).
+  # Drop to 1R so TP is reachable. With maker fees ~0.08% round-trip and
+  # SL 0.25%, fee-R is ~0.32R; 1R - 0.32R = 0.68R net on each TP hit.
+  # Compounded with fewer-but-better entries (fire_threshold 0.60), the
+  # math actually works at this account size.
+  take_profit_r: 1.0     # was 2.5
   # ATR-aware SL hybrid. When use_atr=true, SL distance is the MAX of the
   # fixed `stop_loss_pct` floor and `atr_multiplier_sl × ATR%`. In calm
   # markets the floor binds (tight SL); in vol expansion ATR binds and
@@ -105,15 +114,12 @@ risk:
   # Dynamic SL — once price moves in your favor, ratchet the SL forward to
   # lock in profit. The "give-back" killer for high-leverage scalping.
   #
-  # At +0.5R favorable: SL moves to entry + buffer (trade becomes "free").
-  # At +1.0R favorable: SL starts trailing 0.5R behind current price.
-  #
-  # Lowered from 1.0 / 1.5 (Grok review v9): live data showed median max-favor
-  # of 0.07R across 89 trades — almost no trade ever reached the old 1R BE
-  # threshold, so SL never ratcheted and every trade either hit stop or
-  # stale-exited. Bringing BE in to 0.5R locks in winners as soon as the move
-  # actually develops; trailing at 1R lets confirmed runners breathe.
-  breakeven_at_r: 0.5
+  # ChatGPT review (gpt-5): BE 0.5 → 0.30R. With take_profit_r now 1.0R,
+  # the BE/TP ladder needs to come in proportionally. 0.30R BE captures
+  # winners that show life without waiting for the move that rarely comes.
+  # Trailing kept at 1.0R since that's now equal to TP — effectively a
+  # belt-and-suspenders catch if the take-profit limit gets jumped.
+  breakeven_at_r: 0.30   # was 0.5 — earlier BE for shorter-target regime
   breakeven_buffer_pct: 0.05    # tiny cushion above entry to cover round-trip fees
   trailing_activate_r: 1.0
   trailing_distance_r: 0.5
@@ -131,11 +137,12 @@ risk:
   # them time-exit at a loss. Tier ladder is hard-coded in risk.py.
   adaptive_tp_enabled: true
   adaptive_tp_floor_r: 0.7      # minimum profitable TP after fees
-  # Partial TP at +1R — close 50% of position when SL ratchets to break-even.
-  # Locks in a fee-clearing profit on half the position, lets the runner ride
-  # to the full 2.5R target. Standard "scale-out + runner" technique that pro
-  # scalpers use to raise effective win rate without giving up R-multiple.
-  partial_tp_enabled: true
+  # ChatGPT review (gpt-5): DISABLED. Partials multiply fills/fees on a
+  # small account. With take_profit_r now 1.0, the full position closes at
+  # the partial-TP point anyway — no scale-out benefit, just an extra
+  # round-trip fee to skim half. Re-enable only after maker TP fills are
+  # reliably tracked end-to-end.
+  partial_tp_enabled: false   # was true
   partial_tp_at_r: 1.0
   partial_tp_close_pct: 50.0
   # Stale-trade exit (Grok v9 — relaxed from 6 min / 0.5R). The old aggressive
@@ -143,9 +150,15 @@ risk:
   # score trade hit max_favor=0.012R then got stale-killed at 6 min — never
   # had a chance. 12 min gives signals time to actually unfold; 0.2R floor
   # only kills genuinely dead trades that drifted sideways with zero conviction.
+  # ChatGPT review (gpt-5): 12m / 0.2R was too lenient. With take_profit_r
+  # now 1.0R and BE at 0.30R, a trade that hasn't put on 0.15R of favor in
+  # 3 minutes has clearly missed the move — bail cheaply (maker scratch
+  # would be ideal; current code uses flash_close which is taker exit).
+  # Kept short to free the slot for the next signal; the 180s cooldown
+  # prevents immediate re-entry on the same bar.
   stale_exit_enabled: true
-  stale_exit_min: 12.0
-  stale_exit_max_favor_r: 0.2
+  stale_exit_min: 3.0           # was 12 (Grok v9) — back to short
+  stale_exit_max_favor_r: 0.15  # was 0.2 — tighter no-edge floor
 
 strategy:
   # 23 indicator votes + 30 patterns + 5 combo recipes. The combined score
@@ -223,24 +236,15 @@ strategy:
   # for confluence (multi-bar shapes aggregate price action).
   pattern_weight: 0.60
   pattern_norm: 2.0      # 2 mid-strength patterns = saturation
-  # Tightened to 0.50 after reviewing 24-trade live results: the previous
-  # 0.30 threshold produced ~3 trades/hour with 17% win rate. Most losses
-  # were time-exits on weak signals oscillating in chop. At 0.50 we require
-  # genuine consensus — either 2+ strong patterns OR ~12 of 23 indicators
-  # OR a mid pattern + strong indicator confluence. Fewer trades, higher
-  # conviction, less fee drag.
-  # Relaxed 0.50 → 0.42 — Grok v8 ticker confirmation + continuation gate
-  # already filter out exhaustion fades downstream, so the score gate can
-  # be looser. Previous 0.50 + v8 stack produced 0 fills in 26 min.
-  fire_threshold: 0.42
-  # Hard ADX floor — don't trade when below this. Live drawdown analysis
-  # showed the bot firing 0.64+ scores at ADX 15-20 and bleeding via 6-min
-  # stale exits. In deep chop, confluence agreement DOESN'T predict direction.
-  # 22 = lower bound of neutral/trending. Set to 0 to disable.
-  # Relaxed 25 → 20 — pairing with Grok v8 ticker confirmation: live
-  # follow-through proves direction better than ADX alone. ADX 25 was
-  # silently dropping ~80% of candidates before they could even score.
-  min_adx_for_trade: 20.0
+  # ChatGPT review (gpt-5): RAISE both thresholds. Previous 0.42 / ADX 20
+  # was meant to "make it trade" but the resulting trades had no edge
+  # (median max-favor 0.07R, never reached 0.5R). Tighter filters paired
+  # with maker-first entries means fewer trades but each one with real
+  # momentum behind it — exactly what's needed to overcome the fee floor.
+  fire_threshold: 0.60   # was 0.42 — only strong-confluence setups
+  # ADX 26 = solid directional trend territory (vs 20 = chop+).
+  # Pairs with continuation gate + ticker confirmation downstream.
+  min_adx_for_trade: 26.0  # was 20.0
   # Post-signal ticker confirmation (Grok review v8). After signal fires,
   # fetch the live ticker price and require it to have moved in the trade
   # direction since the signal-bar close. Catches exhaustion-fade
