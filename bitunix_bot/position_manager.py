@@ -34,6 +34,32 @@ class PositionManager:
 
     def __init__(self, bot: "BitunixBot") -> None:
         self._bot = bot
+        # Per-position max favorable R seen so far. Used by the stale-trade
+        # early exit (cut trades that haven't moved in N minutes) and read
+        # by _tick when a position closes to record max_favor in the journal.
+        # Cleared via clear_position_state(pid) when a position disappears
+        # from pending_positions.
+        self.position_max_favor: dict[str, float] = {}
+        # Partial-TP tracking: positionId set of those that already had
+        # the +Nx partial close fired. Prevents double-firing.
+        self.partial_tp_done: set[str] = set()
+
+    # ------------------------------------------------------------------
+    # State accessors (used from bot.py during position-close cleanup
+    # and journal recording)
+    # ------------------------------------------------------------------
+
+    def get_max_favor(self, pid: str) -> float | None:
+        """Return the max favorable R seen on this position, or None
+        if never tracked."""
+        return self.position_max_favor.get(pid)
+
+    def clear_position_state(self, pid: str) -> None:
+        """Clear all per-position state when a position disappears
+        (closed via SL/TP/manual). Idempotent — safe to call on
+        already-cleared pids."""
+        self.position_max_favor.pop(pid, None)
+        self.partial_tp_done.discard(pid)
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -114,9 +140,9 @@ class PositionManager:
                     r_favor = (entry - current_price) / sl_distance
 
                 # Track per-position max favorable R for the stale-trade exit.
-                prev_max = bot.position_max_favor.get(pid, float("-inf"))
+                prev_max = self.position_max_favor.get(pid, float("-inf"))
                 if r_favor > prev_max:
-                    bot.position_max_favor[pid] = r_favor
+                    self.position_max_favor[pid] = r_favor
 
                 # Stale-trade early exit — if a position has aged past
                 # stale_exit_min without ever reaching stale_exit_max_favor_r,
@@ -127,7 +153,7 @@ class PositionManager:
                     ctime_ms_se = int(p.get("ctime") or 0)
                     age_min_se = (time.time() * 1000 - ctime_ms_se) / 60000.0 \
                                  if ctime_ms_se else 0
-                    max_seen = bot.position_max_favor.get(pid, r_favor)
+                    max_seen = self.position_max_favor.get(pid, r_favor)
                     if (age_min_se >= rk.stale_exit_min
                             and max_seen < rk.stale_exit_max_favor_r):
                         try:
@@ -180,10 +206,10 @@ class PositionManager:
 
                 # Partial TP at +1R favorable — close partial_tp_close_pct% of the
                 # position at market when r_favor first reaches partial_tp_at_r.
-                # Done ONCE per position; tracked in bot.partial_tp_done.
+                # Done ONCE per position; tracked in self.partial_tp_done.
                 if (rk.partial_tp_enabled
                         and r_favor >= rk.partial_tp_at_r
-                        and pid not in bot.partial_tp_done):
+                        and pid not in self.partial_tp_done):
                     partial_qty = qty * (rk.partial_tp_close_pct / 100.0)
                     step = meta.base_precision
                     n_steps = int(partial_qty / step) if step > 0 else 0
@@ -200,7 +226,7 @@ class PositionManager:
                                 reduce_only=True,
                                 client_id=f"ptp-{pid}",
                             )
-                            bot.partial_tp_done.add(pid)
+                            self.partial_tp_done.add(pid)
                             log.info("Partial TP fired %s: closed %s @ market (r=%.2f)",
                                      symbol, partial_qty_q, r_favor)
                             bot.state.record_order(
@@ -209,7 +235,7 @@ class PositionManager:
                             )
                         except BitunixError as e:
                             log.warning("Partial TP failed for %s: %s", symbol, e)
-                            bot.partial_tp_done.add(pid)  # avoid retry storm
+                            self.partial_tp_done.add(pid)  # avoid retry storm
 
                 # Decide new SL: trailing region wins over break-even region.
                 new_sl: float | None = None

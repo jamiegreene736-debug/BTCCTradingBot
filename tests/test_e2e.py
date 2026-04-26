@@ -3371,7 +3371,7 @@ def test_stale_exit_flattens_drifting_position():
     # Pre-seed max_favor at 0.1R (below 0.2R threshold) — drifted with no edge.
     # Live tick recomputes r_favor from current_price and only ratchets up,
     # so seed must match or be ≤ current r_favor (0.1R here).
-    bot.position_max_favor["POS1"] = 0.1
+    bot.position_manager.position_max_favor["POS1"] = 0.1
     bot._tick()
 
     bot.client.flash_close_position.assert_called_once_with("POS1")
@@ -3391,7 +3391,7 @@ def test_stale_exit_skipped_for_progressing_position():
         "ctime": int(time.time() * 1000) - 20 * 60_000,  # past 18-min floor
     }]
     # Position previously hit 0.4R favorable — has shown edge above 0.25R floor.
-    bot.position_max_favor["POS1"] = 0.4
+    bot.position_manager.position_max_favor["POS1"] = 0.4
     bot._tick()
 
     bot.client.flash_close_position.assert_not_called()
@@ -3408,7 +3408,7 @@ def test_stale_exit_skipped_for_young_position():
         **bot.client.pending_positions.return_value[0],
         "ctime": int(time.time() * 1000) - 5 * 60_000,
     }]
-    bot.position_max_favor["POS1"] = 0.1
+    bot.position_manager.position_max_favor["POS1"] = 0.1
     bot._tick()
 
     bot.client.flash_close_position.assert_not_called()

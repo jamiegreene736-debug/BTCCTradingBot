@@ -108,13 +108,10 @@ class BitunixBot:
         self._cascade_active: bool = False
         self._cascade_clear_at: float = 0.0
         self._cascade_check_at: float = 0.0
-        # Partial-TP tracking: positionId set of those that already had
-        # the +1R partial close fired. Prevents double-firing.
-        self.partial_tp_done: set[str] = set()
-        # Per-position max favorable R seen so far. Used by the stale-trade
-        # early exit (cut trades that haven't moved in N minutes). Cleared
-        # passively as positions disappear from pending_positions.
-        self.position_max_favor: dict[str, float] = {}
+        # Per-position state (position_max_favor, partial_tp_done) lives in
+        # PositionManager.* (Grok holistic review state migration). External
+        # access via bot.position_manager.get_max_favor(pid) /
+        # clear_position_state(pid). Init happens inside PositionManager.
         # Post-only entry tracking: symbol_u -> dict with order_id, place_ts, plan.
         # When a limit hits and a position appears, entry is removed. When the
         # timeout expires without a fill, the limit is cancelled and a market
@@ -450,15 +447,14 @@ class BitunixBot:
                 exit_price=exit_px,
                 exit_reason=exit_reason,
                 hold_time_sec=hold_sec,
-                max_favor_r=self.position_max_favor.get(pid_closed),
+                max_favor_r=self.position_manager.get_max_favor(pid_closed),
                 net_pnl=net,
                 realized_pnl=realized,
                 fee=fee,
                 funding=funding,
             )
             # Clear per-position state — the position is gone.
-            self.position_max_favor.pop(pid_closed, None)
-            self.partial_tp_done.discard(pid_closed)
+            self.position_manager.clear_position_state(pid_closed)
             if is_flat:
                 # Flat (BE-ratchet-then-reversal pattern, or other near-zero
                 # exits): don't touch streak counters in either direction.
