@@ -285,7 +285,7 @@ def build_order(
     # capped to 60%).
     sl_pct_for_fee = max(0.001, risk.stop_loss_pct)
     fee_burden_r = risk.round_trip_fee_pct / sl_pct_for_fee
-    fee_reserve_frac = min(0.6, fee_burden_r)
+    fee_reserve_frac = min(0.4, fee_burden_r)  # was 0.6 — leaves 60% of budget for sizing
     risk_usdt_after_fees = risk_usdt * (1.0 - fee_reserve_frac)
     volume = risk_usdt_after_fees / stop_dist
 

@@ -67,16 +67,10 @@ class TradingCfg:
         "ETHUSDT":  0.85,
         "SOLUSDT":  0.70,
         "BNBUSDT":  0.80,
-        "ADAUSDT":  0.75,
-        "XRPUSDT":  0.70,
-        "DOGEUSDT": 0.65,
         "LINKUSDT": 0.80,
         "AVAXUSDT": 0.75,
-        "POLUSDT":  0.80,
-        "DOTUSDT":  0.75,
         "LTCUSDT":  0.85,
         "UNIUSDT":  0.80,
-        "TRXUSDT":  0.90,
         "BCHUSDT":  0.80,
     })
     # Minimum top-5 book depth (base-coin units) per symbol — thin-book
@@ -97,16 +91,10 @@ class TradingCfg:
         "ETHUSDT":   40.0,
         "SOLUSDT":   250.0,
         "BNBUSDT":   20.0,
-        "ADAUSDT":   3000.0,
-        "XRPUSDT":   10000.0,
-        "DOGEUSDT":  100000.0,
         "LINKUSDT":  1000.0,
         "AVAXUSDT":  500.0,
-        "POLUSDT":   5000.0,
-        "DOTUSDT":   1000.0,
         "LTCUSDT":   100.0,
         "UNIUSDT":   1000.0,
-        "TRXUSDT":   50000.0,
         "BCHUSDT":   10.0,
     })
 

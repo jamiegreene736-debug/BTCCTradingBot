@@ -4,24 +4,17 @@
 mode: live               # paper | live  (paper never sends orders)
 
 trading:
-  # Expanded to 15 symbols (phase 1 + phase 2) per Grok multi-coin review.
-  # Phase 1: BNBUSDT, ADAUSDT, XRPUSDT, DOGEUSDT, LINKUSDT
-  # Phase 2: AVAXUSDT, MATICUSDT, DOTUSDT, LTCUSDT, UNIUSDT, TRXUSDT, BCHUSDT
+  # 9 symbols viable on a $35 account — Grok cut DOGE/TRX/ADA/XRP/POL/DOT
+  # as their Bitunix minimums exceed position sizes at current risk settings.
   symbols:
     - BTCUSDT
     - ETHUSDT
     - SOLUSDT
     - BNBUSDT
-    - ADAUSDT
-    - XRPUSDT
-    - DOGEUSDT
     - LINKUSDT
     - AVAXUSDT
-    - POLUSDT
-    - DOTUSDT
     - LTCUSDT
     - UNIUSDT
-    - TRXUSDT
     - BCHUSDT
   # Grok holistic review: shifted 1m → 15m. 1m is too noisy for confluence-
   # based scalping — lagging indicators (EMA/MACD/Supertrend) systematically
@@ -55,12 +48,11 @@ trading:
                          # (BTC 200x, ETH 100x, SOL/XRP 75x) all permit 25x.
   margin_coin: USDT
   margin_mode: ISOLATION # ISOLATION isolates loss per position; CROSS shares margin
-  # Temporarily reduced 1.0 → 0.75 while equity curve stabilizes. With the
-  # factor-group scoring + adaptive self-defense + 5 stacked exit pathways
-  # now in place, the bot's character is meaningfully different — give it a
-  # smaller per-trade footprint while it earns back trust. Compounds with
-  # conviction_mult (0.7-1.5) and dd_risk_mult (1.0-0.0) as before.
-  risk_per_trade_pct: 0.75
+  # Raised 0.75 → 2.0 per Grok volume-fix review. At 0.75% the fee reserve
+  # (60% cap) + structure-anchored SL pushed calculated volumes below Bitunix
+  # minimums on every signal. 2.0% gives ~$0.28 post-reserve on $34 margin,
+  # enough to clear min sizes for all 9 remaining symbols.
+  risk_per_trade_pct: 2.0
   # Grok review: bump to 2 to allow concurrent positions on the broader
   # symbol set [BTC, ETH, SOL]. Cooldown stays at 180s per-symbol so one
   # signal can't keep firing on the same pair, but two different pairs
@@ -162,7 +154,7 @@ risk:
   #   ≈ 0.7 × 0.10% + 0.3 × 0.13% + 0.04% ≈ 0.15%
   # The bot guarantees TP will always be at least adaptive_tp_floor_r × SL
   # distance which exceeds this fee buffer, so winning trades ALWAYS net.
-  round_trip_fee_pct: 0.15
+  round_trip_fee_pct: 0.10    # was 0.15 — Bitunix maker fees ~0.08%; 0.15 was overcounting
   # Adaptive TP — as a position ages without hitting the original target,
   # tighten the TP progressively. We always aim for profit (TP stays above
   # fee floor), but accept smaller wins on flat trades rather than letting
