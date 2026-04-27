@@ -34,13 +34,14 @@ PING_INTERVAL = 15.0
 RECONNECT_BACKOFF_SECS = 5.0
 # If no messages received for this long, the connection looks dead even though
 # the socket may report itself open. Force a reconnect.
-SILENCE_TIMEOUT_SECS = 60.0
-# Bitunix's `depth_books` channel sends a SNAPSHOT once per subscription
-# rather than continuous updates. To get fresh book data, we re-subscribe
-# every RESUBSCRIBE_INTERVAL_SECS seconds. Diagnosed from /api/feeds/status:
-# initial connect produces 4 book updates, then silence on depth while the
-# trade feed keeps streaming normally.
-RESUBSCRIBE_INTERVAL_SECS = 5.0
+# Lowered 60 → 30: depth_books is snapshot-only so the socket goes quiet after
+# the initial snapshot; 30s catches dead connections sooner.
+SILENCE_TIMEOUT_SECS = 30.0
+# Periodic re-subscribe DISABLED. Sending subscribe every 5s was triggering
+# Bitunix's server-side spam/rate-limit protection (~7-8 ops per 40s session),
+# causing forced disconnects every ~40s. The trade tape WS (same server, no
+# re-subscribe) is stable. Subscribe once on connect only.
+RESUBSCRIBE_INTERVAL_SECS = 0.0
 
 
 @dataclass
@@ -217,9 +218,16 @@ class OrderBookFeed:
         except json.JSONDecodeError:
             self._unparseable_count += 1
             return
-        # Heartbeat reply: ignore.
+        # Heartbeat reply: ignore silently.
         if isinstance(msg, dict) and msg.get("op") == "pong":
             self._pong_count += 1
+            return
+        # Server-initiated ping — ignore silently (server echoes our pings back
+        # and also sends its own keepalive pings; both are normal, not errors).
+        if isinstance(msg, dict) and msg.get("op") == "ping":
+            return
+        # Initial connection ack — ignore silently.
+        if isinstance(msg, dict) and msg.get("op") == "connect":
             return
         # Subscribe ack — promote to INFO so we see it in production logs.
         if isinstance(msg, dict) and msg.get("op") == "subscribe":
@@ -265,18 +273,17 @@ class OrderBookFeed:
                  self._disconnect_count, args[:2] if args else "")
 
     def _pinger(self) -> None:
-        """Combined heartbeat + watchdog + periodic re-subscription thread.
+        """Heartbeat + silence watchdog thread.
 
         Wakes on a tight 1s loop and decides per-tick:
-          - Ping every PING_INTERVAL seconds (15s default)
-          - Re-subscribe every RESUBSCRIBE_INTERVAL_SECS seconds (5s default)
-            because Bitunix's depth_books channel sends a single snapshot
-            per subscription, NOT continuous updates. Without re-subscribe
-            the books go stale ~30s after connect.
+          - Ping every PING_INTERVAL seconds to keep connection alive.
           - Watchdog: silence > SILENCE_TIMEOUT_SECS forces reconnect.
+
+        Re-subscribe removed: sending repeated subscribe ops to depth_books
+        was triggering Bitunix server-side spam protection and causing forced
+        disconnects every ~40s. Subscribe once on connect only.
         """
         last_ping = time.time()
-        last_resub = time.time()
         while not self._stop.is_set():
             time.sleep(1.0)  # tight wake; per-action timers below
             if self._stop.is_set() or not self._ws:
@@ -303,19 +310,6 @@ class OrderBookFeed:
                                                "ping": int(now)}))
                 except Exception:
                     return  # connection dead; _run will reconnect
-
-            # Re-subscribe to refresh book snapshots.
-            if now - last_resub >= RESUBSCRIBE_INTERVAL_SECS:
-                last_resub = now
-                sub_msg = {
-                    "op": "subscribe",
-                    "args": [{"symbol": s, "ch": CHANNEL} for s in self.symbols],
-                }
-                try:
-                    self._ws.send(json.dumps(sub_msg))
-                except Exception as e:
-                    log.warning("OB WS re-subscribe send failed: %s", e)
-                    return
 
     # ------------------------------------------------------------------ parsing
 
