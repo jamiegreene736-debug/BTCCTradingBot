@@ -270,7 +270,7 @@ strategy:
   # trend at any given hour even when others chop.
   # Grok diagnosis: ADX was the silent blocker (no skip logged, just returns None).
   # 30 still too high in ranging crypto market; 20 = standard weak-trend threshold.
-  min_adx_for_trade: 15.0  # was 20.0 — Grok 2026-04-27: ADX<20 on Sundays blocks most setups
+  min_adx_for_trade: 0.0   # disabled — was blocking ALL signals silently (no skip logged); regime-adaptive threshold handles chop
   # Post-signal ticker confirmation (Grok review v8). After signal fires,
   # fetch the live ticker price and require it to have moved in the trade
   # direction since the signal-bar close. Catches exhaustion-fade

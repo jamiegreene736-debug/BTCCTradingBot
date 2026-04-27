@@ -917,6 +917,7 @@ class BitunixBot:
                 fire_threshold_override=adaptive_base,
             )
             if sig is None:
+                self.state.record_skip(f"{sym}: evaluate() returned None (ADX below min or insufficient data)")
                 continue
             sig_text = (f"{sym} {sig.direction.upper()} score={sig.score:.2f} "
                         f"(pat={sig.pattern_score:.1f}, "
