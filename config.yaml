@@ -48,16 +48,15 @@ trading:
                          # (BTC 200x, ETH 100x, SOL/XRP 75x) all permit 25x.
   margin_coin: USDT
   margin_mode: ISOLATION # ISOLATION isolates loss per position; CROSS shares margin
-  # Raised 0.75 → 2.0 per Grok volume-fix review. At 0.75% the fee reserve
-  # (60% cap) + structure-anchored SL pushed calculated volumes below Bitunix
-  # minimums on every signal. 2.0% gives ~$0.28 post-reserve on $34 margin,
-  # enough to clear min sizes for all 9 remaining symbols.
-  risk_per_trade_pct: 2.0
+  # Reverted 2.0 → 0.75 per Grok DD-halt review. 2.0% triggered the 8%
+  # daily DD circuit breaker within 19 minutes (2-3 losses = halt on $35).
+  # 0.75% allows 8-10 losses before hitting the breaker.
+  risk_per_trade_pct: 0.75
   # Grok review: bump to 2 to allow concurrent positions on the broader
   # symbol set [BTC, ETH, SOL]. Cooldown stays at 180s per-symbol so one
   # signal can't keep firing on the same pair, but two different pairs
   # can be in play simultaneously.
-  max_open_positions: 5         # was 2 — raised for 15-symbol set (Grok multi-coin review)
+  max_open_positions: 3         # was 5 — lowered per Grok DD-halt review; limits concurrent exposure on $35
   max_positions_per_symbol: 1   # never pyramid into the same trade
   max_same_direction: 3         # was 2 — raised to 3 to allow more utilisation across 15 symbols
   # 15m timeframe: 600s (10 min) cooldown — reverted from 900 per Grok filter-loosening review;

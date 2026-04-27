@@ -287,6 +287,14 @@ class PositionManager:
                         f"{symbol} SL {current_sl} → {new_sl_rounded} ({reason})"
                     )
                 except BitunixError as e_inner:
+                    if e_inner.code == 30028:
+                        # Price already moved past the intended SL — update is moot.
+                        # Original SL remains in place; position is still protected.
+                        log.info(
+                            "SL update moot for %s: price %.6f already past target %s (%s), ignoring",
+                            symbol, current_price, new_sl_rounded, reason,
+                        )
+                        continue
                     if e_inner.code != 30030:
                         raise
                     tick = 10 ** -meta.price_precision
