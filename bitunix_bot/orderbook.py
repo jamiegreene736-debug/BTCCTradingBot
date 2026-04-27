@@ -36,7 +36,7 @@ RECONNECT_BACKOFF_SECS = 5.0
 # the socket may report itself open. Force a reconnect.
 # Lowered 60 → 30: depth_books is snapshot-only so the socket goes quiet after
 # the initial snapshot; 30s catches dead connections sooner.
-SILENCE_TIMEOUT_SECS = 30.0
+SILENCE_TIMEOUT_SECS = 60.0
 # Periodic re-subscribe DISABLED. Sending subscribe every 5s was triggering
 # Bitunix's server-side spam/rate-limit protection (~7-8 ops per 40s session),
 # causing forced disconnects every ~40s. The trade tape WS (same server, no
@@ -222,9 +222,13 @@ class OrderBookFeed:
         if isinstance(msg, dict) and msg.get("op") == "pong":
             self._pong_count += 1
             return
-        # Server-initiated ping — ignore silently (server echoes our pings back
-        # and also sends its own keepalive pings; both are normal, not errors).
+        # Server-initiated ping — respond with pong to keep connection alive.
+        # Bitunix closes connections after ~50s if pong is not received.
         if isinstance(msg, dict) and msg.get("op") == "ping":
+            try:
+                ws.send(json.dumps({"op": "pong"}))
+            except Exception:
+                pass
             return
         # Initial connection ack — ignore silently.
         if isinstance(msg, dict) and msg.get("op") == "connect":

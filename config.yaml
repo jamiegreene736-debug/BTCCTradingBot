@@ -57,7 +57,7 @@ trading:
   max_same_direction: 3         # was 2 — raised to 3 to allow more utilisation across 15 symbols
   # 15m timeframe: 600s (10 min) cooldown — reverted from 900 per Grok filter-loosening review;
   # 900 was too conservative for a 15-symbol set.
-  cooldown_seconds: 600         # was 900 — reverted per Grok filter-loosening review
+  cooldown_seconds: 120         # was 600 — Grok 2026-04-27: drop to 120s for several trades/hour
   # Force-close stale positions. On 15m timeframe, 4 hours = 16 bars is the
   # window for a setup to resolve — beyond that the signal regime has
   # almost certainly shifted.
@@ -254,7 +254,7 @@ strategy:
   # quality. On 15m, indicators have room to develop and patterns are
   # higher-quality (multi-bar shapes are real structure). 0.30 makes
   # patterns supplement indicator confluence rather than override it.
-  pattern_weight: 0.0    # was 0.30 — patterns cut per Grok strategy review; combined = 100% factor score
+  pattern_weight: 0.30   # restored — Grok 2026-04-27: pat=2.2 boosted the one signal; 0.0 left score too low
   pattern_norm: 2.0      # 2 mid-strength patterns = saturation
   # Grok review (post-N=10 fills): tighten further. Recent fills showed
   # the 0.65-0.84 score range produced both the big winner (0.89, +$0.26)
@@ -264,13 +264,13 @@ strategy:
   # quality.
   # Grok diagnosis: 0.65 still too tight with low pattern_weight (0.30);
   # 0.60 ensures more setups pass without dropping below quality baseline.
-  fire_threshold: 0.80   # was 0.70 — only strongest signals to reduce fee drag
+  fire_threshold: 0.70   # was 0.80 — Grok 2026-04-27: 0.80 produced only 1 signal/3.5h; 0.70 targets 3-6/hr
   # ADX 35 = decisive directional move, not just trend territory. Pairs
   # with the broader symbol set: of 3 majors, usually one is in clean
   # trend at any given hour even when others chop.
   # Grok diagnosis: ADX was the silent blocker (no skip logged, just returns None).
   # 30 still too high in ranging crypto market; 20 = standard weak-trend threshold.
-  min_adx_for_trade: 20.0  # was 30.0 — loosened per Grok root-cause diagnosis
+  min_adx_for_trade: 15.0  # was 20.0 — Grok 2026-04-27: ADX<20 on Sundays blocks most setups
   # Post-signal ticker confirmation (Grok review v8). After signal fires,
   # fetch the live ticker price and require it to have moved in the trade
   # direction since the signal-bar close. Catches exhaustion-fade

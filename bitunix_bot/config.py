@@ -83,7 +83,7 @@ class TradingCfg:
     # 0 entries). Other symbols left at original calibration.
     symbol_min_depth: dict[str, float] = field(default_factory=lambda: {
         "BTCUSDT":  3.0,
-        "ETHUSDT":  40.0,
+        "ETHUSDT":  30.0,   # was 40.0 — Grok 2026-04-27: 40 too strict, blocks ETH on thin Sunday books
         "SOLUSDT":  250.0,
         "BNBUSDT":  20.0,
     })
