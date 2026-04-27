@@ -856,16 +856,19 @@ class BitunixBot:
             closes = [float(r["close"]) for r in rows]
 
             # Expansion-candle skip — when the most recent bar's range exceeds
-            # 2× ATR, the next bar is statistically a fakeout/continuation
+            # 2.5× ATR, the next bar is statistically a fakeout/continuation
             # trap. Big bars are usually news-driven or liquidation cascades
             # and the bot's confluence-based signals trigger a chase entry
             # right at the wrong moment. Skip the immediate next bar.
+            # Threshold raised 2.0→2.5 (Grok 2026-04-27): the 2.0× cutoff was
+            # blocking 100% of bars on thin Sunday markets where ATR multiples
+            # of 2.0-2.5× are normal, not extreme.
             atr_arr = atr_fn(np.array(highs), np.array(lows),
                              np.array(closes), self.cfg.strategy.atr_period)
             if len(atr_arr) > 0 and not np.isnan(atr_arr[-1]) and atr_arr[-1] > 0:
                 last_range = highs[-1] - lows[-1]
                 expansion_ratio = last_range / atr_arr[-1]
-                if expansion_ratio >= 2.0:
+                if expansion_ratio >= 2.5:
                     self.state.record_skip(
                         f"{sym}: expansion candle "
                         f"({expansion_ratio:.1f}× ATR), skip next bar"
