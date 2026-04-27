@@ -4,16 +4,25 @@
 mode: live               # paper | live  (paper never sends orders)
 
 trading:
-  # Grok review (post-N=10 fills): expand to majors. Tighter filters
-  # (fire_threshold 0.75, ADX 35) reduce per-symbol qualifying setups,
-  # so adding ETH and SOL maintains overall trade frequency. Liquidity
-  # filter (max_entry_spread_pct 0.10) blocks entries when alt spreads
-  # widen beyond healthy range. AVAX/LINK explicitly NOT added — too
-  # thin on Bitunix per Grok.
+  # Expanded to 15 symbols (phase 1 + phase 2) per Grok multi-coin review.
+  # Phase 1: BNBUSDT, ADAUSDT, XRPUSDT, DOGEUSDT, LINKUSDT
+  # Phase 2: AVAXUSDT, MATICUSDT, DOTUSDT, LTCUSDT, UNIUSDT, TRXUSDT, BCHUSDT
   symbols:
     - BTCUSDT
     - ETHUSDT
     - SOLUSDT
+    - BNBUSDT
+    - ADAUSDT
+    - XRPUSDT
+    - DOGEUSDT
+    - LINKUSDT
+    - AVAXUSDT
+    - MATICUSDT
+    - DOTUSDT
+    - LTCUSDT
+    - UNIUSDT
+    - TRXUSDT
+    - BCHUSDT
   # Grok holistic review: shifted 1m → 15m. 1m is too noisy for confluence-
   # based scalping — lagging indicators (EMA/MACD/Supertrend) systematically
   # confirm AFTER 1m moves resolve, picking exhaustion. 15m gives 4-15× the
@@ -56,13 +65,12 @@ trading:
   # symbol set [BTC, ETH, SOL]. Cooldown stays at 180s per-symbol so one
   # signal can't keep firing on the same pair, but two different pairs
   # can be in play simultaneously.
-  max_open_positions: 2         # was 1 (ChatGPT) — global cap across all symbols
+  max_open_positions: 5         # was 2 — raised for 15-symbol set (Grok multi-coin review)
   max_positions_per_symbol: 1   # never pyramid into the same trade
-  max_same_direction: 2         # max concurrent LONGs (or SHORTs) — anti-correlation
-  # 15m timeframe: 600s (10 min) cooldown, less than 1 bar so we still allow
-  # next-bar reentry on a different signal but never two trades inside the
-  # same 15m bar window.
-  cooldown_seconds: 600         # was 180 (1m timeframe) — scaled for 15m bars
+  max_same_direction: 3         # was 2 — raised to 3 to allow more utilisation across 15 symbols
+  # 15m timeframe: 900s (15 min) cooldown = 1 full bar, prevents re-entry
+  # on the same symbol within the bar that just fired.
+  cooldown_seconds: 900         # was 600 — scaled up for 15-symbol set
   # Force-close stale positions. On 15m timeframe, 4 hours = 16 bars is the
   # window for a setup to resolve — beyond that the signal regime has
   # almost certainly shifted.
@@ -269,9 +277,10 @@ strategy:
   # filters the bottom of that range; combined with the broader symbol
   # set (BTC + ETH + SOL), trade frequency stays similar with higher
   # quality.
-  # Grok rescan: tightened further 0.75 → 0.80 to filter the marginal
-  # 0.65-0.74 setups that were producing the recent batch of losses.
-  fire_threshold: 0.80   # was 0.75 (Grok holistic) — strongest setups only
+  # Grok multi-coin review: 0.80 → 0.75. More symbols = more signal
+  # opportunities; loosening threshold slightly captures the 0.75-0.79
+  # setups that were previously filtered but are viable at this quality.
+  fire_threshold: 0.75   # was 0.80 — relaxed for 15-symbol set
   # ADX 35 = decisive directional move, not just trend territory. Pairs
   # with the broader symbol set: of 3 majors, usually one is in clean
   # trend at any given hour even when others chop.

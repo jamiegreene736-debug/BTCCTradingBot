@@ -63,10 +63,21 @@ class TradingCfg:
     #   XRPUSDT — mid cap, ~0.70 corr, higher idiosyncratic vol → 0.70
     # Symbols not listed default to 1.0 (no adjustment).
     symbol_risk_mult: dict[str, float] = field(default_factory=lambda: {
-        "BTCUSDT": 1.0,
-        "ETHUSDT": 0.85,
-        "SOLUSDT": 0.70,
-        "XRPUSDT": 0.70,
+        "BTCUSDT":  1.0,
+        "ETHUSDT":  0.85,
+        "SOLUSDT":  0.70,
+        "BNBUSDT":  0.80,
+        "ADAUSDT":  0.75,
+        "XRPUSDT":  0.70,
+        "DOGEUSDT": 0.65,
+        "LINKUSDT": 0.80,
+        "AVAXUSDT": 0.75,
+        "MATICUSDT":0.80,
+        "DOTUSDT":  0.75,
+        "LTCUSDT":  0.85,
+        "UNIUSDT":  0.80,
+        "TRXUSDT":  0.90,
+        "BCHUSDT":  0.80,
     })
     # Minimum top-5 book depth (base-coin units) per symbol — thin-book
     # microstructure filter. Standard HFT/desk filter: thin books cause
@@ -82,10 +93,21 @@ class TradingCfg:
     # ~70% of would-be entries (live data over 9.8h: 9 thin-book skips,
     # 0 entries). Other symbols left at original calibration.
     symbol_min_depth: dict[str, float] = field(default_factory=lambda: {
-        "BTCUSDT": 3.0,
-        "ETHUSDT": 60.0,
-        "SOLUSDT": 400.0,
-        "XRPUSDT": 15000.0,
+        "BTCUSDT":   3.0,
+        "ETHUSDT":   60.0,
+        "SOLUSDT":   400.0,
+        "BNBUSDT":   20.0,
+        "ADAUSDT":   5000.0,
+        "XRPUSDT":   15000.0,
+        "DOGEUSDT":  100000.0,
+        "LINKUSDT":  1000.0,
+        "AVAXUSDT":  500.0,
+        "MATICUSDT": 5000.0,
+        "DOTUSDT":   1000.0,
+        "LTCUSDT":   100.0,
+        "UNIUSDT":   1000.0,
+        "TRXUSDT":   50000.0,
+        "BCHUSDT":   10.0,
     })
 
 
