@@ -4,18 +4,13 @@
 mode: live               # paper | live  (paper never sends orders)
 
 trading:
-  # 9 symbols viable on a $35 account — Grok cut DOGE/TRX/ADA/XRP/POL/DOT
-  # as their Bitunix minimums exceed position sizes at current risk settings.
+  # 4 highest-liquidity symbols — Grok session review: trim to reduce noise
+  # and focus signals. Lower symbols = fewer fee-draining marginal trades.
   symbols:
     - BTCUSDT
     - ETHUSDT
     - SOLUSDT
     - BNBUSDT
-    - LINKUSDT
-    - AVAXUSDT
-    - LTCUSDT
-    - UNIUSDT
-    - BCHUSDT
   # Grok holistic review: shifted 1m → 15m. 1m is too noisy for confluence-
   # based scalping — lagging indicators (EMA/MACD/Supertrend) systematically
   # confirm AFTER 1m moves resolve, picking exhaustion. 15m gives 4-15× the
@@ -155,6 +150,7 @@ risk:
   # The bot guarantees TP will always be at least adaptive_tp_floor_r × SL
   # distance which exceeds this fee buffer, so winning trades ALWAYS net.
   round_trip_fee_pct: 0.10    # was 0.15 — Bitunix maker fees ~0.08%; 0.15 was overcounting
+  min_trade_notional: 5.0     # skip trades where notional < $5 — fees eat profit on tiny sizes
   # Adaptive TP — as a position ages without hitting the original target,
   # tighten the TP progressively. We always aim for profit (TP stays above
   # fee floor), but accept smaller wins on flat trades rather than letting
@@ -164,7 +160,7 @@ risk:
   # Grok strategy review: asymmetric partials — take 50% off at 0.5R, trail
   # the rest. Compounds winners instead of exiting everything at 1R flat.
   partial_tp_enabled: true
-  partial_tp_at_r: 0.5        # was 1.0 — take first half early
+  partial_tp_at_r: 0.75       # was 0.5 — let winners run a bit further before partial close
   partial_tp_close_pct: 50.0  # was 60.0 — half off at 0.5R, trail remainder
   # Stale-trade exit (Grok v9 — relaxed from 6 min / 0.5R). The old aggressive
   # cutoff was killing trades before they could develop favor. Live ETH 0.65-
@@ -178,7 +174,7 @@ risk:
   stale_exit_enabled: true
   # Grok health-check: 20 min was killing undeveloped 15m trades too early.
   # 30 min = 2 full bars, gives signals proper time to play out.
-  stale_exit_min: 30.0          # was 20.0 — loosened per Grok health-check
+  stale_exit_min: 45.0          # was 30.0 — let trades breathe more, capture more upside
   # Grok health-check: 0.25 → 0.30, only kill truly dead trades.
   stale_exit_max_favor_r: 0.30  # was 0.25 — loosened per Grok health-check
 
@@ -268,7 +264,7 @@ strategy:
   # quality.
   # Grok diagnosis: 0.65 still too tight with low pattern_weight (0.30);
   # 0.60 ensures more setups pass without dropping below quality baseline.
-  fire_threshold: 0.65   # was 0.60 — tightened for tape-first architecture (10 votes not 25)
+  fire_threshold: 0.70   # was 0.65 — raise to filter low-quality fee-burning entries
   # ADX 35 = decisive directional move, not just trend territory. Pairs
   # with the broader symbol set: of 3 majors, usually one is in clean
   # trend at any given hour even when others chop.

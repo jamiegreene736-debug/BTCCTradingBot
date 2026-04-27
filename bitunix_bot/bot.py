@@ -978,6 +978,17 @@ class BitunixBot:
                 self.state.record_skip(f"{sym}: risk manager rejected (volume below min)")
                 continue
 
+            # Minimum notional gate — skip trades where fee drag would eat all profit.
+            # Sub-$5 notional at 0.1% round-trip = $0.005 fee; a 0.25% SL hit loses
+            # more than any realistic TP gain. Saves the account from death-by-fees.
+            min_notional = getattr(self.cfg.risk, "min_trade_notional", 0.0)
+            trade_notional = plan.volume * plan.price
+            if min_notional > 0 and trade_notional < min_notional:
+                self.state.record_skip(
+                    f"{sym}: notional ${trade_notional:.2f} < min ${min_notional:.2f} — fee drag too high"
+                )
+                continue
+
             # Post-signal ticker confirmation (Grok review v8). The signal
             # bar's close is the LAST data we used to evaluate. Before
             # placing the order, fetch the live ticker price and require
