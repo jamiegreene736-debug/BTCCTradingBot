@@ -244,6 +244,7 @@ class StrategyCfg:
     # exhaustion entries that look perfect on the bar that just closed
     # but immediately reverse on the bar that's now opening.
     confirm_with_ticker: bool = True
+    confirmation_tolerance_pct: float = 0.0  # allow N% adverse before vetoing ticker gate
     # Signal inversion — wire for forward-looking experiment. When True,
     # every signal that would otherwise fire LONG fires SHORT and vice versa.
     # Use case: if 130+ live trades show the bot is systematically entering at

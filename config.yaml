@@ -180,10 +180,11 @@ risk:
   # the move; kill cheaply. Threshold 0.25R unchanged — pairs with BE at
   # 0.20R so anything hitting BE-protect survives the stale gate.
   stale_exit_enabled: true
-  # Grok rescan: 18 → 20. Slight lengthening so the bar finishes
-  # forming before stale-exit fires (15m bar = 15min, +5min buffer).
-  stale_exit_min: 20.0          # was 18.0 (Grok holistic)
-  stale_exit_max_favor_r: 0.25  # unchanged — kill anything below BE-protect
+  # Grok health-check: 20 min was killing undeveloped 15m trades too early.
+  # 30 min = 2 full bars, gives signals proper time to play out.
+  stale_exit_min: 30.0          # was 20.0 — loosened per Grok health-check
+  # Grok health-check: 0.25 → 0.30, only kill truly dead trades.
+  stale_exit_max_favor_r: 0.30  # was 0.25 — loosened per Grok health-check
 
 strategy:
   # 23 indicator votes + 30 patterns + 5 combo recipes. The combined score
@@ -285,6 +286,9 @@ strategy:
   # reverse on the next bar. Set to false to disable (one HTTP call
   # latency per entry).
   confirm_with_ticker: true
+  # Grok health-check: 0.015% dip dropped a 0.79-score BTC signal — pure noise.
+  # Allow up to 0.05% adverse move before vetoing (covers bid/ask bounce on 15m).
+  confirmation_tolerance_pct: 0.05
   # Signal inversion — forward-looking experiment. When true, every signal
   # that would otherwise fire LONG fires SHORT and vice versa. Use this if
   # live data shows the bot has systematic negative direction edge (i.e.

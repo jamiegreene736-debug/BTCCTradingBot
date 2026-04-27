@@ -1009,16 +1009,18 @@ class BitunixBot:
                         f"{sym}: ticker price unavailable, no confirmation"
                     )
                     continue
-                if plan.side == "BUY" and live_px <= bar_close:
+                tol_pct = getattr(self.cfg.strategy, "confirmation_tolerance_pct", 0.0)
+                tol = bar_close * (tol_pct / 100.0)
+                if plan.side == "BUY" and live_px <= (bar_close - tol):
                     self.state.record_skip(
                         f"{sym}: ticker {live_px:.4f} ≤ signal close "
-                        f"{bar_close:.4f} — no continuation up, drop long"
+                        f"{bar_close:.4f} (tol={tol:.4f}) — no continuation up, drop long"
                     )
                     continue
-                if plan.side == "SELL" and live_px >= bar_close:
+                if plan.side == "SELL" and live_px >= (bar_close + tol):
                     self.state.record_skip(
                         f"{sym}: ticker {live_px:.4f} ≥ signal close "
-                        f"{bar_close:.4f} — no continuation down, drop short"
+                        f"{bar_close:.4f} (tol={tol:.4f}) — no continuation down, drop short"
                     )
                     continue
                 # Ticker confirms direction. Re-derive SL/TP based on the
