@@ -446,70 +446,21 @@ def evaluate(
     long_reasons: list[str] = []
     short_reasons: list[str] = []
 
-    # 1. EMA stack
-    if ema_f[i] > ema_m[i] > ema_s[i]:
-        long_reasons.append("ema_stack_up")
-    if ema_f[i] < ema_m[i] < ema_s[i]:
-        short_reasons.append("ema_stack_down")
+    # --- TAPE-FIRST ARCHITECTURE (Grok strategy review) ---
+    # Removed: EMA stack/cross, RSI window, MACD histogram, Bollinger basis,
+    # VWAP vote, Stoch RSI, Funding rate, S/R bounce, MACD/OBV divergences,
+    # SMC/FVG, MFI, BTC leader, CVD proxy.
+    # Kept: Supertrend, Volume spike, ADX, HTF trend, OB imbalance,
+    # RSI divergence only, TTM Squeeze, real CVD, aggression burst, absorption.
 
-    # 2. Close cross of ema_fast
-    if i >= 1:
-        if c[i - 1] <= ema_f[i - 1] and c[i] > ema_f[i]:
-            long_reasons.append("cross_above_ema_fast")
-        if c[i - 1] >= ema_f[i - 1] and c[i] < ema_f[i]:
-            short_reasons.append("cross_below_ema_fast")
-
-    # 3. RSI window
-    r = rsi_v[i]
-    if not np.isnan(r):
-        if cfg.rsi_long_min <= r <= cfg.rsi_long_max:
-            long_reasons.append(f"rsi({r:.0f})")
-        if cfg.rsi_short_min <= r <= cfg.rsi_short_max:
-            short_reasons.append(f"rsi({r:.0f})")
-
-    # 4. MACD
-    if i >= 1 and not np.isnan(macd_h[i - 1]):
-        if macd_l[i] > macd_s[i] and macd_h[i] > macd_h[i - 1]:
-            long_reasons.append("macd_up")
-        if macd_l[i] < macd_s[i] and macd_h[i] < macd_h[i - 1]:
-            short_reasons.append("macd_down")
-
-    # 5. Bollinger basis
-    if not np.isnan(bb_mid[i]):
-        if p > bb_mid[i]:
-            long_reasons.append("above_bb_mid")
-        if p < bb_mid[i]:
-            short_reasons.append("below_bb_mid")
-
-    # 6. Supertrend regime
+    # 1. Supertrend regime — strong directional filter, adapts to volatility.
     if i < len(st_dir) and not np.isnan(st_dir[i]):
         if st_dir[i] == 1:
             long_reasons.append("supertrend_up")
         elif st_dir[i] == -1:
             short_reasons.append("supertrend_down")
 
-    # 7. VWAP — close above/below institutional volume-weighted reference.
-    if vwap_v is not None and i < len(vwap_v) and not np.isnan(vwap_v[i]):
-        if p > vwap_v[i]:
-            long_reasons.append("above_vwap")
-        elif p < vwap_v[i]:
-            short_reasons.append("below_vwap")
-
-    # 8. Stochastic RSI — momentum oscillator. Bull cross in oversold, bear
-    # cross in overbought. More sensitive than raw RSI.
-    if i < len(stoch_k) and i >= 1:
-        k_now, k_prev = stoch_k[i], stoch_k[i - 1]
-        d_now, d_prev = stoch_d[i], stoch_d[i - 1]
-        if not (np.isnan(k_now) or np.isnan(d_now) or np.isnan(k_prev) or np.isnan(d_prev)):
-            # Bullish cross: %K crosses above %D AND we're not already overbought.
-            if k_prev <= d_prev and k_now > d_now and k_now < 80:
-                long_reasons.append(f"stoch_bull({k_now:.0f})")
-            # Bearish cross: %K crosses below %D AND not already oversold.
-            if k_prev >= d_prev and k_now < d_now and k_now > 20:
-                short_reasons.append(f"stoch_bear({k_now:.0f})")
-
-    # 9. Volume confirmation — a volume spike (current > N× average) votes
-    # for whichever side is otherwise winning. Like ADX, direction-agnostic.
+    # 2. Volume confirmation — spike votes for the side already winning.
     if vol_ma_v is not None and i < len(vol_ma_v):
         vma = vol_ma_v[i]
         if not np.isnan(vma) and vma > 0:
@@ -520,7 +471,7 @@ def evaluate(
                 elif len(short_reasons) > len(long_reasons):
                     short_reasons.append(f"vol_spike({ratio:.1f}x)")
 
-    # 10. ADX trend strength — counts for whichever side is otherwise winning.
+    # 3. ADX trend strength — votes for the winning side when trend is strong.
     a_now = adx_v[i] if i < len(adx_v) else np.nan
     if not np.isnan(a_now) and a_now >= cfg.adx_min:
         if len(long_reasons) > len(short_reasons):
@@ -528,61 +479,35 @@ def evaluate(
         elif len(short_reasons) > len(long_reasons):
             short_reasons.append(f"adx({a_now:.0f})")
 
-    # 11. Higher-timeframe trend confirmation. Don't trade against the HTF trend.
+    # 4. Higher-timeframe trend — don't trade against the macro trend.
     if htf_closes is not None and len(htf_closes) >= cfg.htf_ema_period + 1:
         htf_arr = np.array(htf_closes, dtype=float)
-        htf_ema = ema(htf_arr, cfg.htf_ema_period)
-        if not np.isnan(htf_ema[-1]):
-            if htf_arr[-1] > htf_ema[-1]:
+        htf_ema_v = ema(htf_arr, cfg.htf_ema_period)
+        if not np.isnan(htf_ema_v[-1]):
+            if htf_arr[-1] > htf_ema_v[-1]:
                 long_reasons.append(f"htf_uptrend({cfg.htf_timeframe})")
-            elif htf_arr[-1] < htf_ema[-1]:
+            elif htf_arr[-1] < htf_ema_v[-1]:
                 short_reasons.append(f"htf_downtrend({cfg.htf_timeframe})")
 
-    # 12. Funding rate — contrarian. High positive funding (crowded longs)
-    # votes SHORT; high negative funding (crowded shorts) votes LONG.
-    if funding_rate is not None and abs(funding_rate) >= cfg.funding_threshold:
-        if funding_rate > 0:
-            short_reasons.append(f"funding+{funding_rate*100:.3f}%")
-        else:
-            long_reasons.append(f"funding{funding_rate*100:.3f}%")
-
-    # 13. Support/Resistance — bounce off swing-detected support votes long;
-    # rejection at swing-detected resistance votes short.
-    sr_long, sr_short = levels_mod.detect_sr_signal(
-        h, l, c,
-        swing_lookback=cfg.swing_lookback,
-        cluster_tol_pct=cfg.sr_cluster_tol_pct,
-        min_touches=cfg.sr_min_touches,
-        proximity_pct=cfg.sr_proximity_pct,
-    )
-    if sr_long:
-        long_reasons.append(sr_long)
-    if sr_short:
-        short_reasons.append(sr_short)
-
-    # 14. Order book imbalance (top N levels via WebSocket depth feed).
-    # imbalance = (bid_vol - ask_vol) / (bid_vol + ask_vol). Strongly positive
-    # = bid pressure → vote LONG. Strongly negative = ask pressure → vote SHORT.
+    # 5. Order book imbalance — live bid/ask pressure from WebSocket feed.
     if ob_imbalance is not None:
         if ob_imbalance >= cfg.ob_imbalance_threshold:
             long_reasons.append(f"ob_imb+{ob_imbalance:.2f}")
         elif ob_imbalance <= -cfg.ob_imbalance_threshold:
             short_reasons.append(f"ob_imb{ob_imbalance:.2f}")
 
-    # 15. RSI divergence — bullish: price LL but RSI HL (reversal up).
-    #     bearish: price HH but RSI LH. Hidden divergences = continuation.
-    # 16. MACD divergence — same logic against MACD line.
-    # 17. OBV divergence — same logic against on-balance volume.
-    # All three (and CVD when available) computed in one pass.
+    # 6. RSI divergence only — bullish/bearish and hidden.
+    # MACD/OBV divergences removed (90%+ correlated with RSI div, add noise).
     obv_v = obv(c, v) if v.sum() > 0 else np.zeros(len(c))
     cvd_v = cvd(h, l, c, v) if v.sum() > 0 else None
     div_hits = div_mod.detect_divergences(c, h, l, rsi_v, macd_l, obv_v,
                                            pivot_lookback=cfg.swing_lookback,
                                            cvd_v=cvd_v)
-    seen_div = set()
+    seen_div: set = set()
     for d in div_hits:
-        # One vote per oscillator+side to avoid double-counting hidden+regular.
         osc = d.name.split("_")[0]  # "rsi", "macd", "obv"
+        if osc != "rsi":            # only RSI divergence kept
+            continue
         bull_side = d.direction in ("bullish", "hidden_bullish")
         key = (osc, bull_side)
         if key in seen_div:
@@ -593,97 +518,41 @@ def evaluate(
         else:
             short_reasons.append(f"DIV:{d.name}")
 
-    # 18. SMC: Fair Value Gap respect — price returning to a recent FVG.
-    # 19. SMC: Liquidity sweep — wick-through-then-close-inside fade pattern.
-    smc_hits = smc_mod.detect_all(h, l, c, swing_lookback=cfg.swing_lookback)
-    for s in smc_hits:
-        tag = f"SMC:{s.name}"
-        if s.direction == "bullish":
-            long_reasons.append(tag)
-        else:
-            short_reasons.append(tag)
-
-    # 20. MFI (Money Flow Index) — volume-weighted RSI. Long when not
-    # overbought, short when not oversold. Stronger than raw RSI because
-    # it confirms with volume.
-    if v.sum() > 0:
-        mfi_v = mfi(h, l, c, v, cfg.mfi_period)
-        mfi_now = mfi_v[i] if i < len(mfi_v) else np.nan
-        if not np.isnan(mfi_now):
-            if mfi_now < cfg.mfi_long_max:
-                long_reasons.append(f"mfi({mfi_now:.0f})")
-            if mfi_now > cfg.mfi_short_min:
-                short_reasons.append(f"mfi({mfi_now:.0f})")
-
-    # 21. TTM Squeeze — when BB are INSIDE Keltner Channels, market is
-    # compressed. We vote in the direction of momentum (close vs Keltner
-    # midline) — typical TTM Squeeze release direction tells us where the
-    # break is more likely to go.
+    # 7. TTM Squeeze — compression release is a high-conviction breakout signal.
     k_up, k_mid, k_lo = keltner_channels(h, l, c, cfg.keltner_period,
                                           cfg.keltner_atr_multiplier)
     if (i < len(bb_up) and i < len(k_up)
             and not np.isnan(bb_up[i]) and not np.isnan(k_up[i])):
         squeeze_on = (bb_up[i] < k_up[i]) and (bb_lo[i] > k_lo[i])
-        if squeeze_on:
-            # Direction by close vs Keltner mid.
-            if not np.isnan(k_mid[i]):
-                if p > k_mid[i]:
-                    long_reasons.append("squeeze_up")
-                elif p < k_mid[i]:
-                    short_reasons.append("squeeze_down")
+        if squeeze_on and not np.isnan(k_mid[i]):
+            if p > k_mid[i]:
+                long_reasons.append("squeeze_up")
+            elif p < k_mid[i]:
+                short_reasons.append("squeeze_down")
 
-    # 22. BTC leader gate — alts shouldn't fight BTC's intraday trend.
-    # +1 = BTC uptrend (vote LONG); -1 = BTC downtrend (vote SHORT).
-    # The bot passes None for BTC's own evaluation (no self-confirmation).
-    if btc_trend == 1:
-        long_reasons.append("btc_leader_up")
-    elif btc_trend == -1:
-        short_reasons.append("btc_leader_down")
-
-    # 23. CVD trend confirmation. Prefer REAL CVD from the trade-tape feed
-    # (sum of buy/sell aggressor volume) when available — that's true order
-    # flow, the alpha that 1m candles can't capture. Fall back to the
-    # candle-derived CVD proxy (`cvd_v`) when the tape feed is offline or
-    # too cold to read. Real CVD is direction-only; the candle proxy
-    # additionally requires price agreement to fire.
+    # 8. Real CVD — true order flow from tape (buy aggressor vol - sell aggressor vol).
+    # CVD proxy removed — candle-derived CVD is a weak approximation; rely on tape.
     if real_cvd is not None and abs(real_cvd) > 0:
         if real_cvd > 0:
             long_reasons.append(f"cvd_real+{real_cvd:.2f}")
         else:
             short_reasons.append(f"cvd_real{real_cvd:.2f}")
-    elif cvd_v is not None and len(cvd_v) >= 20:
-        cvd_recent = cvd_v[-1] - cvd_v[-20]   # last 20-bar net delta
-        price_change = c[i] - c[max(0, i - 20)]
-        if cvd_recent > 0 and price_change > 0:
-            long_reasons.append(f"cvd_proxy+({cvd_recent:.0f})")
-        elif cvd_recent < 0 and price_change < 0:
-            short_reasons.append(f"cvd_proxy({cvd_recent:.0f})")
 
-    # 24. Aggression burst — short-window (10s) flow lopsidedness from the
-    # trade tape. Strong directional aggression (≥70/30 split) is real-time
-    # momentum that the candle-based indicators can't see because it
-    # happens BETWEEN bar closes. Especially valuable on 1m where a single
-    # bar can hide a major directional surge or reversal in its body.
+    # 9. Aggression burst — 10s tape lopsidedness. Primary real-time alpha signal.
     if aggression_10s is not None:
-        if aggression_10s >= 0.40:        # ≥70/30 buy-side
+        if aggression_10s >= 0.40:
             long_reasons.append(f"agg+{aggression_10s:.2f}")
-        elif aggression_10s <= -0.40:     # ≥70/30 sell-side
+        elif aggression_10s <= -0.40:
             short_reasons.append(f"agg{aggression_10s:.2f}")
 
-    # 25. Absorption — extreme tape aggression (≥77/23 split) WITHOUT
-    # corresponding price movement (<0.15% in same 10s) means big players
-    # are absorbing the aggressive flow at a level. Classic exhaustion
-    # signal: aggressive buyers can't push price up = sellers defending
-    # = imminent reversal DOWN. (And mirror for buy absorption of sell flow.)
-    # Votes the OPPOSITE of the aggressive flow direction.
+    # 10. Absorption — extreme aggression with no price movement = exhaustion.
+    # Votes OPPOSITE the aggressive flow direction.
     if (aggression_10s is not None and price_change_10s_pct is not None
             and abs(aggression_10s) >= 0.55
             and abs(price_change_10s_pct) < 0.15):
         if aggression_10s > 0:
-            # Strong buy aggression absorbed at level → sellers defending → SHORT.
             short_reasons.append(f"absorb(buyflow@{aggression_10s:+.2f})")
         else:
-            # Strong sell aggression absorbed at level → buyers defending → LONG.
             long_reasons.append(f"absorb(sellflow@{aggression_10s:+.2f})")
 
     # ----------------- COMBO-BONUS LAYER -----------------
@@ -911,6 +780,21 @@ def evaluate(
             log.info("INVERTED signal: %s → %s (score=%.2f)",
                      direction, flipped, sig.score)
         return sig
+
+    # Tape flow hard gate — if live aggression data is available and strongly
+    # opposes the signal direction, block the signal outright. Tape is leading;
+    # a score built from lagging indicators doesn't override live order flow.
+    if aggression_10s is not None and abs(aggression_10s) >= 0.30:
+        if effective_long >= eff_threshold and effective_long > effective_short:
+            if aggression_10s < -0.30:
+                log.info("TAPE GATE blocked long: aggression=%.2f opposes direction",
+                         aggression_10s)
+                return None
+        elif effective_short >= eff_threshold and effective_short > effective_long:
+            if aggression_10s > 0.30:
+                log.info("TAPE GATE blocked short: aggression=%.2f opposes direction",
+                         aggression_10s)
+                return None
 
     if effective_long >= eff_threshold and effective_long > effective_short:
         if absorption_vetoes_long:

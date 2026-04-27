@@ -23,7 +23,8 @@ trading:
   # floor (0.08% round-trip) is now <10% of typical 15m bar move (~1%) vs
   # ~80% of typical 1m move (~0.1%). Single highest-leverage architectural
   # change: makes the maker-fee economics actually work.
-  timeframe: 15m         # was 1m — 15m / 30m / 1h / 2h / 4h supported
+  timeframe: 5m          # was 15m — Grok strategy review: 5m is sweet spot for
+                         # high-leverage scalping; 15m holds too long at 10x
   # ChatGPT review (gpt-5): leverage 25 → 10. Lower leverage on a $35 account
   # cuts fee-bite as percent of margin while keeping liquidation buffer wide.
   # The maker fee improvement is the bigger lever; this is supporting.
@@ -100,7 +101,7 @@ trading:
   use_post_only_entries: true   # was false (Grok v8) — reverted per ChatGPT
   # On 15m timeframe, 60s is reasonable — 1/15th of bar duration so a maker
   # entry has time to fill on natural pullback before the bar resolves.
-  post_only_timeout_secs: 60    # was 8 (1m timeframe) — scaled for 15m
+  post_only_timeout_secs: 30    # was 60 (15m) — scaled for 5m (30s = 10% of bar)
 
 risk:
   # STOP LOSS — % of entry price.
@@ -160,15 +161,11 @@ risk:
   # them time-exit at a loss. Tier ladder is hard-coded in risk.py.
   adaptive_tp_enabled: true
   adaptive_tp_floor_r: 0.7      # minimum profitable TP after fees
-  # ChatGPT review (gpt-5): DISABLED. Partials multiply fills/fees on a
-  # small account. With take_profit_r now 1.0, the full position closes at
-  # the partial-TP point anyway — no scale-out benefit, just an extra
-  # round-trip fee to skim half. Re-enable only after maker TP fills are
-  # reliably tracked end-to-end.
-  partial_tp_enabled: false   # was true
-  partial_tp_at_r: 1.0
-  # Grok rescan: 50 → 60. Lock more profit at +1R given high fee drag.
-  partial_tp_close_pct: 60.0
+  # Grok strategy review: asymmetric partials — take 50% off at 0.5R, trail
+  # the rest. Compounds winners instead of exiting everything at 1R flat.
+  partial_tp_enabled: true
+  partial_tp_at_r: 0.5        # was 1.0 — take first half early
+  partial_tp_close_pct: 50.0  # was 60.0 — half off at 0.5R, trail remainder
   # Stale-trade exit (Grok v9 — relaxed from 6 min / 0.5R). The old aggressive
   # cutoff was killing trades before they could develop favor. Live ETH 0.65-
   # score trade hit max_favor=0.012R then got stale-killed at 6 min — never
@@ -220,7 +217,7 @@ strategy:
   stoch_rsi_d: 3
   # Higher-timeframe trend confirmation — vote for direction of the HTF trend.
   # Compares last close of HTF candles against EMA on that timeframe.
-  htf_timeframe: 15m
+  htf_timeframe: 1h     # was 15m — on 5m TF, HTF should be 1h for macro bias
   htf_ema_period: 50
   # Funding rate (perp futures) — contrarian: high positive funding = crowded
   # longs = vote SHORT (taking the unfavored side). Bitunix returns per-interval
@@ -261,7 +258,7 @@ strategy:
   # quality. On 15m, indicators have room to develop and patterns are
   # higher-quality (multi-bar shapes are real structure). 0.30 makes
   # patterns supplement indicator confluence rather than override it.
-  pattern_weight: 0.30   # was 0.60 — patterns supplement, don't dominate
+  pattern_weight: 0.0    # was 0.30 — patterns cut per Grok strategy review; combined = 100% factor score
   pattern_norm: 2.0      # 2 mid-strength patterns = saturation
   # Grok review (post-N=10 fills): tighten further. Recent fills showed
   # the 0.65-0.84 score range produced both the big winner (0.89, +$0.26)
@@ -271,7 +268,7 @@ strategy:
   # quality.
   # Grok diagnosis: 0.65 still too tight with low pattern_weight (0.30);
   # 0.60 ensures more setups pass without dropping below quality baseline.
-  fire_threshold: 0.60   # was 0.65 — loosened per Grok root-cause diagnosis
+  fire_threshold: 0.65   # was 0.60 — tightened for tape-first architecture (10 votes not 25)
   # ADX 35 = decisive directional move, not just trend territory. Pairs
   # with the broader symbol set: of 3 majors, usually one is in clean
   # trend at any given hour even when others chop.

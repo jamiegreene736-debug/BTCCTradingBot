@@ -268,16 +268,20 @@ class StrategyCfg:
     # + MACD + Supertrend all firing on the same move) can't inflate
     # confidence above 3-vote saturation. Mean-rev saturation also cut
     # 6 → 3 for symmetry with flow (the actual leading signal). Sum 1.0.
+    # Grok strategy review: tape-first architecture. Trend votes cut from 7
+    # to 2 (Supertrend + HTF only); flow is now primary alpha source.
+    # Weights reflect: flow 0.65 (tape + CVD + OB imbalance), trend 0.10
+    # (Supertrend + HTF), mean_rev 0.15 (RSI div only), context 0.10.
     factor_weights: dict[str, float] = field(default_factory=lambda: {
-        "trend": 0.15,      # was 0.20 — lagging confirmation only
-        "mean_rev": 0.25,   # counterbalance / reversal setups
-        "flow": 0.50,       # was 0.45 — leading edge dominates
-        "context": 0.10,    # vol / regime / session modulators
+        "trend": 0.10,      # was 0.15 — only Supertrend + HTF remain
+        "mean_rev": 0.15,   # was 0.25 — RSI divergence only
+        "flow": 0.65,       # was 0.50 — primary alpha: tape, CVD, OB, aggression
+        "context": 0.10,    # vol spike + ADX + squeeze
     })
     factor_saturation: dict[str, int] = field(default_factory=lambda: {
-        "trend": 3,         # was 6 — kill chorus-inflation of correlated trend votes
-        "mean_rev": 3,      # was 6 — symmetry with flow's 3-cap
-        "flow": 3,          # only 4 flow inputs total → saturate at 3
+        "trend": 2,         # was 3 — only 2 trend inputs (Supertrend + HTF)
+        "mean_rev": 2,      # was 3 — only RSI div remains
+        "flow": 3,          # CVD + aggression + OB imbalance + absorption
         "context": 3,
     })
 
