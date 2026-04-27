@@ -532,7 +532,9 @@ def evaluate(
 
     # 8. Real CVD — true order flow from tape (buy aggressor vol - sell aggressor vol).
     # CVD proxy removed — candle-derived CVD is a weak approximation; rely on tape.
-    if real_cvd is not None and abs(real_cvd) > 0:
+    # Minimum magnitude gate: near-flat CVD (e.g. -0.06 BTC) is noise, not signal.
+    # Threshold of 1.0 base units filters the near-zero case without being too aggressive.
+    if real_cvd is not None and abs(real_cvd) >= 1.0:
         if real_cvd > 0:
             long_reasons.append(f"cvd_real+{real_cvd:.2f}")
         else:

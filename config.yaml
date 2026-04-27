@@ -134,7 +134,7 @@ risk:
   # threshold — never triggered BE, reversed to full SL = -$0.43.
   # Bringing BE in to 0.20R closes that gap while still letting the
   # 0.83R-style winners ratchet cleanly.
-  breakeven_at_r: 0.20   # was 0.30 (ChatGPT)
+  breakeven_at_r: 0.50   # was 0.20 — early BE at 0.20R was causing fee-losses on reversals
   # Buffer 0.05% → 0.10% so BE stops actually clear maker+taker fees
   # (round-trip ~0.08%). Trade 7 hit BE-protect, exited at +5bps but
   # 0.119 fees made it -$0.05 net realized — with 0.10% buffer it'd
@@ -150,7 +150,7 @@ risk:
   # The bot guarantees TP will always be at least adaptive_tp_floor_r × SL
   # distance which exceeds this fee buffer, so winning trades ALWAYS net.
   round_trip_fee_pct: 0.10    # was 0.15 — Bitunix maker fees ~0.08%; 0.15 was overcounting
-  min_trade_notional: 5.0     # skip trades where notional < $5 — fees eat profit on tiny sizes
+  min_trade_notional: 10.0    # was 5.0 — raise floor to cut more fee-burning tiny trades
   # Adaptive TP — as a position ages without hitting the original target,
   # tighten the TP progressively. We always aim for profit (TP stays above
   # fee floor), but accept smaller wins on flat trades rather than letting
@@ -174,7 +174,7 @@ risk:
   stale_exit_enabled: true
   # Grok health-check: 20 min was killing undeveloped 15m trades too early.
   # 30 min = 2 full bars, gives signals proper time to play out.
-  stale_exit_min: 45.0          # was 30.0 — let trades breathe more, capture more upside
+  stale_exit_min: 60.0          # was 45.0 — more breathing room, avoid premature stale exits
   # Grok health-check: 0.25 → 0.30, only kill truly dead trades.
   stale_exit_max_favor_r: 0.30  # was 0.25 — loosened per Grok health-check
 
@@ -264,7 +264,7 @@ strategy:
   # quality.
   # Grok diagnosis: 0.65 still too tight with low pattern_weight (0.30);
   # 0.60 ensures more setups pass without dropping below quality baseline.
-  fire_threshold: 0.70   # was 0.65 — raise to filter low-quality fee-burning entries
+  fire_threshold: 0.80   # was 0.70 — only strongest signals to reduce fee drag
   # ADX 35 = decisive directional move, not just trend territory. Pairs
   # with the broader symbol set: of 3 majors, usually one is in clean
   # trend at any given hour even when others chop.
