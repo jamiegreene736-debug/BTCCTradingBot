@@ -74,6 +74,17 @@ class TradeJournal:
         else:
             self.path = Path(path)
         self._lock = threading.Lock()
+        # Dedup tracking (Grok rescan): bounded sets of client_ids and
+        # position_ids already journaled this run. Prevents double-logging
+        # if record_entry/record_exit gets called twice for the same
+        # event (e.g. transient API retry, mid-tick crash recovery).
+        # In-memory only — restart clears (which is fine: the file dedup
+        # would require reading it back on every write, too expensive).
+        self._seen_entry_client_ids: set[str] = set()
+        self._seen_exit_position_ids: set[str] = set()
+        # Cap memory: if either set grows past this size, evict oldest
+        # (simple FIFO via list; relies on dict-like ordering since 3.7).
+        self._dedup_max_entries = 5000
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         except Exception as e:
@@ -82,6 +93,25 @@ class TradeJournal:
         log.info("TradeJournal writing to %s%s", self.path,
                  " (from JOURNAL_PATH env var)"
                  if os.environ.get("JOURNAL_PATH") else "")
+
+    def _check_dedup(self, seen: set[str], key: str, kind: str) -> bool:
+        """Return True if this key is a duplicate (caller should skip).
+        Otherwise add the key to `seen` (with size-cap eviction) and
+        return False."""
+        if not key:
+            return False  # empty keys are never deduped (legacy callers)
+        if key in seen:
+            log.warning("TradeJournal: skipping duplicate %s record for %s "
+                        "(retry or double-call)", kind, key)
+            return True
+        seen.add(key)
+        if len(seen) > self._dedup_max_entries:
+            # Evict 20% to keep insertion churn low. Iteration order
+            # matches insertion order in CPython 3.7+.
+            evict_n = self._dedup_max_entries // 5
+            for k in list(seen)[:evict_n]:
+                seen.discard(k)
+        return False
 
     def _write(self, record: dict[str, Any]) -> None:
         record.setdefault("ts", time.time())
@@ -141,7 +171,11 @@ class TradeJournal:
 
         Many fields are optional/None when the upstream feed is cold — the
         journal preserves them as nulls so post-hoc analysis can correlate
-        outcomes against feed availability."""
+        outcomes against feed availability.
+
+        Dedup: skip if this client_id was already journaled this run."""
+        if self._check_dedup(self._seen_entry_client_ids, client_id, "entry"):
+            return
         self._write({
             "kind": "entry",
             "symbol": symbol,
@@ -209,7 +243,11 @@ class TradeJournal:
         tape_exit / stale_exit / time_exit / unknown.
         `max_favor_r` is the highest r_favor seen during the position
         (tracked by the bot's per-position state).
-        """
+
+        Dedup: skip if this position_id already had an exit logged
+        this run."""
+        if self._check_dedup(self._seen_exit_position_ids, position_id, "exit"):
+            return
         self._write({
             "kind": "exit",
             "symbol": symbol,

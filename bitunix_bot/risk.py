@@ -279,10 +279,13 @@ def build_order(
     # actual loss ≈ risk_usdt budget, scale risk down by the fee burden in
     # R-units: fee_burden = round_trip_fee_pct / stop_loss_pct. For 0.08%
     # maker fees / 0.25% SL = 0.32 (fees consume 32% of risk budget).
-    # Capped at 50% — never zero out the trade entirely.
+    # Capped at 60% (Grok rescan: was 50%) — leaves a minimum of 40% of
+    # the risk budget for actual stop-distance, while reserving more for
+    # fees in high-fee regimes (0.20% taker / 0.25% SL = 80% burden,
+    # capped to 60%).
     sl_pct_for_fee = max(0.001, risk.stop_loss_pct)
     fee_burden_r = risk.round_trip_fee_pct / sl_pct_for_fee
-    fee_reserve_frac = min(0.5, fee_burden_r)
+    fee_reserve_frac = min(0.6, fee_burden_r)
     risk_usdt_after_fees = risk_usdt * (1.0 - fee_reserve_frac)
     volume = risk_usdt_after_fees / stop_dist
 

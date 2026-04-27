@@ -411,6 +411,17 @@ class BitunixBot:
             funding = _f(p.get("funding"))
             net = realized + fee + funding
 
+            # Surface non-zero funding for verification (Grok rescan):
+            # Bitunix's docs aren't crystal clear on whether realizedPNL
+            # already includes funding. If funding is consistently 0 in
+            # responses, our `realized + fee + funding` math is fine; if
+            # we see non-zero funding, log it once-per-position so we can
+            # cross-check whether realizedPNL is double-counting.
+            if funding != 0.0:
+                log.info("Position close %s has non-zero funding: realized=%.6f "
+                         "fee=%.6f funding=%.6f → net=%.6f",
+                         p.get("positionId"), realized, fee, funding, net)
+
             # Compute trade-R first so we can use it for both flat detection
             # and the adaptive self-defense tally.
             trade_r = self._compute_trade_r(p, self.cfg.risk.stop_loss_pct)

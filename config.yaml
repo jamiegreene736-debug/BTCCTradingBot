@@ -168,7 +168,8 @@ risk:
   # reliably tracked end-to-end.
   partial_tp_enabled: false   # was true
   partial_tp_at_r: 1.0
-  partial_tp_close_pct: 50.0
+  # Grok rescan: 50 → 60. Lock more profit at +1R given high fee drag.
+  partial_tp_close_pct: 60.0
   # Stale-trade exit (Grok v9 — relaxed from 6 min / 0.5R). The old aggressive
   # cutoff was killing trades before they could develop favor. Live ETH 0.65-
   # score trade hit max_favor=0.012R then got stale-killed at 6 min — never
@@ -179,7 +180,9 @@ risk:
   # the move; kill cheaply. Threshold 0.25R unchanged — pairs with BE at
   # 0.20R so anything hitting BE-protect survives the stale gate.
   stale_exit_enabled: true
-  stale_exit_min: 18.0          # was 2.0 (1m timeframe) — scaled for 15m
+  # Grok rescan: 18 → 20. Slight lengthening so the bar finishes
+  # forming before stale-exit fires (15m bar = 15min, +5min buffer).
+  stale_exit_min: 20.0          # was 18.0 (Grok holistic)
   stale_exit_max_favor_r: 0.25  # unchanged — kill anything below BE-protect
 
 strategy:
@@ -266,11 +269,15 @@ strategy:
   # filters the bottom of that range; combined with the broader symbol
   # set (BTC + ETH + SOL), trade frequency stays similar with higher
   # quality.
-  fire_threshold: 0.75   # was 0.60 (ChatGPT) — strongest setups only
+  # Grok rescan: tightened further 0.75 → 0.80 to filter the marginal
+  # 0.65-0.74 setups that were producing the recent batch of losses.
+  fire_threshold: 0.80   # was 0.75 (Grok holistic) — strongest setups only
   # ADX 35 = decisive directional move, not just trend territory. Pairs
   # with the broader symbol set: of 3 majors, usually one is in clean
   # trend at any given hour even when others chop.
-  min_adx_for_trade: 35.0  # was 26.0 (ChatGPT) — strong trend only
+  # Grok rescan: 35 → 40. Live data showed losses clustering in the
+  # ADX 30-35 weak-trend band; 40 enforces only decisive directional moves.
+  min_adx_for_trade: 40.0  # was 35.0 (Grok holistic) — decisive trend only
   # Post-signal ticker confirmation (Grok review v8). After signal fires,
   # fetch the live ticker price and require it to have moved in the trade
   # direction since the signal-bar close. Catches exhaustion-fade

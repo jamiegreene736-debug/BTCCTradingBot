@@ -1615,8 +1615,8 @@ def test_partial_tp_fires_at_1r_and_only_once():
     assert len(partial_calls) == 1, \
         f"expected 1 partial-TP close, got {len(partial_calls)}"
     qty_str = partial_calls[0].kwargs["qty"]
-    # qty was 0.01; partial_tp_close_pct = 50% → 0.005.
-    assert abs(float(qty_str) - 0.005) < 1e-6, f"expected 0.005, got {qty_str}"
+    # qty was 0.01; partial_tp_close_pct = 60% (Grok rescan) → 0.006.
+    assert abs(float(qty_str) - 0.006) < 1e-6, f"expected 0.006, got {qty_str}"
     # Side opposite of position (LONG → SELL).
     assert partial_calls[0].kwargs["side"] == "SELL"
 
@@ -2954,6 +2954,74 @@ def test_real_losses_still_trigger_streak():
     # Real losses should accumulate consec_losses + trip streak pause at 3.
     assert "BTCUSDT" in bot.streak_pause_until, \
         "3 real losses should fire streak pause"
+
+
+def test_journal_dedup_skips_duplicate_entry_client_ids():
+    """Grok rescan: TradeJournal must skip duplicate entry records when
+    called twice with the same client_id (e.g. due to a transient
+    retry). The file should contain only ONE entry record."""
+    import tempfile
+    from bitunix_bot.journal import TradeJournal
+    with tempfile.TemporaryDirectory() as tmp:
+        j = TradeJournal(Path(tmp) / "trades.jsonl")
+        kwargs = dict(
+            symbol="BTCUSDT", side="BUY", client_id="bot-BTCUSDT-12345-BUY-PO",
+            order_type="LIMIT", score=0.8, threshold_used=0.75,
+            conviction_mult=1.0, indicator_count=10, pattern_score=2.0,
+            reasons=["x"], atr_pct=0.1, adx=40.0, spread_pct=0.01,
+            bid_depth=10.0, ask_depth=10.0, aggression_10s=0.3,
+            real_cvd=5.0, activity_mult=1.0, session_weight=1.0,
+            entry_price=78000.0, stop_loss=77800.0, take_profit=78200.0,
+            notional=156.0, leverage=10,
+        )
+        # Call twice with identical client_id.
+        j.record_entry(**kwargs)
+        j.record_entry(**kwargs)
+        # File should contain exactly ONE line.
+        lines = (Path(tmp) / "trades.jsonl").read_text().strip().split("\n")
+        assert len(lines) == 1, \
+            f"expected single entry due to dedup; got {len(lines)} lines"
+
+
+def test_journal_dedup_skips_duplicate_exit_position_ids():
+    """Same dedup logic for exits, keyed on position_id."""
+    import tempfile
+    from bitunix_bot.journal import TradeJournal
+    with tempfile.TemporaryDirectory() as tmp:
+        j = TradeJournal(Path(tmp) / "trades.jsonl")
+        kwargs = dict(
+            symbol="BTCUSDT", position_id="POS_42", side="LONG",
+            entry_price=78000.0, exit_price=78200.0,
+            exit_reason="win", hold_time_sec=240.0, max_favor_r=0.83,
+            net_pnl=0.30, realized_pnl=0.20, fee=-0.10, funding=0.0,
+        )
+        j.record_exit(**kwargs)
+        j.record_exit(**kwargs)
+        lines = (Path(tmp) / "trades.jsonl").read_text().strip().split("\n")
+        assert len(lines) == 1, \
+            f"expected single exit due to dedup; got {len(lines)} lines"
+
+
+def test_journal_dedup_unique_ids_pass_through():
+    """Different client_ids/position_ids must NOT be deduped — each
+    unique id gets its own line."""
+    import tempfile
+    from bitunix_bot.journal import TradeJournal
+    with tempfile.TemporaryDirectory() as tmp:
+        j = TradeJournal(Path(tmp) / "trades.jsonl")
+        for i in range(5):
+            j.record_entry(
+                symbol="BTCUSDT", side="BUY", client_id=f"cid-{i}",
+                order_type="LIMIT", score=0.8, threshold_used=0.75,
+                conviction_mult=1.0, indicator_count=10, pattern_score=2.0,
+                reasons=["x"], atr_pct=0.1, adx=40.0, spread_pct=0.01,
+                bid_depth=10.0, ask_depth=10.0, aggression_10s=0.3,
+                real_cvd=5.0, activity_mult=1.0, session_weight=1.0,
+                entry_price=78000.0, stop_loss=77800.0, take_profit=78200.0,
+                notional=156.0, leverage=10,
+            )
+        lines = (Path(tmp) / "trades.jsonl").read_text().strip().split("\n")
+        assert len(lines) == 5, f"expected 5 unique entries; got {len(lines)}"
 
 
 def test_journal_endpoint_returns_recent_events():
@@ -4592,9 +4660,11 @@ def test_fee_reserve_scales_volume_down_proportional_to_fee_burden():
         f"fee reserve should scale volume to 68% of no-fee budget; got {ratio:.3f}"
 
 
-def test_fee_reserve_caps_at_50_percent():
-    """If fee_burden exceeds 50% (e.g. 0.20% fees on 0.25% SL = 0.80),
-    the reserve caps at 50% so trades aren't zeroed out entirely."""
+def test_fee_reserve_caps_at_60_percent():
+    """If fee_burden exceeds 60% (e.g. 0.20% fees on 0.25% SL = 0.80),
+    the reserve caps at 60% (Grok rescan: was 50%) so trades aren't
+    zeroed out entirely while still reserving more for fees in
+    high-fee regimes."""
     from bitunix_bot.config import RiskCfg, TradingCfg
     from bitunix_bot.risk import build_order
     from bitunix_bot.strategy import Signal
@@ -4612,7 +4682,7 @@ def test_fee_reserve_caps_at_50_percent():
                               min_volume=0.0001, volume_step=0.0001, digits=1,
                               symbol="BTCUSDT")
 
-    # Extreme fee 0.30% > SL 0.25% → fee_burden=1.2, capped at 0.5.
+    # Extreme fee 0.30% > SL 0.25% → fee_burden=1.2, capped at 0.6.
     rc_fee = RiskCfg(stop_loss_pct=0.25, take_profit_r=1.0, use_atr=False,
                      atr_multiplier_sl=1.0, atr_multiplier_tp=4.0,
                      round_trip_fee_pct=0.30)
@@ -4621,8 +4691,9 @@ def test_fee_reserve_caps_at_50_percent():
                             symbol="BTCUSDT")
 
     ratio = plan_fee.volume / plan_nofee.volume
-    assert 0.45 < ratio < 0.55, \
-        f"fee reserve should cap at 50% reduction; got {ratio:.3f}"
+    # 60% cap means volume is 1.0 - 0.6 = 0.4 of nofee budget.
+    assert 0.35 < ratio < 0.45, \
+        f"fee reserve should cap at 60% reduction (volume 40% of nofee); got {ratio:.3f}"
 
 
 def test_structure_anchored_sl_widens_when_bar_has_long_wick():
