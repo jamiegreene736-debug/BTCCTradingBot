@@ -94,11 +94,11 @@ class TradingCfg:
     # 0 entries). Other symbols left at original calibration.
     symbol_min_depth: dict[str, float] = field(default_factory=lambda: {
         "BTCUSDT":   3.0,
-        "ETHUSDT":   60.0,
-        "SOLUSDT":   400.0,
+        "ETHUSDT":   40.0,
+        "SOLUSDT":   250.0,
         "BNBUSDT":   20.0,
-        "ADAUSDT":   5000.0,
-        "XRPUSDT":   15000.0,
+        "ADAUSDT":   3000.0,
+        "XRPUSDT":   10000.0,
         "DOGEUSDT":  100000.0,
         "LINKUSDT":  1000.0,
         "AVAXUSDT":  500.0,

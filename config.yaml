@@ -68,9 +68,9 @@ trading:
   max_open_positions: 5         # was 2 — raised for 15-symbol set (Grok multi-coin review)
   max_positions_per_symbol: 1   # never pyramid into the same trade
   max_same_direction: 3         # was 2 — raised to 3 to allow more utilisation across 15 symbols
-  # 15m timeframe: 900s (15 min) cooldown = 1 full bar, prevents re-entry
-  # on the same symbol within the bar that just fired.
-  cooldown_seconds: 900         # was 600 — scaled up for 15-symbol set
+  # 15m timeframe: 600s (10 min) cooldown — reverted from 900 per Grok filter-loosening review;
+  # 900 was too conservative for a 15-symbol set.
+  cooldown_seconds: 600         # was 900 — reverted per Grok filter-loosening review
   # Force-close stale positions. On 15m timeframe, 4 hours = 16 bars is the
   # window for a setup to resolve — beyond that the signal regime has
   # almost certainly shifted.
@@ -97,7 +97,7 @@ trading:
   # BTC normally has ~0.01% spread (well under threshold); ETH ~0.01-0.03%;
   # SOL ~0.05-0.08%. 0.10% blocks anomalous-wide entries without rejecting
   # alt majors during normal conditions.
-  max_entry_spread_pct: 0.10
+  max_entry_spread_pct: 0.15    # was 0.10 — loosened per Grok filter review; 0.10 too tight for alts on 15m
   # ChatGPT review (gpt-5): RE-ENABLED. The Grok v8 argument (adverse
   # selection on maker entries) was right in spirit but wrong on the
   # arithmetic for a $35 account: market round-trip fees of 0.117% are
@@ -277,16 +277,15 @@ strategy:
   # filters the bottom of that range; combined with the broader symbol
   # set (BTC + ETH + SOL), trade frequency stays similar with higher
   # quality.
-  # Grok multi-coin review: 0.80 → 0.75. More symbols = more signal
-  # opportunities; loosening threshold slightly captures the 0.75-0.79
-  # setups that were previously filtered but are viable at this quality.
-  fire_threshold: 0.75   # was 0.80 — relaxed for 15-symbol set
+  # Grok filter-loosening review: 0.75 → 0.65. Zero signals at 0.75 across
+  # 15 symbols; 0.65 still filters noise without killing all activity.
+  fire_threshold: 0.65   # was 0.75 — loosened per Grok filter review
   # ADX 35 = decisive directional move, not just trend territory. Pairs
   # with the broader symbol set: of 3 majors, usually one is in clean
   # trend at any given hour even when others chop.
-  # Grok rescan: 35 → 40. Live data showed losses clustering in the
-  # ADX 30-35 weak-trend band; 40 enforces only decisive directional moves.
-  min_adx_for_trade: 40.0  # was 35.0 (Grok holistic) — decisive trend only
+  # Grok filter-loosening review: 40 → 30. ADX 40 was too restrictive across
+  # 15 symbols causing zero entries; 30 allows moderate trends with signal edge.
+  min_adx_for_trade: 30.0  # was 40.0 — loosened per Grok filter review
   # Post-signal ticker confirmation (Grok review v8). After signal fires,
   # fetch the live ticker price and require it to have moved in the trade
   # direction since the signal-bar close. Catches exhaustion-fade
