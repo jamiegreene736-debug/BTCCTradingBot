@@ -2288,7 +2288,10 @@ def test_strategy_aggression_burst_fires_above_threshold():
 
 
 def test_strategy_activity_multiplier_scales_combined_score():
-    """Activity multiplier directly scales combined_score (combined ∝ mult)."""
+    """activity_mult is accepted but no longer multiplied into the score —
+    it was removed from score calculation because it created an artificial
+    ceiling that made fire_threshold unreachable during off-peak hours.
+    All three calls should fire with identical scores."""
     from bitunix_bot.config import StrategyCfg
     from bitunix_bot.strategy import evaluate
     rng = np.random.default_rng(42)
@@ -2318,15 +2321,10 @@ def test_strategy_activity_multiplier_scales_combined_score():
                         closes.tolist(), cfg, activity_mult=1.10)
     dampened = evaluate(opens.tolist(), highs.tolist(), lows.tolist(),
                          closes.tolist(), cfg, activity_mult=0.85)
-    # All should fire (well above threshold), but scores must scale.
+    # All should fire with the same score (multiplier no longer affects score).
     assert base is not None and boosted is not None and dampened is not None
-    assert boosted.score > base.score > dampened.score, \
-        f"score should scale with activity_mult: dampened={dampened.score} " \
-        f"base={base.score} boosted={boosted.score}"
-    # Within numerical tolerance, should equal base * mult.
-    assert abs(boosted.score - base.score * 1.10) < 1e-6, \
-        f"boosted ({boosted.score}) ≠ base * 1.10 ({base.score * 1.10})"
-    assert abs(dampened.score - base.score * 0.85) < 1e-6
+    assert base.score == boosted.score == dampened.score, \
+        f"activity_mult should not affect score: {dampened.score} / {base.score} / {boosted.score}"
 
 
 def _bot_with_tape_and_signal():

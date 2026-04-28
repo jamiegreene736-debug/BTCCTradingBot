@@ -636,20 +636,14 @@ def evaluate(
             combined_long *= 1.0 + 0.04 * r_long
             combined_short *= 1.0 + 0.04 * r_short
 
-    # Session reweighting: combined scores get multiplied by session_weight
-    # (default 1.0). High-edge sessions can boost; dead hours dampen. The
-    # bot passes the multiplier in based on UTC hour.
-    if session_weight is not None and session_weight > 0:
-        combined_long *= session_weight
-        combined_short *= session_weight
-
-    # Activity multiplier — derived from trade-tape print rate. Surge in
-    # tape activity = real conviction (boost slightly); below-baseline =
-    # market asleep (dampen more, asymmetric clamp 0.85–1.10). Stacks with
-    # session_weight so dead-hour + low-activity gets meaningful suppression.
-    if activity_mult is not None and activity_mult > 0:
-        combined_long *= activity_mult
-        combined_short *= activity_mult
+    # Session weight and activity multiplier are intentionally NOT applied
+    # to the combined score. Multiplying them in creates an effective ceiling
+    # (e.g. 0.75 × 0.85 = 0.64) that makes fire_threshold unreachable during
+    # off-peak and dead hours — producing zero signals even in active markets.
+    # Signal quality is already captured by the indicator/pattern scores and
+    # the regime-adaptive threshold. These values are passed through to the
+    # Signal object for logging and position-sizing use only.
+    _ = session_weight, activity_mult  # referenced below in _build
 
     pat_long_names = [p.name for p in candle_hits if p.direction == "bullish"]
     pat_short_names = [p.name for p in candle_hits if p.direction == "bearish"]

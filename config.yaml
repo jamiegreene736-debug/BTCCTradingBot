@@ -264,7 +264,7 @@ strategy:
   # quality.
   # Grok diagnosis: 0.65 still too tight with low pattern_weight (0.30);
   # 0.60 ensures more setups pass without dropping below quality baseline.
-  fire_threshold: 0.70   # was 0.80 — Grok 2026-04-27: 0.80 produced only 1 signal/3.5h; 0.70 targets 3-6/hr
+  fire_threshold: 0.55   # session/activity multipliers removed from score; 0.55 is the real quality gate
   # ADX 35 = decisive directional move, not just trend territory. Pairs
   # with the broader symbol set: of 3 majors, usually one is in clean
   # trend at any given hour even when others chop.
