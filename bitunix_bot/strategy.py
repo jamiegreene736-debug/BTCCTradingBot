@@ -805,3 +805,263 @@ def evaluate(
             return None
         return _emit("short", cont_short_ok)
     return None
+
+
+# ============================================================================
+# OVERLAY MODE — raw scores for the Chrome-extension dashboard overlay.
+# ============================================================================
+#
+# evaluate() returns None whenever neither side beats the fire_threshold, and
+# applies several trade-only gates (continuation penalty, absorption veto,
+# tape gate). For an exit-timing overlay we want the raw long/short combined
+# scores even when no trade-quality signal would fire — the user is watching
+# momentum BUILD against an existing position, not waiting to enter a new one.
+#
+# compute_overlay_scores() mirrors the indicator + scoring half of evaluate()
+# (steps 1–10 in the docstring above) and returns both directional scores
+# regardless of threshold. The duplication is intentional: keeping evaluate()
+# untouched preserves the trading bot's behavior exactly.
+
+@dataclass
+class OverlayScores:
+    long_score: float                     # 0-1 combined for long direction
+    short_score: float                    # 0-1 combined for short direction
+    long_reasons: list[str]               # all firing reasons, ordered by detection
+    short_reasons: list[str]
+    price: float
+    atr_pct: float
+    adx: float                             # NaN-safe; -1.0 when unavailable
+    factor_breakdown_long: dict[str, float]
+    factor_breakdown_short: dict[str, float]
+
+
+def compute_overlay_scores(
+    opens: list[float],
+    highs: list[float],
+    lows: list[float],
+    closes: list[float],
+    cfg: StrategyCfg,
+    volumes: list[float] | None = None,
+    htf_closes: list[float] | None = None,
+    ob_imbalance: float | None = None,
+    real_cvd: float | None = None,
+    aggression_10s: float | None = None,
+    price_change_10s_pct: float | None = None,
+) -> OverlayScores | None:
+    """Raw per-side scores without any trade-quality gating.
+
+    Same indicator + factor + pattern stack as evaluate(), but skips:
+      - fire_threshold check (we want sub-threshold scores too)
+      - continuation penalty (gates ENTRIES, not relevant for exit timing)
+      - absorption veto (same)
+      - tape gate (same)
+
+    Returns None only on insufficient kline depth or invalid price/ATR —
+    same fail-safe path evaluate() takes for those cases.
+    """
+    if len(closes) < max(cfg.ema_slow, cfg.macd_slow, cfg.bb_period, cfg.atr_period) + 5:
+        return None
+
+    h = np.array(highs, dtype=float)
+    l = np.array(lows, dtype=float)
+    c = np.array(closes, dtype=float)
+    v = np.array(volumes if volumes is not None else [0.0] * len(c), dtype=float)
+
+    rsi_v = rsi(c, cfg.rsi_period)
+    macd_l, _macd_s, _macd_h = macd(c, cfg.macd_fast, cfg.macd_slow, cfg.macd_signal)
+    bb_up, _bb_mid, bb_lo = bollinger(c, cfg.bb_period, cfg.bb_std)
+    atr_v = atr_fn(h, l, c, cfg.atr_period)
+    adx_v = adx_fn(h, l, c, cfg.adx_period)
+    _, st_dir = supertrend_fn(h, l, c, cfg.supertrend_period, cfg.supertrend_mult)
+    vol_ma_v = volume_ma_fn(v, cfg.volume_ma_period) if v.sum() > 0 else None
+
+    i = len(c) - 1
+    p = c[i]
+    if p <= 0:
+        return None
+    atr_now = atr_v[i] if i < len(atr_v) else np.nan
+    if np.isnan(atr_now):
+        return None
+    atr_pct = (atr_now / p) * 100.0
+
+    long_reasons: list[str] = []
+    short_reasons: list[str] = []
+
+    # Mirrors evaluate() lines 456-558. Kept in sync manually — if you change
+    # the indicator votes there, change them here.
+
+    # 1. Supertrend regime
+    if i < len(st_dir) and not np.isnan(st_dir[i]):
+        if st_dir[i] == 1:
+            long_reasons.append("supertrend_up")
+        elif st_dir[i] == -1:
+            short_reasons.append("supertrend_down")
+
+    # 2. Volume spike — votes for the side already winning
+    if vol_ma_v is not None and i < len(vol_ma_v):
+        vma = vol_ma_v[i]
+        if not np.isnan(vma) and vma > 0:
+            ratio = v[i] / vma
+            if ratio >= cfg.volume_spike_multiplier:
+                if len(long_reasons) > len(short_reasons):
+                    long_reasons.append(f"vol_spike({ratio:.1f}x)")
+                elif len(short_reasons) > len(long_reasons):
+                    short_reasons.append(f"vol_spike({ratio:.1f}x)")
+
+    # 3. ADX trend strength — votes for the winning side
+    a_now = adx_v[i] if i < len(adx_v) else np.nan
+    if not np.isnan(a_now) and a_now >= cfg.adx_min:
+        if len(long_reasons) > len(short_reasons):
+            long_reasons.append(f"adx({a_now:.0f})")
+        elif len(short_reasons) > len(long_reasons):
+            short_reasons.append(f"adx({a_now:.0f})")
+
+    # 4. HTF trend
+    if htf_closes is not None and len(htf_closes) >= cfg.htf_ema_period + 1:
+        htf_arr = np.array(htf_closes, dtype=float)
+        htf_ema_v = ema(htf_arr, cfg.htf_ema_period)
+        if not np.isnan(htf_ema_v[-1]):
+            if htf_arr[-1] > htf_ema_v[-1]:
+                long_reasons.append(f"htf_uptrend({cfg.htf_timeframe})")
+            elif htf_arr[-1] < htf_ema_v[-1]:
+                short_reasons.append(f"htf_downtrend({cfg.htf_timeframe})")
+
+    # 5. Order book imbalance
+    if ob_imbalance is not None:
+        if ob_imbalance >= cfg.ob_imbalance_threshold:
+            long_reasons.append(f"ob_imb+{ob_imbalance:.2f}")
+        elif ob_imbalance <= -cfg.ob_imbalance_threshold:
+            short_reasons.append(f"ob_imb{ob_imbalance:.2f}")
+
+    # 6. RSI divergence
+    obv_v = obv(c, v) if v.sum() > 0 else np.zeros(len(c))
+    cvd_v = cvd(h, l, c, v) if v.sum() > 0 else None
+    div_hits = div_mod.detect_divergences(c, h, l, rsi_v, macd_l, obv_v,
+                                           pivot_lookback=cfg.swing_lookback,
+                                           cvd_v=cvd_v)
+    seen_div: set = set()
+    for d in div_hits:
+        osc = d.name.split("_")[0]
+        if osc != "rsi":
+            continue
+        bull_side = d.direction in ("bullish", "hidden_bullish")
+        key = (osc, bull_side)
+        if key in seen_div:
+            continue
+        seen_div.add(key)
+        if bull_side:
+            long_reasons.append(f"DIV:{d.name}")
+        else:
+            short_reasons.append(f"DIV:{d.name}")
+
+    # 7. TTM Squeeze
+    k_up, k_mid, k_lo = keltner_channels(h, l, c, cfg.keltner_period,
+                                          cfg.keltner_atr_multiplier)
+    if (i < len(bb_up) and i < len(k_up)
+            and not np.isnan(bb_up[i]) and not np.isnan(k_up[i])):
+        squeeze_on = (bb_up[i] < k_up[i]) and (bb_lo[i] > k_lo[i])
+        if squeeze_on and not np.isnan(k_mid[i]):
+            if p > k_mid[i]:
+                long_reasons.append("squeeze_up")
+            elif p < k_mid[i]:
+                short_reasons.append("squeeze_down")
+
+    # 8. Real CVD
+    if real_cvd is not None and abs(real_cvd) >= 1.0:
+        if real_cvd > 0:
+            long_reasons.append(f"cvd_real+{real_cvd:.2f}")
+        else:
+            short_reasons.append(f"cvd_real{real_cvd:.2f}")
+
+    # 9. Aggression burst
+    if aggression_10s is not None:
+        if aggression_10s >= 0.40:
+            long_reasons.append(f"agg+{aggression_10s:.2f}")
+        elif aggression_10s <= -0.40:
+            short_reasons.append(f"agg{aggression_10s:.2f}")
+
+    # 10. Absorption — votes opposite the aggressive flow
+    if (aggression_10s is not None and price_change_10s_pct is not None
+            and abs(aggression_10s) >= 0.55
+            and abs(price_change_10s_pct) < 0.15):
+        if aggression_10s > 0:
+            short_reasons.append(f"absorb(buyflow@{aggression_10s:+.2f})")
+        else:
+            long_reasons.append(f"absorb(sellflow@{aggression_10s:+.2f})")
+
+    # Combos
+    combo_hits = combos_mod.detect(long_reasons, short_reasons)
+    for combo in combo_hits:
+        tag = f"CMB:{combo.name}"
+        if combo.direction == "bullish":
+            long_reasons.append(tag)
+        else:
+            short_reasons.append(tag)
+
+    # Patterns
+    o = np.array(opens, dtype=float)
+    candle_hits = patterns.detect(o, h, l, c)
+    chart_hits = chart_patterns.detect_all(h, l, c, cfg.swing_lookback)
+    candle_long, candle_short = patterns.score(candle_hits)
+    chart_long, chart_short = chart_patterns.score(chart_hits)
+    pattern_long_n = min(1.0, (candle_long + chart_long) / cfg.pattern_norm)
+    pattern_short_n = min(1.0, (candle_short + chart_short) / cfg.pattern_norm)
+    for pat in candle_hits:
+        if pat.direction == "bullish":
+            long_reasons.append(f"PAT:{pat.name}")
+        elif pat.direction == "bearish":
+            short_reasons.append(f"PAT:{pat.name}")
+    for cp in chart_hits:
+        if cp.direction == "bullish":
+            long_reasons.append(f"CP:{cp.name}")
+        elif cp.direction == "bearish":
+            short_reasons.append(f"CP:{cp.name}")
+
+    # Factor breakdown + weighted combine
+    breakdown_long = factor_score_breakdown(long_reasons, cfg.factor_saturation)
+    breakdown_short = factor_score_breakdown(short_reasons, cfg.factor_saturation)
+    factor_long = factor_score_weighted(breakdown_long, cfg.factor_weights)
+    factor_short = factor_score_weighted(breakdown_short, cfg.factor_weights)
+
+    pw = cfg.pattern_weight
+    combined_long = pw * pattern_long_n + (1 - pw) * factor_long
+    combined_short = pw * pattern_short_n + (1 - pw) * factor_short
+
+    # Trend dominance dampener (matches evaluate)
+    TREND_DOMINANCE_THRESHOLD = 0.67
+    if breakdown_long.get("trend", 0.0) >= TREND_DOMINANCE_THRESHOLD:
+        combined_short *= 0.5
+    if breakdown_short.get("trend", 0.0) >= TREND_DOMINANCE_THRESHOLD:
+        combined_long *= 0.5
+
+    # Regime weighting (matches evaluate)
+    a_for_regime = adx_v[i] if i < len(adx_v) else float("nan")
+    if not np.isnan(a_for_regime):
+        TREND_TAGS = ("ema_stack_", "supertrend_", "htf_", "btc_leader_",
+                      "macd_up", "macd_down", "CMB:trend_pullback",
+                      "CMB:squeeze_breakout", "cvd_real", "cvd_proxy")
+        REV_TAGS = ("DIV:", "sr_bounce_", "sr_reject_", "SMC:fvg_",
+                    "SMC:liquidity_sweep_", "CMB:smc_reversal",
+                    "CMB:bb_extreme_revert", "absorb")
+        if a_for_regime > 28:
+            t_long = sum(1 for r in long_reasons if any(t in r for t in TREND_TAGS))
+            t_short = sum(1 for r in short_reasons if any(t in r for t in TREND_TAGS))
+            combined_long *= 1.0 + 0.04 * t_long
+            combined_short *= 1.0 + 0.04 * t_short
+        elif a_for_regime < 18:
+            r_long = sum(1 for r in long_reasons if any(t in r for t in REV_TAGS))
+            r_short = sum(1 for r in short_reasons if any(t in r for t in REV_TAGS))
+            combined_long *= 1.0 + 0.04 * r_long
+            combined_short *= 1.0 + 0.04 * r_short
+
+    return OverlayScores(
+        long_score=min(1.0, max(0.0, combined_long)),
+        short_score=min(1.0, max(0.0, combined_short)),
+        long_reasons=long_reasons,
+        short_reasons=short_reasons,
+        price=float(p),
+        atr_pct=float(atr_pct),
+        adx=float(a_now) if not np.isnan(a_now) else -1.0,
+        factor_breakdown_long=breakdown_long,
+        factor_breakdown_short=breakdown_short,
+    )

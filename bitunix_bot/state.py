@@ -36,6 +36,10 @@ class BotState:
         # Suppresses spam like "XRPUSDT: same-direction cap" on every tick.
         self._skip_last_at: dict[tuple[str, str], int] = {}
         self.skip_dedupe_seconds: int = 300  # 5-min cooldown per (symbol, reason)
+        # Overlay scores per symbol — written by the bot tick loop, read by
+        # the /api/momentum endpoint that powers the Chrome-extension overlay.
+        # Each entry is the most recent OverlayScores serialized to dict.
+        self._overlay: dict[str, dict[str, Any]] = {}
 
     def record_tick(self, price: float | None, klines_n: int) -> None:
         with self._lock:
@@ -79,6 +83,21 @@ class BotState:
             self.error_count += 1
             self.last_error_text = text
             self.events.append(TickEvent(int(time.time()), "error", text))
+
+    def record_overlay(self, symbol: str, payload: dict[str, Any]) -> None:
+        """Store the latest overlay scores for a symbol.
+
+        Payload should already be JSON-safe (the caller serializes the
+        OverlayScores dataclass). The dict is replaced wholesale on each
+        tick — no history is kept.
+        """
+        with self._lock:
+            self._overlay[symbol.upper()] = payload
+
+    def overlay_snapshot(self) -> dict[str, dict[str, Any]]:
+        """Return a copy of all per-symbol overlay scores."""
+        with self._lock:
+            return dict(self._overlay)
 
     def snapshot(self) -> dict[str, Any]:
         with self._lock:

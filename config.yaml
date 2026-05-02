@@ -1,16 +1,17 @@
 # Bitunix TraderBot — aggressive multi-symbol futures.
 # 100% technical. No news / sentiment inputs are used.
 
-mode: live               # paper | live  (paper never sends orders)
+mode: paper              # paper | live  (paper never sends orders)
+                         # Switched to paper for the Chrome-extension overlay
+                         # workflow — we want signals, not auto-trades.
 
 trading:
-  # 4 highest-liquidity symbols — Grok session review: trim to reduce noise
-  # and focus signals. Lower symbols = fewer fee-draining marginal trades.
+  # User trades these four manually; bot only computes signals for the overlay.
   symbols:
     - BTCUSDT
     - ETHUSDT
-    - SOLUSDT
-    - BNBUSDT
+    - DOGEUSDT
+    - XRPUSDT
   # Grok holistic review: shifted 1m → 15m. 1m is too noisy for confluence-
   # based scalping — lagging indicators (EMA/MACD/Supertrend) systematically
   # confirm AFTER 1m moves resolve, picking exhaustion. 15m gives 4-15× the

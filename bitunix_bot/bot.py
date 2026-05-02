@@ -33,7 +33,7 @@ from .risk import OrderPlan, adaptive_tp_r, build_order
 from .state import get as get_state
 from .order_executor import OrderExecutor
 from .position_manager import PositionManager
-from .strategy import Signal, evaluate
+from .strategy import Signal, compute_overlay_scores, evaluate
 from .symbol_meta import DEFAULT_META as _DEFAULT_META
 from .symbol_meta import SymbolMeta
 from .tradetape import TradeFeed
@@ -663,9 +663,76 @@ class BitunixBot:
 
     # ------------------------------------------------------------------ tick
 
+    def _compute_overlays(self) -> None:
+        """Refresh per-symbol overlay scores for the Chrome-extension overlay.
+
+        Runs once per tick for every configured symbol regardless of cooldown
+        / streak-pause / position state — the overlay is for exit timing, so
+        the user wants continuous momentum updates even when the trading
+        loop wouldn't act on this symbol.
+
+        Fetches klines + HTF + tape inputs, computes raw long/short scores,
+        writes to BotState. Errors per symbol are swallowed (logged at debug)
+        so a single failing symbol doesn't take down the whole tick.
+        """
+        for sym in self.cfg.trading.symbols:
+            sym_u = sym.upper()
+            try:
+                rows = self.client.klines(sym, self.cfg.trading.timeframe,
+                                          limit=self.cfg.loop.kline_lookback)
+            except Exception as e:
+                log.debug("Overlay klines fetch failed for %s: %s", sym_u, e)
+                continue
+            if len(rows) < 30:
+                continue
+            rows = sorted(rows, key=lambda r: int(r.get("time") or 0))
+            opens = [float(r["open"]) for r in rows]
+            highs = [float(r["high"]) for r in rows]
+            lows = [float(r["low"]) for r in rows]
+            closes = [float(r["close"]) for r in rows]
+            volumes = [float(r.get("baseVol") or r.get("quoteVol") or 0) for r in rows]
+            htf_closes = self._get_htf_closes(sym)
+            ob_imb = self.ob_feed.get_imbalance(sym) if self.ob_feed else None
+            real_cvd = aggression_10s = price_change_10s_pct = None
+            if self.tape_feed is not None:
+                real_cvd = self.tape_feed.get_cvd(sym, window_secs=60)
+                aggression_10s = self.tape_feed.get_aggression_ratio(sym, window_secs=10)
+                price_change_10s_pct = self.tape_feed.get_price_change_pct(sym, window_secs=10)
+            try:
+                overlay = compute_overlay_scores(
+                    opens, highs, lows, closes, self.cfg.strategy,
+                    volumes=volumes, htf_closes=htf_closes,
+                    ob_imbalance=ob_imb,
+                    real_cvd=real_cvd, aggression_10s=aggression_10s,
+                    price_change_10s_pct=price_change_10s_pct,
+                )
+            except Exception as e:
+                log.debug("compute_overlay_scores failed for %s: %s", sym_u, e)
+                continue
+            if overlay is None:
+                continue
+            self.state.record_overlay(sym_u, {
+                "symbol": sym_u,
+                "long_score": round(overlay.long_score, 4),
+                "short_score": round(overlay.short_score, 4),
+                "long_reasons": overlay.long_reasons,
+                "short_reasons": overlay.short_reasons,
+                "price": overlay.price,
+                "atr_pct": round(overlay.atr_pct, 4),
+                "adx": round(overlay.adx, 2) if overlay.adx >= 0 else None,
+                "factor_long": {k: round(v, 3) for k, v in overlay.factor_breakdown_long.items()},
+                "factor_short": {k: round(v, 3) for k, v in overlay.factor_breakdown_short.items()},
+                "as_of": int(time.time()),
+            })
+
     def _tick(self) -> None:
         # 0. Update streak-loss state from newly-closed positions.
         self._update_streak_state()
+
+        # 0a. Refresh overlay scores for all symbols. Runs unconditionally so
+        # the Chrome-extension overlay keeps updating even when the trading
+        # loop is paused / capped / cooldowned for a symbol.
+        self._compute_overlays()
 
         # 0b. Daily drawdown — gradual throttle on risk sizing as DD deepens,
         # full halt at the configured threshold. Existing positions still

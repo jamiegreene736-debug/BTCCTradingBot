@@ -70,8 +70,28 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
             headers={"WWW-Authenticate": 'Basic realm="bitunix-bot"'},
         )
 
+    # ------------------------------------------------------------------ CORS
+    #
+    # The Chrome-extension overlay (running on bitunix.com pages) calls this
+    # API across origins. Browsers send a CORS preflight (OPTIONS) before
+    # any cross-origin GET that includes auth headers; we answer permissively
+    # for a single-user dashboard, including the Authorization header.
+
+    @app.after_request
+    def _cors(resp: Response) -> Response:
+        resp.headers["Access-Control-Allow-Origin"] = "*"
+        resp.headers["Access-Control-Allow-Methods"] = "GET, POST, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
+        resp.headers["Access-Control-Max-Age"] = "600"
+        return resp
+
     @app.before_request
     def _gate() -> Response | None:
+        # Preflights must succeed before the browser sends the auth header,
+        # so let OPTIONS through without auth — the after_request hook adds
+        # the CORS response headers.
+        if request.method == "OPTIONS":
+            return Response("", status=204)
         if request.path == "/healthz":
             return None
         if not _check_auth():
@@ -326,6 +346,31 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
                 "daily_dd_breached": bot.daily_dd_breached,
                 "recent_trade_r_len": len(bot.recent_trade_r),
             },
+        })
+
+    @app.get("/api/momentum")
+    def api_momentum() -> Response:
+        """Per-symbol reversal scores for the Chrome-extension overlay.
+
+        Returns the most recent overlay snapshot the bot wrote on its tick
+        loop. Unlike /api/state this endpoint does no Bitunix REST calls —
+        all data is served from the in-process state cache, so polling at
+        a few seconds per request is cheap.
+
+        long_score:  0.0–1.0 — "how strongly indicators favor going LONG".
+                     For someone holding a SHORT position, high values are
+                     a reversal warning ("exit your short").
+        short_score: mirror — "exit your long" warning.
+
+        Note: these are confluence scores, not calibrated probabilities.
+        """
+        snap = state.overlay_snapshot()
+        return jsonify({
+            "now": int(time.time()),
+            "tick_seconds": cfg.loop.tick_seconds,
+            "timeframe": cfg.trading.timeframe,
+            "fire_threshold": cfg.strategy.fire_threshold,
+            "symbols": snap,
         })
 
     @app.get("/")
