@@ -663,65 +663,133 @@ class BitunixBot:
 
     # ------------------------------------------------------------------ tick
 
+    # Multi-horizon overlay configuration. Each entry is:
+    #   (key, klines_tf, cache_ttl_seconds, display_label)
+    # The kline timeframe was chosen so that 4-15 bars cover the user-facing
+    # horizon — so e.g. "Next 15m" reads from 1m bars where 15 bars produce
+    # stable indicator outputs. TTL is roughly bar_duration / 4 so we never
+    # show stale data and never refetch faster than necessary.
+    _OVERLAY_HORIZONS: tuple[tuple[str, str, int, str], ...] = (
+        ("h_15m", "1m",  15,   "Next 15m"),
+        ("h_30m", "5m",  60,   "Next 30m"),
+        ("h_1h",  "15m", 180,  "Next 1h"),
+        ("h_4h",  "1h",  600,  "Next 4h"),
+        ("h_8h",  "2h",  1200, "Next 8h"),
+        ("h_24h", "4h",  1800, "Next 24h"),
+    )
+
+    def _get_klines_cached(self, symbol: str, timeframe: str,
+                           ttl_seconds: int, limit: int = 200) -> list | None:
+        """Klines fetcher with per-(symbol, timeframe) TTL cache.
+
+        Returns rows sorted ascending by time, or the last cached value if
+        the network call fails (degrades gracefully — better to show
+        slightly-stale data than to drop the row entirely).
+        """
+        key = (symbol.upper(), timeframe)
+        now = int(time.time())
+        cached = getattr(self, "_kline_cache", None)
+        if cached is None:
+            self._kline_cache = {}
+            cached = self._kline_cache
+        prev = cached.get(key)
+        if prev and (now - prev[0]) < ttl_seconds:
+            return prev[1]
+        try:
+            rows = self.client.klines(symbol, timeframe, limit=limit)
+        except Exception as e:
+            log.debug("klines fetch failed %s/%s: %s", symbol, timeframe, e)
+            return prev[1] if prev else None
+        if not rows:
+            return prev[1] if prev else None
+        rows = sorted(rows, key=lambda r: int(r.get("time") or 0))
+        cached[key] = (now, rows)
+        return rows
+
     def _compute_overlays(self) -> None:
-        """Refresh per-symbol overlay scores for the Chrome-extension overlay.
+        """Refresh per-symbol multi-horizon overlay scores.
 
         Runs once per tick for every configured symbol regardless of cooldown
         / streak-pause / position state — the overlay is for exit timing, so
         the user wants continuous momentum updates even when the trading
         loop wouldn't act on this symbol.
 
-        Fetches klines + HTF + tape inputs, computes raw long/short scores,
-        writes to BotState. Errors per symbol are swallowed (logged at debug)
-        so a single failing symbol doesn't take down the whole tick.
+        For each symbol, runs compute_overlay_scores() at six different
+        kline timeframes corresponding to forward-looking horizons of
+        15m / 30m / 1h / 4h / 8h / 24h. Tape and order-book signals are
+        only fed into the short-term horizons (≤5m bars) — they're noise
+        on multi-hour bars.
+
+        Errors per symbol/horizon are swallowed (logged at debug) so a
+        single failing fetch doesn't take down the whole tick.
         """
         for sym in self.cfg.trading.symbols:
             sym_u = sym.upper()
-            try:
-                rows = self.client.klines(sym, self.cfg.trading.timeframe,
-                                          limit=self.cfg.loop.kline_lookback)
-            except Exception as e:
-                log.debug("Overlay klines fetch failed for %s: %s", sym_u, e)
-                continue
-            if len(rows) < 30:
-                continue
-            rows = sorted(rows, key=lambda r: int(r.get("time") or 0))
-            opens = [float(r["open"]) for r in rows]
-            highs = [float(r["high"]) for r in rows]
-            lows = [float(r["low"]) for r in rows]
-            closes = [float(r["close"]) for r in rows]
-            volumes = [float(r.get("baseVol") or r.get("quoteVol") or 0) for r in rows]
-            htf_closes = self._get_htf_closes(sym)
-            ob_imb = self.ob_feed.get_imbalance(sym) if self.ob_feed else None
+
+            # Live-tape inputs are only meaningful for the short-term horizons.
             real_cvd = aggression_10s = price_change_10s_pct = None
             if self.tape_feed is not None:
                 real_cvd = self.tape_feed.get_cvd(sym, window_secs=60)
                 aggression_10s = self.tape_feed.get_aggression_ratio(sym, window_secs=10)
                 price_change_10s_pct = self.tape_feed.get_price_change_pct(sym, window_secs=10)
-            try:
-                overlay = compute_overlay_scores(
-                    opens, highs, lows, closes, self.cfg.strategy,
-                    volumes=volumes, htf_closes=htf_closes,
-                    ob_imbalance=ob_imb,
-                    real_cvd=real_cvd, aggression_10s=aggression_10s,
-                    price_change_10s_pct=price_change_10s_pct,
-                )
-            except Exception as e:
-                log.debug("compute_overlay_scores failed for %s: %s", sym_u, e)
-                continue
-            if overlay is None:
+            ob_imb = self.ob_feed.get_imbalance(sym) if self.ob_feed else None
+            htf_closes = self._get_htf_closes(sym)
+
+            horizons: dict[str, dict[str, Any]] = {}
+            latest_price = None
+
+            for key, tf, ttl, label in self._OVERLAY_HORIZONS:
+                rows = self._get_klines_cached(sym, tf, ttl,
+                                                limit=self.cfg.loop.kline_lookback)
+                if not rows or len(rows) < 30:
+                    continue
+                opens = [float(r["open"]) for r in rows]
+                highs = [float(r["high"]) for r in rows]
+                lows = [float(r["low"]) for r in rows]
+                closes = [float(r["close"]) for r in rows]
+                volumes = [float(r.get("baseVol") or r.get("quoteVol") or 0) for r in rows]
+
+                # Only feed flow + HTF inputs to the shortest two timeframes.
+                # On 15m+ bars, 10-second tape windows and 1h HTF context are
+                # noise rather than signal.
+                is_short_tf = tf in ("1m", "5m")
+                tf_htf = htf_closes if is_short_tf else None
+                tf_ob = ob_imb if is_short_tf else None
+                tf_cvd = real_cvd if is_short_tf else None
+                tf_agg = aggression_10s if is_short_tf else None
+                tf_chg = price_change_10s_pct if is_short_tf else None
+
+                try:
+                    overlay = compute_overlay_scores(
+                        opens, highs, lows, closes, self.cfg.strategy,
+                        volumes=volumes, htf_closes=tf_htf,
+                        ob_imbalance=tf_ob,
+                        real_cvd=tf_cvd, aggression_10s=tf_agg,
+                        price_change_10s_pct=tf_chg,
+                    )
+                except Exception as e:
+                    log.debug("overlay failed %s/%s: %s", sym_u, tf, e)
+                    continue
+                if overlay is None:
+                    continue
+                horizons[key] = {
+                    "label": label,
+                    "timeframe": tf,
+                    "long_score": round(overlay.long_score, 4),
+                    "short_score": round(overlay.short_score, 4),
+                    "long_reasons": overlay.long_reasons,
+                    "short_reasons": overlay.short_reasons,
+                    "adx": round(overlay.adx, 2) if overlay.adx >= 0 else None,
+                }
+                latest_price = overlay.price
+
+            if not horizons:
                 continue
             self.state.record_overlay(sym_u, {
                 "symbol": sym_u,
-                "long_score": round(overlay.long_score, 4),
-                "short_score": round(overlay.short_score, 4),
-                "long_reasons": overlay.long_reasons,
-                "short_reasons": overlay.short_reasons,
-                "price": overlay.price,
-                "atr_pct": round(overlay.atr_pct, 4),
-                "adx": round(overlay.adx, 2) if overlay.adx >= 0 else None,
-                "factor_long": {k: round(v, 3) for k, v in overlay.factor_breakdown_long.items()},
-                "factor_short": {k: round(v, 3) for k, v in overlay.factor_breakdown_short.items()},
+                "price": latest_price,
+                "horizons": horizons,
+                "horizon_order": [k for k, _, _, _ in self._OVERLAY_HORIZONS if k in horizons],
                 "as_of": int(time.time()),
             })
 
