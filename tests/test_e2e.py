@@ -3584,6 +3584,44 @@ def test_next_hour_decision_waits_when_15m_trigger_is_mixed():
     assert "the 15-minute trigger is not decisive" in decision["warnings"]
 
 
+def test_next_hour_smoothing_requires_confirmed_side_flip():
+    reset_state()
+    cfg = fresh_cfg()
+    bot = BitunixBot(cfg)
+
+    def decision(action: str, score: int) -> dict[str, Any]:
+        return {
+            "action": action,
+            "lean": action,
+            "confidence": "high",
+            "confidence_score": score,
+            "confidenceScore": score,
+            "warnings": [],
+            "method": "weighted_next_15m",
+            "horizon": "15m",
+            "horizons": [],
+        }
+
+    # First actionable tick has to confirm once more before publishing.
+    first = bot._smooth_next_hour_decision("ETHUSDT", decision("short", 90))
+    assert first["action"] == "wait"
+    shown = bot._smooth_next_hour_decision("ETHUSDT", decision("short", 90))
+    assert shown["action"] == "short"
+
+    # A high-confidence opposite side is not published immediately.
+    for _ in range(bot._FOCUS_FLIP_CONFIRM_TICKS):
+        pending = bot._smooth_next_hour_decision("ETHUSDT", decision("long", 85))
+        assert pending["action"] == "wait"
+        assert pending["smoothing"]["pending_action"] == "long"
+
+    # Once the prior side has been held long enough and the opposite side is
+    # still there, the flip can publish.
+    bot._overlay_decision_memory["ETHUSDT"]["changed_at"] = time.time() - 61
+    flipped = bot._smooth_next_hour_decision("ETHUSDT", decision("long", 85))
+    assert flipped["action"] == "long"
+    assert flipped["smoothing"]["status"] == "confirmed"
+
+
 def test_sub_hour_payload_marks_cache_ready_from_core_horizons():
     horizons = {
         "h_15m": {
@@ -5578,6 +5616,7 @@ def main() -> int:
         test_overlay_factor_score_renormalizes_when_flow_absent,
         test_next_hour_decision_favors_aligned_long,
         test_next_hour_decision_waits_when_15m_trigger_is_mixed,
+        test_next_hour_smoothing_requires_confirmed_side_flip,
         test_sub_hour_payload_marks_cache_ready_from_core_horizons,
         test_sub_hour_payload_exposes_primary_when_no_signal_fires,
         test_signal_records_factor_breakdown,

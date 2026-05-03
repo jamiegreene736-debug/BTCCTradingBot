@@ -145,6 +145,10 @@ class BitunixBot:
         # 2-tick persistence filter. Shape: {sym: {horizon_key: [(score, side), ...]}}.
         # Keeps the last _PERSISTENCE_WINDOW entries; older ones get trimmed.
         self._overlay_score_history: dict[str, dict[str, list[tuple[float, str]]]] = {}
+        # Per-symbol published 15m decision memory. Raw 15m readings can flip
+        # long/short on one aggressive tape burst; the API should publish a
+        # stable call that every Chrome tab sees consistently.
+        self._overlay_decision_memory: dict[str, dict[str, Any]] = {}
 
     # ------------------------------------------------------------------ setup
 
@@ -711,6 +715,9 @@ class BitunixBot:
     _NEXT_HOUR_CHOP_ADX = 25.0
     _NEXT_HOUR_NEWS_ATR_PCT = 0.75
     _NEXT_HOUR_CASCADE_10S_PCT = 1.00
+    _FOCUS_ENTER_CONFIRM_TICKS = 2
+    _FOCUS_FLIP_CONFIRM_TICKS = 5
+    _FOCUS_MIN_HOLD_SECONDS = 60
 
     @classmethod
     def _next_hour_confidence_score(
@@ -948,6 +955,136 @@ class BitunixBot:
             "horizon": "15m",
             "horizons": details,
         }
+
+    def _smooth_next_hour_decision(
+        self,
+        symbol: str,
+        raw_decision: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Publish a stable 15m decision instead of raw one-tick side flips.
+
+        A direct SHORT -> LONG publication is expensive for the human using the
+        overlay: it invites whipsaw trades. Opposite actionable sides must
+        persist across several bot ticks and the previous published side must
+        be at least a minute old. While the flip is proving itself, publish
+        WAIT with an explicit confirmation warning.
+        """
+        sym_u = symbol.upper()
+        now = time.time()
+
+        def _action(decision: dict[str, Any]) -> str:
+            value = str(decision.get("action") or "wait").lower()
+            return value if value in ("long", "short") else "wait"
+
+        def _accept(decision: dict[str, Any], status: str = "stable") -> dict[str, Any]:
+            out = {
+                **decision,
+                "smoothing": {
+                    "status": status,
+                    "published_action": _action(decision),
+                    "pending_action": None,
+                    "pending_count": 0,
+                    "required_count": 0,
+                    "min_hold_seconds": self._FOCUS_MIN_HOLD_SECONDS,
+                },
+            }
+            self._overlay_decision_memory[sym_u] = {
+                "shown": out,
+                "changed_at": now,
+                "pending_key": "",
+                "pending_count": 0,
+            }
+            return out
+
+        def _wait_for_confirmation(
+            *,
+            shown_action: str,
+            raw_action: str,
+            pending_count: int,
+            required_count: int,
+            held_seconds: int,
+        ) -> dict[str, Any]:
+            raw_score = int(raw_decision.get("confidence_score") or 0)
+            warning = (
+                f"{raw_action.upper()} confirming "
+                f"({pending_count}/{required_count}); "
+                f"holding WAIT until the 15m flip is stable"
+            )
+            if shown_action in ("long", "short") and held_seconds < self._FOCUS_MIN_HOLD_SECONDS:
+                warning += f" and prior {shown_action.upper()} is at least 60s old"
+            warnings = [warning] + list(raw_decision.get("warnings") or [])
+            return {
+                **raw_decision,
+                "action": "wait",
+                "confidence": "none",
+                "confidence_score": max(0, min(49, raw_score)),
+                "confidenceScore": max(0, min(49, raw_score)),
+                "warnings": warnings,
+                "smoothing": {
+                    "status": "confirming",
+                    "published_action": "wait",
+                    "previous_action": shown_action,
+                    "pending_action": raw_action,
+                    "pending_count": pending_count,
+                    "required_count": required_count,
+                    "held_seconds": held_seconds,
+                    "min_hold_seconds": self._FOCUS_MIN_HOLD_SECONDS,
+                },
+            }
+
+        mem = self._overlay_decision_memory.get(sym_u)
+        raw_action = _action(raw_decision)
+        if not mem:
+            if raw_action == "wait":
+                return _accept(raw_decision)
+            # First actionable tick after start/redeploy must prove itself once
+            # more before we publish a tradeable long/short card.
+            self._overlay_decision_memory[sym_u] = {
+                "shown": {**raw_decision, "action": "wait", "confidence": "none",
+                          "confidence_score": 49, "confidenceScore": 49},
+                "changed_at": now,
+                "pending_key": f"wait->{raw_action}",
+                "pending_count": 1,
+            }
+            return _wait_for_confirmation(
+                shown_action="wait",
+                raw_action=raw_action,
+                pending_count=1,
+                required_count=self._FOCUS_ENTER_CONFIRM_TICKS,
+                held_seconds=0,
+            )
+
+        shown = mem.get("shown") or {}
+        shown_action = _action(shown)
+        held_seconds = int(max(0, now - float(mem.get("changed_at") or now)))
+
+        if raw_action == "wait":
+            return _accept(raw_decision)
+
+        if shown_action == raw_action:
+            return _accept(raw_decision)
+
+        pending_key = f"{shown_action}->{raw_action}"
+        pending_count = int(mem.get("pending_count") or 0) + 1 if mem.get("pending_key") == pending_key else 1
+        mem["pending_key"] = pending_key
+        mem["pending_count"] = pending_count
+
+        required_count = (
+            self._FOCUS_ENTER_CONFIRM_TICKS
+            if shown_action == "wait"
+            else self._FOCUS_FLIP_CONFIRM_TICKS
+        )
+        hold_ok = shown_action == "wait" or held_seconds >= self._FOCUS_MIN_HOLD_SECONDS
+        if pending_count >= required_count and hold_ok:
+            return _accept(raw_decision, status="confirmed")
+
+        return _wait_for_confirmation(
+            shown_action=shown_action,
+            raw_action=raw_action,
+            pending_count=pending_count,
+            required_count=required_count,
+            held_seconds=held_seconds,
+        )
 
     @classmethod
     def _build_sub_hour_payload(
@@ -1445,7 +1582,10 @@ class BitunixBot:
                 "ratio": round(agree / max(1, total_horizons), 3),
             }
 
-            next_hour = self._build_next_hour_decision(horizons)
+            next_hour = self._smooth_next_hour_decision(
+                sym_u,
+                self._build_next_hour_decision(horizons),
+            )
             trade_plan = self._build_suggested_trade_plan(sym_u, next_hour, horizons, latest_price)
             next_hour = {
                 **next_hour,
