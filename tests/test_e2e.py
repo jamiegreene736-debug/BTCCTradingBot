@@ -3519,6 +3519,36 @@ def test_sub_hour_payload_marks_cache_ready_from_core_horizons():
     assert payload["firing_signals"], "expected at least one firing sub-hour signal"
 
 
+def test_sub_hour_payload_exposes_primary_when_no_signal_fires():
+    horizons = {
+        "h_15m": {
+            "label": "Next 15m", "timeframe": "1m",
+            "long_score": 0.17, "short_score": 0.43,
+            "short_reasons": ["supertrend_down"], "stable": False,
+        },
+        "h_30m": {
+            "label": "Next 30m", "timeframe": "5m",
+            "long_score": 0.17, "short_score": 0.33,
+            "short_reasons": ["adx(28)"], "stable": False,
+        },
+        "h_1h": {
+            "label": "Next 1h", "timeframe": "15m",
+            "long_score": 0.0, "short_score": 0.24,
+            "short_reasons": ["htf_downtrend(1h)"], "stable": False,
+        },
+    }
+    decision = BitunixBot._build_next_hour_decision(horizons)
+    payload = BitunixBot._build_sub_hour_payload(horizons, decision)
+
+    assert payload["ready"] is True
+    assert payload["warming_up"] is False
+    assert payload["primary_signal"]["side"] == "short"
+    assert payload["primary_signal"]["firing"] is False
+    assert payload["primary_signal"]["candidate"] is True
+    assert payload["actual_firing_signals"] == []
+    assert payload["firing_signals"] == [payload["primary_signal"]]
+
+
 def test_signal_records_factor_breakdown():
     """Signal returned by evaluate() must carry per-group factor scores."""
     from bitunix_bot.config import StrategyCfg
@@ -5399,6 +5429,7 @@ def main() -> int:
         test_next_hour_decision_favors_aligned_long,
         test_next_hour_decision_waits_when_one_hour_disagrees,
         test_sub_hour_payload_marks_cache_ready_from_core_horizons,
+        test_sub_hour_payload_exposes_primary_when_no_signal_fires,
         test_signal_records_factor_breakdown,
         test_adaptive_threshold_drawdown_raises_bar,
         test_adaptive_threshold_hot_streak_eases,

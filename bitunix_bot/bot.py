@@ -888,10 +888,30 @@ class BitunixBot:
             })
 
         ready = bool(signals)
-        firing = [s for s in signals if s.get("firing")]
+        actual_firing = [s for s in signals if s.get("firing")]
+        primary = None
+        if signals:
+            directional = [s for s in signals if s.get("side") != "mixed"]
+            pool = directional or signals
+            primary = max(pool, key=lambda s: abs(float(s.get("gap") or 0.0)))
+            if primary not in actual_firing:
+                primary = {
+                    **primary,
+                    "candidate": True,
+                    "reason": "strongest sub-hour lean below alarm threshold",
+                    "threshold": cls._ALARM_AT,
+                }
+        # Compatibility: older overlay builds use the presence of
+        # `firing_signals` as "cache filled". If nothing clears the alarm
+        # threshold yet, expose the strongest candidate there too while keeping
+        # `firing: false` on the object so consumers can label it as weak/wait.
+        display_signals = actual_firing or ([primary] if primary else [])
         return {
             "ready": ready,
             "filled": ready,
+            "warming_up": False,
+            "warmingUp": False,
+            "status": "ready" if ready else "warming_up",
             "action": decision.get("action", "wait"),
             "direction": decision.get("action", "wait"),
             "lean": decision.get("lean", "mixed"),
@@ -899,8 +919,17 @@ class BitunixBot:
             "bias": decision.get("bias", 0.0),
             "agreement": decision.get("agreement", {}),
             "warnings": list(decision.get("warnings") or []),
+            "primary_signal": primary,
+            "primarySignal": primary,
+            "best_signal": primary,
+            "bestSignal": primary,
             "signals": signals,
-            "firing_signals": firing,
+            "actual_firing_signals": actual_firing,
+            "actualFiringSignals": actual_firing,
+            "firing_signals": display_signals,
+            "firingSignals": display_signals,
+            "candidate_signals": signals,
+            "candidateSignals": signals,
             "as_of": int(time.time()),
         }
 
@@ -1113,8 +1142,14 @@ class BitunixBot:
                 "subHourCache": sub_hour,
                 "sub_hour_signals": sub_hour["signals"],
                 "subHourSignals": sub_hour["signals"],
+                "sub_hour_firing_signals": sub_hour["firing_signals"],
+                "subHourFiringSignals": sub_hour["firing_signals"],
+                "sub_hour_primary_signal": sub_hour["primary_signal"],
+                "subHourPrimarySignal": sub_hour["primary_signal"],
                 "sub_hour_ready": sub_hour["ready"],
                 "subHourReady": sub_hour["ready"],
+                "sub_hour_warming_up": False,
+                "subHourWarmingUp": False,
                 "as_of": int(time.time()),
             })
 
