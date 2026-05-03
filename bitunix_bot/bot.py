@@ -1465,7 +1465,6 @@ class BitunixBot:
                 "next15m": next_hour,
                 "fifteen_minute": next_hour,
                 "fifteenMinute": next_hour,
-                "focus": next_hour,
                 "next_hour": next_hour,
                 "nextHour": next_hour,
                 "one_hour": next_hour,
