@@ -965,6 +965,8 @@ class BitunixBot:
             "confidence": decision.get("confidence", "none"),
             "confidence_score": decision.get("confidence_score", 0),
             "confidenceScore": decision.get("confidence_score", 0),
+            "trade_plan": decision.get("trade_plan"),
+            "tradePlan": decision.get("trade_plan"),
             "bias": decision.get("bias", 0.0),
             "agreement": decision.get("agreement", {}),
             "warnings": list(decision.get("warnings") or []),
@@ -980,6 +982,199 @@ class BitunixBot:
             "candidate_signals": signals,
             "candidateSignals": signals,
             "as_of": int(time.time()),
+        }
+
+    @staticmethod
+    def _maker_limit_price(
+        *,
+        side: str,
+        bid: float,
+        ask: float,
+        price_precision: int,
+    ) -> float:
+        """Return an aggressive maker limit that should not cross the spread."""
+        tick_size = 10 ** -price_precision if price_precision >= 0 else 0.0
+        spread = ask - bid
+        is_buy = side == "BUY"
+        if tick_size > 0 and spread > tick_size * 1.5:
+            raw = bid + tick_size if is_buy else ask - tick_size
+        else:
+            raw = bid if is_buy else ask
+        return round(raw, price_precision)
+
+    @staticmethod
+    def _first_float(*values: Any) -> float:
+        for value in values:
+            try:
+                out = float(value)
+            except (TypeError, ValueError):
+                continue
+            if out > 0:
+                return out
+        return 0.0
+
+    def _build_suggested_trade_plan(
+        self,
+        symbol: str,
+        decision: dict[str, Any],
+        horizons: dict[str, dict[str, Any]],
+        fallback_price: float | None,
+    ) -> dict[str, Any]:
+        """Build a display-only entry/exit plan for the Chrome overlay.
+
+        This does not place an order. It mirrors the bot's entry preference:
+        maker limit at top-of-book when available, market only for urgent,
+        tight-spread momentum.
+        """
+        sym_u = symbol.upper()
+        action = str(decision.get("action") or "wait").lower()
+        confidence_score = int(decision.get("confidence_score") or 0)
+        if action not in ("long", "short"):
+            return {
+                "status": "wait",
+                "order_type": "WAIT",
+                "orderType": "WAIT",
+                "reason": "no actionable next-hour long/short setup",
+            }
+
+        meta = self.metas.get(sym_u, _DEFAULT_META)
+        side = "BUY" if action == "long" else "SELL"
+        plan_horizon_key = next(
+            (key for key in ("h_1h", "h_30m", "h_15m") if key in horizons),
+            None,
+        )
+        plan_horizon = horizons.get(plan_horizon_key or "", {})
+        reference_price = self._first_float(
+            horizons.get("h_15m", {}).get("price"),
+            fallback_price,
+            plan_horizon.get("price"),
+        )
+        if reference_price <= 0:
+            return {
+                "status": "wait",
+                "order_type": "WAIT_FOR_PRICE",
+                "orderType": "WAIT_FOR_PRICE",
+                "reason": "price unavailable",
+            }
+
+        spread_pct = None
+        bid = ask = maker_limit = taker_price = None
+        order_type = "MARKET"
+        entry_price = reference_price
+        rationale = "market reference; order book unavailable"
+        if self.ob_feed is not None:
+            tob = self.ob_feed.get_top_of_book(sym_u)
+            if tob:
+                bid, ask = float(tob[0]), float(tob[1])
+                maker_limit = self._maker_limit_price(
+                    side=side,
+                    bid=bid,
+                    ask=ask,
+                    price_precision=meta.price_precision,
+                )
+                taker_price = ask if side == "BUY" else bid
+                spread_pct = self.ob_feed.get_spread_pct(sym_u)
+
+                aggression = None
+                if self.tape_feed is not None:
+                    aggression = self.tape_feed.get_aggression_ratio(sym_u, window_secs=10)
+                tape_aligned = (
+                    aggression is None
+                    or (side == "BUY" and aggression >= 0.30)
+                    or (side == "SELL" and aggression <= -0.30)
+                )
+                tight_spread = (
+                    spread_pct is not None
+                    and spread_pct <= max(0.01, self.cfg.trading.max_entry_spread_pct * 0.5)
+                )
+                urgent_market = confidence_score >= 85 and tight_spread and tape_aligned
+
+                if urgent_market:
+                    order_type = "MARKET"
+                    entry_price = taker_price
+                    rationale = "high confidence with tight spread; market entry is acceptable"
+                else:
+                    order_type = "LIMIT_POST_ONLY" if self.cfg.trading.use_post_only_entries else "LIMIT"
+                    entry_price = maker_limit
+                    rationale = "maker limit at top-of-book; skip if it does not fill quickly"
+
+        atr = self._first_float(
+            plan_horizon.get("atr"),
+            reference_price * self._first_float(plan_horizon.get("atr_pct")) / 100.0,
+        )
+        reasons = list(dict.fromkeys(
+            list(plan_horizon.get(f"{action}_reasons") or [])
+            + list(horizons.get("h_30m", {}).get(f"{action}_reasons") or [])
+            + list(horizons.get("h_15m", {}).get(f"{action}_reasons") or [])
+        ))
+        signal = Signal(
+            direction=action,  # type: ignore[arg-type]
+            score=max(0.01, min(1.0, confidence_score / 100.0)),
+            indicator_score=len(reasons),
+            pattern_score=0.0,
+            reasons=reasons,
+            price=float(entry_price),
+            atr=atr,
+            fire_threshold_used=self.cfg.strategy.fire_threshold,
+            last_bar_high=self._first_float(plan_horizon.get("last_bar_high")),
+            last_bar_low=self._first_float(plan_horizon.get("last_bar_low")),
+        )
+        order_plan = build_order(
+            signal,
+            free_margin=100_000.0,
+            trading=self.cfg.trading,
+            risk=self.cfg.risk,
+            min_volume=meta.min_qty,
+            volume_step=meta.base_precision,
+            digits=meta.price_precision,
+            effective_leverage=min(self.cfg.trading.leverage, meta.max_leverage),
+            symbol=sym_u,
+        )
+        if order_plan is None:
+            return {
+                "status": "wait",
+                "order_type": "WAIT",
+                "orderType": "WAIT",
+                "reason": "risk geometry rejected the setup",
+            }
+
+        risk_pct = abs(order_plan.price - order_plan.stop_loss) / order_plan.price * 100.0
+        reward_pct = abs(order_plan.take_profit - order_plan.price) / order_plan.price * 100.0
+        timeout_secs = self.cfg.trading.post_only_timeout_secs
+        return {
+            "status": "ready",
+            "side": side,
+            "direction": action,
+            "order_type": order_type,
+            "orderType": order_type,
+            "entry_price": order_plan.price,
+            "entryPrice": order_plan.price,
+            "limit_price": maker_limit,
+            "limitPrice": maker_limit,
+            "market_price": round(taker_price, meta.price_precision) if taker_price else None,
+            "marketPrice": round(taker_price, meta.price_precision) if taker_price else None,
+            "stop_loss": order_plan.stop_loss,
+            "stopLoss": order_plan.stop_loss,
+            "take_profit": order_plan.take_profit,
+            "takeProfit": order_plan.take_profit,
+            "target_exit_price": order_plan.take_profit,
+            "targetExitPrice": order_plan.take_profit,
+            "max_exit_price": order_plan.take_profit,
+            "maxExitPrice": order_plan.take_profit,
+            "risk_pct": round(risk_pct, 3),
+            "riskPct": round(risk_pct, 3),
+            "reward_pct": round(reward_pct, 3),
+            "rewardPct": round(reward_pct, 3),
+            "risk_reward_r": self.cfg.risk.take_profit_r,
+            "riskRewardR": self.cfg.risk.take_profit_r,
+            "valid_for_seconds": timeout_secs if order_type == "LIMIT_POST_ONLY" else None,
+            "validForSeconds": timeout_secs if order_type == "LIMIT_POST_ONLY" else None,
+            "horizon": plan_horizon.get("label") or plan_horizon_key,
+            "spread_pct": round(float(spread_pct), 4) if spread_pct is not None else None,
+            "spreadPct": round(float(spread_pct), 4) if spread_pct is not None else None,
+            "bid": round(bid, meta.price_precision) if bid else None,
+            "ask": round(ask, meta.price_precision) if ask else None,
+            "rationale": rationale,
         }
 
     def _get_klines_cached(self, symbol: str, timeframe: str,
@@ -1029,6 +1224,7 @@ class BitunixBot:
         """
         for sym in self.cfg.trading.symbols:
             sym_u = sym.upper()
+            meta = self.metas.get(sym_u, _DEFAULT_META)
 
             # Live-tape inputs are only meaningful for the short-term horizons.
             real_cvd = aggression_10s = price_change_10s_pct = None
@@ -1076,16 +1272,23 @@ class BitunixBot:
                     continue
                 if overlay is None:
                     continue
+                atr_abs = overlay.price * overlay.atr_pct / 100.0
                 horizons[key] = {
                     "label": label,
                     "timeframe": tf,
+                    "price": round(overlay.price, meta.price_precision),
+                    "atr": round(atr_abs, meta.price_precision),
+                    "atr_pct": round(overlay.atr_pct, 4),
+                    "last_bar_high": round(highs[-1], meta.price_precision),
+                    "last_bar_low": round(lows[-1], meta.price_precision),
                     "long_score": round(overlay.long_score, 4),
                     "short_score": round(overlay.short_score, 4),
                     "long_reasons": overlay.long_reasons,
                     "short_reasons": overlay.short_reasons,
                     "adx": round(overlay.adx, 2) if overlay.adx >= 0 else None,
                 }
-                latest_price = overlay.price
+                if latest_price is None or key == "h_15m":
+                    latest_price = overlay.price
 
             if not horizons:
                 continue
@@ -1172,6 +1375,12 @@ class BitunixBot:
             }
 
             next_hour = self._build_next_hour_decision(horizons)
+            trade_plan = self._build_suggested_trade_plan(sym_u, next_hour, horizons, latest_price)
+            next_hour = {
+                **next_hour,
+                "trade_plan": trade_plan,
+                "tradePlan": trade_plan,
+            }
             sub_hour = self._build_sub_hour_payload(horizons, next_hour)
             self.state.record_overlay(sym_u, {
                 "symbol": sym_u,
@@ -1185,6 +1394,8 @@ class BitunixBot:
                 "oneHour": next_hour,
                 "decision": next_hour,
                 "recommendation": next_hour,
+                "trade_plan": trade_plan,
+                "tradePlan": trade_plan,
                 "sub_hour": sub_hour,
                 "subHour": sub_hour,
                 "sub_hour_cache": sub_hour,

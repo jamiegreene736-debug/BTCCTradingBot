@@ -3551,6 +3551,52 @@ def test_sub_hour_payload_exposes_primary_when_no_signal_fires():
     assert payload["firing_signals"] == [payload["primary_signal"]]
 
 
+def test_suggested_trade_plan_prefers_maker_limit_with_exit_target():
+    cfg = fresh_cfg()
+    cfg.trading.symbols = ["BTCUSDT"]
+    cfg.trading.use_post_only_entries = True
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.ob_feed = _FakeOBFeed(bid=60_000.0, ask=60_002.0, spread_pct=0.003)
+    bot._resolve_symbol_meta()
+
+    decision = {"action": "long", "confidence_score": 72, "confidence": "medium"}
+    horizons = {
+        "h_15m": {"price": 60_001.0, "atr": 95.0, "long_reasons": ["agg+0.44"]},
+        "h_1h": {
+            "label": "Next 1h",
+            "price": 60_001.0,
+            "atr": 120.0,
+            "last_bar_high": 60_040.0,
+            "last_bar_low": 59_960.0,
+            "long_reasons": ["supertrend_up"],
+        },
+    }
+
+    plan = bot._build_suggested_trade_plan("BTCUSDT", decision, horizons, 60_001.0)
+
+    assert plan["status"] == "ready"
+    assert plan["order_type"] == "LIMIT_POST_ONLY"
+    assert plan["entry_price"] == 60_000.1
+    assert plan["stop_loss"] < plan["entry_price"]
+    assert plan["take_profit"] > plan["entry_price"]
+    assert plan["max_exit_price"] == plan["take_profit"]
+    assert plan["valid_for_seconds"] == cfg.trading.post_only_timeout_secs
+
+
+def test_suggested_trade_plan_waits_without_action():
+    cfg = fresh_cfg()
+    bot = BitunixBot(cfg)
+    plan = bot._build_suggested_trade_plan(
+        "BTCUSDT",
+        {"action": "wait", "confidence_score": 42},
+        {"h_1h": {"price": 60_000.0}},
+        60_000.0,
+    )
+    assert plan["status"] == "wait"
+    assert plan["order_type"] == "WAIT"
+
+
 def test_signal_records_factor_breakdown():
     """Signal returned by evaluate() must carry per-group factor scores."""
     from bitunix_bot.config import StrategyCfg
