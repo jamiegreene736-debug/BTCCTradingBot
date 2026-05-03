@@ -592,7 +592,7 @@ def test_momentum_endpoint_includes_15m_position_countdown():
     assert 800 <= pos["seconds_remaining"] <= 900
 
 
-def test_close_symbol_endpoint_flash_closes_matching_position():
+def test_close_symbol_endpoint_market_closes_full_matching_position():
     reset_state()
     cfg = fresh_cfg()
     client = make_mock_client()
@@ -615,6 +615,43 @@ def test_close_symbol_endpoint_flash_closes_matching_position():
     assert r.status_code == 200
     body = r.get_json()
     assert body["closed_count"] == 1
+    assert body["closed"][0]["close_method"] == "MARKET_REDUCE_ONLY"
+    client.place_order.assert_called_once()
+    kwargs = client.place_order.call_args.kwargs
+    assert kwargs["symbol"] == "BTCUSDT"
+    assert kwargs["side"] == "SELL"
+    assert kwargs["qty"] == "0.01"
+    assert kwargs["order_type"] == "MARKET"
+    assert kwargs["trade_side"] == "CLOSE"
+    assert kwargs["reduce_only"] is True
+    client.flash_close_position.assert_not_called()
+
+
+def test_close_symbol_endpoint_falls_back_to_flash_close_if_market_fails():
+    from bitunix_bot.client import BitunixError
+
+    reset_state()
+    cfg = fresh_cfg()
+    client = make_mock_client()
+    client.pending_positions.return_value = [
+        {"positionId": "POS15", "symbol": "BTCUSDT", "qty": "0.01",
+         "side": "LONG", "ctime": int(time.time() * 1000)},
+    ]
+    client.place_order.side_effect = BitunixError(30001, "market close rejected", {})
+    app = create_app(cfg, client)
+    c = app.test_client()
+    good = base64.b64encode(b"admin:test_pass").decode()
+
+    r = c.post(
+        "/api/admin/close-symbol",
+        json={"symbol": "BTCUSDT"},
+        headers={"Authorization": f"Basic {good}"},
+    )
+
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["closed_count"] == 1
+    assert body["closed"][0]["close_method"] == "FLASH_CLOSE_FALLBACK"
     client.flash_close_position.assert_called_once_with("POS15")
 
 
@@ -5517,7 +5554,8 @@ def main() -> int:
         test_dashboard_routes_and_auth,
         test_momentum_endpoint_lazily_warms_empty_overlay,
         test_momentum_endpoint_includes_15m_position_countdown,
-        test_close_symbol_endpoint_flash_closes_matching_position,
+        test_close_symbol_endpoint_market_closes_full_matching_position,
+        test_close_symbol_endpoint_falls_back_to_flash_close_if_market_fails,
         test_breakeven_sl_move_at_1r_long,
         test_trailing_sl_at_2r_long,
         test_breakeven_sl_short,

@@ -113,6 +113,36 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
             matches.append(p)
         return matches
 
+    def _position_qty_str(p: dict[str, Any]) -> str:
+        raw = p.get("qty") or p.get("size") or p.get("volume")
+        if raw not in (None, "", "null"):
+            return str(raw)
+        return str(_float(raw))
+
+    def _market_close_side(p: dict[str, Any]) -> str:
+        side = str(p.get("side") or p.get("positionSide") or "").upper()
+        if side in ("LONG", "BUY"):
+            return "SELL"
+        if side in ("SHORT", "SELL"):
+            return "BUY"
+        raise ValueError(f"unknown position side: {side or '<empty>'}")
+
+    def _market_close_position(symbol: str, p: dict[str, Any]) -> dict[str, Any]:
+        """Close the full position with an explicit reduce-only MARKET order."""
+        pid = str(p.get("positionId") or p.get("position_id") or "")
+        qty = _position_qty_str(p)
+        if _float(qty) <= 0:
+            raise ValueError("position qty is missing or zero")
+        return client.place_order(
+            symbol=symbol,
+            side=_market_close_side(p),
+            qty=qty,
+            order_type="MARKET",
+            trade_side="CLOSE",
+            reduce_only=True,
+            client_id=f"ext15m-close-{pid or symbol}-{int(time.time())}",
+        )
+
     # ------------------------------------------------------------------ auth
 
     def _check_auth() -> bool:
@@ -433,7 +463,7 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
         Used by the Chrome overlay's 15-minute countdown for manual trades.
         This intentionally works even when the bot itself is in paper mode:
         the user may place the Bitunix trade manually, while the extension
-        asks the authenticated dashboard to flash-close the real position.
+        asks the authenticated dashboard to close the real position at market.
         """
         body = request.get_json(silent=True) or {}
         symbol = _symbol(body.get("symbol"))
@@ -449,15 +479,34 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
                 errors.append({"symbol": symbol, "error": "missing positionId", "position": p})
                 continue
             try:
-                resp = client.flash_close_position(pid)
+                resp = _market_close_position(symbol, p)
                 item = _position_summary(p)
+                item["close_method"] = "MARKET_REDUCE_ONLY"
+                item["closeMethod"] = "MARKET_REDUCE_ONLY"
                 item["response"] = resp
                 closed.append(item)
-                state.record_order(f"{symbol} EXTENSION_15M_CLOSE positionId={pid}")
+                state.record_order(f"{symbol} EXTENSION_15M_MARKET_CLOSE positionId={pid}")
             except BitunixError as e:
-                log.error("Extension close-symbol failed for %s/%s: %s", symbol, pid, e)
-                state.record_error(f"{symbol} extension close failed: {e.code} {e.msg}")
-                errors.append({"symbol": symbol, "positionId": pid, "error": f"{e.code}: {e.msg}"})
+                log.error("Extension market close failed for %s/%s: %s; trying flash close",
+                          symbol, pid, e)
+                try:
+                    resp = client.flash_close_position(pid)
+                    item = _position_summary(p)
+                    item["close_method"] = "FLASH_CLOSE_FALLBACK"
+                    item["closeMethod"] = "FLASH_CLOSE_FALLBACK"
+                    item["response"] = resp
+                    closed.append(item)
+                    state.record_order(f"{symbol} EXTENSION_15M_FLASH_CLOSE_FALLBACK positionId={pid}")
+                except Exception as fallback_e:
+                    state.record_error(
+                        f"{symbol} extension market close failed: {e.code} {e.msg}; "
+                        f"flash fallback failed: {fallback_e}"
+                    )
+                    errors.append({
+                        "symbol": symbol,
+                        "positionId": pid,
+                        "error": f"market close failed {e.code}: {e.msg}; flash fallback failed: {fallback_e}",
+                    })
             except Exception as e:
                 log.exception("Extension close-symbol failed for %s/%s", symbol, pid)
                 state.record_error(f"{symbol} extension close failed: {e}")
