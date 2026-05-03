@@ -148,6 +148,7 @@ Routes:
 |----------------------|----------------------------------------------------------|
 | `/`                  | HTML dashboard (auth required)                          |
 | `/api/state`         | JSON snapshot — account, positions, history, events     |
+| `/api/momentum`      | Overlay status, cached scores, and `next_hour` long/short/wait decision |
 | `/api/feeds/status`  | WebSocket feed health (OB + tape connection state)      |
 | `/api/journal`       | Trade journal events (entries + exits, JSONL-backed)    |
 | `/healthz`           | Plain `ok`, no auth — for uptime checks                 |

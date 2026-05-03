@@ -105,12 +105,19 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
         # Fail loudly if the tick loop has stalled. Railway / external uptime
         # checks should treat 5xx as "redeploy this thing".
         snap = state.snapshot()
+        now_s = int(time.time())
         last = snap.get("last_tick_at") or 0
         # If the bot has never ticked yet (just started), allow 60s grace.
         # After that, fail if no tick within 3× the configured tick interval.
         startup_grace = 60
         max_silence = max(startup_grace, cfg.loop.tick_seconds * 3)
-        age = int(time.time()) - last
+        if not last:
+            age = now_s - int(snap.get("started_at") or now_s)
+            if age > startup_grace:
+                return Response(f"starting: no tick yet after {age}s", status=503,
+                                mimetype="text/plain")
+            return Response("ok", mimetype="text/plain")
+        age = now_s - last
         if last and age > max_silence:
             return Response(f"stale: last tick {age}s ago", status=503,
                             mimetype="text/plain")
@@ -353,23 +360,59 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
         """Per-symbol reversal scores for the Chrome-extension overlay.
 
         Returns the most recent overlay snapshot the bot wrote on its tick
-        loop. Unlike /api/state this endpoint does no Bitunix REST calls —
-        all data is served from the in-process state cache, so polling at
-        a few seconds per request is cheap.
+        loop. If the cache is empty or stale, the endpoint asks the bot for
+        one synchronous refresh so the extension does not sit on "warming up"
+        waiting for the next worker tick.
 
         long_score:  0.0–1.0 — "how strongly indicators favor going LONG".
                      For someone holding a SHORT position, high values are
                      a reversal warning ("exit your short").
         short_score: mirror — "exit your long" warning.
+        next_hour:  dedicated long/short/wait decision for the next 60 minutes.
 
-        Note: these are confluence scores, not calibrated probabilities.
+        Note: these are confluence scores, not calibrated probabilities or
+        financial advice. The next_hour action intentionally returns "wait"
+        when the edge is unclear or the one-hour horizon disagrees.
         """
+        def _overlay_stale(snapshot: dict[str, Any]) -> bool:
+            if not snapshot:
+                return True
+            newest = 0
+            for row in snapshot.values():
+                if not isinstance(row, dict):
+                    continue
+                try:
+                    newest = max(newest, int(row.get("as_of") or 0))
+                except (TypeError, ValueError):
+                    continue
+            max_age = max(60, cfg.loop.tick_seconds * 6)
+            return newest <= 0 or (int(time.time()) - newest) > max_age
+
         snap = state.overlay_snapshot()
+        warmup_attempted = False
+        warmup_error = None
+        if bot is not None and hasattr(bot, "_compute_overlays") and _overlay_stale(snap):
+            warmup_attempted = True
+            try:
+                bot._compute_overlays()
+                snap = state.overlay_snapshot()
+            except Exception as e:
+                log.exception("momentum warmup failed")
+                warmup_error = str(e)
+                state.record_error(f"momentum warmup failed: {e}")
+
         return jsonify({
             "now": int(time.time()),
             "tick_seconds": cfg.loop.tick_seconds,
             "timeframe": cfg.trading.timeframe,
             "fire_threshold": cfg.strategy.fire_threshold,
+            "status": {
+                "ready": bool(snap),
+                "symbols_count": len(snap),
+                "stale": _overlay_stale(snap),
+                "warmup_attempted": warmup_attempted,
+                "warmup_error": warmup_error,
+            },
             "symbols": snap,
         })
 

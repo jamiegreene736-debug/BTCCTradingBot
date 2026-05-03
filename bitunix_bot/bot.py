@@ -693,6 +693,217 @@ class BitunixBot:
     # one side to lead by at least this much.
     _BIAS_GAP = 0.05
 
+    # Dedicated one-hour decision model for the Chrome overlay. The previous
+    # cross-horizon alignment averages 15m through 24h equally-ish, which is
+    # useful context but too slow for "should I be long or short in the next
+    # hour?" These weights put the decision where the trade actually lives:
+    # 5m/15m bars drive it, 1m is timing, 1h is context, and 8h/24h are ignored.
+    _NEXT_HOUR_WEIGHTS: tuple[tuple[str, float], ...] = (
+        ("h_15m", 0.15),
+        ("h_30m", 0.30),
+        ("h_1h",  0.45),
+        ("h_4h",  0.10),
+    )
+    _NEXT_HOUR_CORE_KEYS = ("h_15m", "h_30m", "h_1h")
+    _NEXT_HOUR_MIN_ACTION_BIAS = 0.075
+    _NEXT_HOUR_MIN_SIDE_GAP = 0.03
+    _NEXT_HOUR_CORE_CONFLICT_GAP = 0.04
+    _NEXT_HOUR_CONTEXT_CONFLICT_GAP = 0.07
+
+    @staticmethod
+    def _gap_side(gap: float, neutral_gap: float = 0.0) -> str:
+        if gap > neutral_gap:
+            return "long"
+        if gap < -neutral_gap:
+            return "short"
+        return "mixed"
+
+    @classmethod
+    def _build_next_hour_decision(cls, horizons: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        """Build a tradeable one-hour long/short/wait decision from horizons.
+
+        This is intentionally stricter than raw overlay scores. A professional
+        signal should be allowed to say "wait" when edge is too small, when
+        short-term horizons disagree, or when the actual one-hour horizon points
+        against the weighted bias.
+        """
+        details: list[dict[str, Any]] = []
+        weighted_long = 0.0
+        weighted_short = 0.0
+        total_weight = 0.0
+
+        for key, weight in cls._NEXT_HOUR_WEIGHTS:
+            row = horizons.get(key)
+            if not row:
+                continue
+            try:
+                long_score = float(row.get("long_score") or 0.0)
+                short_score = float(row.get("short_score") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            gap = long_score - short_score
+            weighted_long += long_score * weight
+            weighted_short += short_score * weight
+            total_weight += weight
+            details.append({
+                "key": key,
+                "label": row.get("label", key),
+                "weight": weight,
+                "long_score": round(long_score, 4),
+                "short_score": round(short_score, 4),
+                "gap": round(gap, 4),
+                "side": cls._gap_side(gap, cls._NEXT_HOUR_MIN_SIDE_GAP),
+            })
+
+        if total_weight <= 0:
+            return {
+                "action": "wait",
+                "lean": "mixed",
+                "confidence": "none",
+                "bias": 0.0,
+                "weighted_long_score": 0.0,
+                "weighted_short_score": 0.0,
+                "agreement": {"agree": 0, "total": 0, "ratio": 0.0},
+                "warnings": ["no usable horizon data"],
+                "method": "weighted_next_hour",
+                "horizons": details,
+            }
+
+        weighted_long /= total_weight
+        weighted_short /= total_weight
+        bias = weighted_long - weighted_short
+        abs_bias = abs(bias)
+        lean = cls._gap_side(bias)
+
+        core_details = [d for d in details if d["key"] in cls._NEXT_HOUR_CORE_KEYS]
+        core_total = len(core_details)
+        core_agree = sum(
+            1 for d in core_details
+            if d["side"] == lean and abs(float(d["gap"])) >= cls._NEXT_HOUR_MIN_SIDE_GAP
+        ) if lean != "mixed" else 0
+
+        warnings: list[str] = []
+        blockers: list[str] = []
+
+        if lean == "mixed" or abs_bias < cls._NEXT_HOUR_MIN_ACTION_BIAS:
+            blockers.append("weighted edge is too small")
+
+        one_hour = next((d for d in details if d["key"] == "h_1h"), None)
+        if one_hour and lean != "mixed":
+            one_hour_gap = float(one_hour["gap"])
+            one_hour_side = cls._gap_side(one_hour_gap, cls._NEXT_HOUR_CORE_CONFLICT_GAP)
+            if one_hour_side not in ("mixed", lean):
+                blockers.append("the one-hour horizon disagrees")
+
+        if core_total >= 2 and core_agree < 2:
+            blockers.append("short-term horizons are not aligned")
+
+        context_conflicts = [
+            d for d in details
+            if d["key"] == "h_4h"
+            and lean != "mixed"
+            and d["side"] not in ("mixed", lean)
+            and abs(float(d["gap"])) >= cls._NEXT_HOUR_CONTEXT_CONFLICT_GAP
+        ]
+        if context_conflicts:
+            warnings.append("four-hour context leans against the one-hour trade")
+
+        action = "wait"
+        confidence = "none"
+        if not blockers and lean != "mixed":
+            action = lean
+            strong_core_agreement = core_agree >= min(3, core_total)
+            if abs_bias >= 0.14 and strong_core_agreement and not context_conflicts:
+                confidence = "high"
+            elif abs_bias >= 0.09 and core_agree >= 2:
+                confidence = "medium"
+            else:
+                confidence = "low"
+            if context_conflicts and confidence == "high":
+                confidence = "medium"
+
+        return {
+            "action": action,
+            "lean": lean,
+            "confidence": confidence,
+            "bias": round(bias, 4),
+            "weighted_long_score": round(weighted_long, 4),
+            "weighted_short_score": round(weighted_short, 4),
+            "agreement": {
+                "agree": core_agree,
+                "total": core_total,
+                "ratio": round(core_agree / max(1, core_total), 3),
+            },
+            "warnings": warnings + blockers,
+            "method": "weighted_next_hour",
+            "horizons": details,
+        }
+
+    @classmethod
+    def _build_sub_hour_payload(
+        cls,
+        horizons: dict[str, dict[str, Any]],
+        decision: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Compatibility payload for the Chrome overlay's sub-hour card.
+
+        Older overlay builds look for a "sub-hour cache" rather than the newer
+        `next_hour` decision. Treat the 15m/30m/1h horizons as that cache and
+        expose a simple ready/action/signals shape so the UI can render a real
+        decision instead of sitting on WARMING UP.
+        """
+        signals: list[dict[str, Any]] = []
+        for key in cls._NEXT_HOUR_CORE_KEYS:
+            row = horizons.get(key)
+            if not row:
+                continue
+            try:
+                long_score = float(row.get("long_score") or 0.0)
+                short_score = float(row.get("short_score") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            gap = long_score - short_score
+            side = cls._gap_side(gap, cls._NEXT_HOUR_MIN_SIDE_GAP)
+            if side == "long":
+                reasons = list(row.get("long_reasons") or [])
+                score = long_score
+            elif side == "short":
+                reasons = list(row.get("short_reasons") or [])
+                score = short_score
+            else:
+                reasons = []
+                score = max(long_score, short_score)
+            signals.append({
+                "key": key,
+                "label": row.get("label", key),
+                "timeframe": row.get("timeframe"),
+                "side": side,
+                "score": round(score, 4),
+                "long_score": round(long_score, 4),
+                "short_score": round(short_score, 4),
+                "gap": round(gap, 4),
+                "stable": bool(row.get("stable")),
+                "firing": side != "mixed" and score >= cls._ALARM_AT,
+                "reasons": reasons,
+            })
+
+        ready = bool(signals)
+        firing = [s for s in signals if s.get("firing")]
+        return {
+            "ready": ready,
+            "filled": ready,
+            "action": decision.get("action", "wait"),
+            "direction": decision.get("action", "wait"),
+            "lean": decision.get("lean", "mixed"),
+            "confidence": decision.get("confidence", "none"),
+            "bias": decision.get("bias", 0.0),
+            "agreement": decision.get("agreement", {}),
+            "warnings": list(decision.get("warnings") or []),
+            "signals": signals,
+            "firing_signals": firing,
+            "as_of": int(time.time()),
+        }
+
     def _get_klines_cached(self, symbol: str, timeframe: str,
                            ttl_seconds: int, limit: int = 200) -> list | None:
         """Klines fetcher with per-(symbol, timeframe) TTL cache.
@@ -882,12 +1093,28 @@ class BitunixBot:
                 "ratio": round(agree / max(1, total_horizons), 3),
             }
 
+            next_hour = self._build_next_hour_decision(horizons)
+            sub_hour = self._build_sub_hour_payload(horizons, next_hour)
             self.state.record_overlay(sym_u, {
                 "symbol": sym_u,
                 "price": latest_price,
                 "horizons": horizons,
                 "horizon_order": [k for k, _, _, _ in self._OVERLAY_HORIZONS if k in horizons],
                 "alignment": alignment,
+                "next_hour": next_hour,
+                "nextHour": next_hour,
+                "one_hour": next_hour,
+                "oneHour": next_hour,
+                "decision": next_hour,
+                "recommendation": next_hour,
+                "sub_hour": sub_hour,
+                "subHour": sub_hour,
+                "sub_hour_cache": sub_hour,
+                "subHourCache": sub_hour,
+                "sub_hour_signals": sub_hour["signals"],
+                "subHourSignals": sub_hour["signals"],
+                "sub_hour_ready": sub_hour["ready"],
+                "subHourReady": sub_hour["ready"],
                 "as_of": int(time.time()),
             })
 
@@ -1429,4 +1656,3 @@ class BitunixBot:
 
     def _check_pending_limits(self, all_open_positions: list[dict[str, Any]]) -> None:
         self.order_executor.check_pending_limits(all_open_positions)
-

@@ -500,6 +500,36 @@ def test_dashboard_routes_and_auth():
     assert set(wr.keys()) == {"wins", "losses", "total", "rate"}
 
 
+def test_momentum_endpoint_lazily_warms_empty_overlay():
+    reset_state()
+    cfg = fresh_cfg()
+    client = make_mock_client()
+
+    class FakeBot:
+        def _compute_overlays(self):
+            get_state().record_overlay("BTCUSDT", {
+                "symbol": "BTCUSDT",
+                "price": 60000.0,
+                "horizons": {},
+                "horizon_order": [],
+                "alignment": {"dominant": "mixed"},
+                "next_hour": {"action": "wait"},
+                "as_of": int(time.time()),
+            })
+
+    app = create_app(cfg, client, bot=FakeBot())
+    c = app.test_client()
+    good = base64.b64encode(b"admin:test_pass").decode()
+
+    r = c.get("/api/momentum", headers={"Authorization": f"Basic {good}"})
+    assert r.status_code == 200
+    j = r.get_json()
+    assert j["status"]["ready"] is True
+    assert j["status"]["warmup_attempted"] is True
+    assert j["status"]["symbols_count"] == 1
+    assert "BTCUSDT" in j["symbols"]
+
+
 def _setup_bot_with_open_position(side: str, entry: float, current_price: float,
                                    qty: float = 0.01, original_sl: float | None = None,
                                    original_tp: float | None = None,
@@ -1110,6 +1140,21 @@ def test_health_check_fails_when_tick_loop_stalls():
     bot_state.last_tick_at = int(time.time())
     r = c.get("/healthz")
     assert r.status_code == 200
+
+
+def test_health_check_fails_when_worker_never_ticks_after_grace():
+    reset_state()
+    cfg = fresh_cfg()
+    client = make_mock_client()
+    bot_state = get_state()
+    bot_state.started_at = int(time.time()) - 120
+    bot_state.last_tick_at = 0
+    app = create_app(cfg, client)
+    c = app.test_client()
+
+    r = c.get("/healthz")
+    assert r.status_code == 503
+    assert b"no tick yet" in r.data
 
 
 def test_config_rejects_silly_values():
@@ -3402,6 +3447,78 @@ def test_factor_score_weighted_combines_groups():
     assert abs(got - expected) < 1e-9
 
 
+def test_overlay_factor_score_renormalizes_when_flow_absent():
+    """One-hour overlay bars should not be suppressed by missing tape inputs."""
+    from bitunix_bot.strategy import factor_score_weighted, factor_score_weighted_active
+    breakdown = {"trend": 1.0, "mean_rev": 0.0, "flow": 0.0, "context": 1.0}
+    weights = {"trend": 0.10, "mean_rev": 0.15, "flow": 0.65, "context": 0.10}
+
+    fixed = factor_score_weighted(breakdown, weights)
+    active = factor_score_weighted_active(
+        breakdown, weights, ("trend", "mean_rev", "context")
+    )
+    assert fixed == 0.20
+    assert active > fixed
+    assert abs(active - (0.20 / 0.35)) < 1e-9
+
+
+def test_next_hour_decision_favors_aligned_long():
+    horizons = {
+        "h_15m": {"label": "Next 15m", "long_score": 0.56, "short_score": 0.45},
+        "h_30m": {"label": "Next 30m", "long_score": 0.64, "short_score": 0.43},
+        "h_1h": {"label": "Next 1h", "long_score": 0.68, "short_score": 0.44},
+        "h_4h": {"label": "Next 4h", "long_score": 0.52, "short_score": 0.48},
+    }
+    decision = BitunixBot._build_next_hour_decision(horizons)
+    assert decision["action"] == "long"
+    assert decision["lean"] == "long"
+    assert decision["confidence"] == "high"
+    assert decision["agreement"]["agree"] == 3
+
+
+def test_next_hour_decision_waits_when_one_hour_disagrees():
+    horizons = {
+        "h_15m": {"label": "Next 15m", "long_score": 0.80, "short_score": 0.40},
+        "h_30m": {"label": "Next 30m", "long_score": 0.75, "short_score": 0.45},
+        "h_1h": {"label": "Next 1h", "long_score": 0.45, "short_score": 0.56},
+        "h_4h": {"label": "Next 4h", "long_score": 0.60, "short_score": 0.50},
+    }
+    decision = BitunixBot._build_next_hour_decision(horizons)
+    assert decision["lean"] == "long"
+    assert decision["action"] == "wait"
+    assert "the one-hour horizon disagrees" in decision["warnings"]
+
+
+def test_sub_hour_payload_marks_cache_ready_from_core_horizons():
+    horizons = {
+        "h_15m": {
+            "label": "Next 15m", "timeframe": "1m",
+            "long_score": 0.30, "short_score": 0.62,
+            "short_reasons": ["supertrend_down"], "stable": True,
+        },
+        "h_30m": {
+            "label": "Next 30m", "timeframe": "5m",
+            "long_score": 0.40, "short_score": 0.44,
+            "short_reasons": ["adx(28)"], "stable": False,
+        },
+        "h_1h": {
+            "label": "Next 1h", "timeframe": "15m",
+            "long_score": 0.28, "short_score": 0.59,
+            "short_reasons": ["htf_downtrend(1h)"], "stable": True,
+        },
+    }
+    decision = BitunixBot._build_next_hour_decision(horizons)
+    payload = BitunixBot._build_sub_hour_payload(horizons, decision)
+
+    assert payload["ready"] is True
+    assert payload["filled"] is True
+    assert payload["action"] == decision["action"]
+    assert len(payload["signals"]) == 3
+    assert payload["signals"][0]["side"] == "short"
+    assert payload["signals"][0]["firing"] is True
+    assert payload["firing_signals"], "expected at least one firing sub-hour signal"
+
+
 def test_signal_records_factor_breakdown():
     """Signal returned by evaluate() must carry per-group factor scores."""
     from bitunix_bot.config import StrategyCfg
@@ -5182,6 +5299,7 @@ def main() -> int:
         test_paper_mode_with_zero_margin_simulates_anyway,
         test_live_mode_actually_calls_place_order,
         test_dashboard_routes_and_auth,
+        test_momentum_endpoint_lazily_warms_empty_overlay,
         test_breakeven_sl_move_at_1r_long,
         test_trailing_sl_at_2r_long,
         test_breakeven_sl_short,
@@ -5204,6 +5322,7 @@ def main() -> int:
         test_clientid_is_deterministic_and_includes_symbol_side,
         test_execute_handles_network_timeout_without_crashing,
         test_health_check_fails_when_tick_loop_stalls,
+        test_health_check_fails_when_worker_never_ticks_after_grace,
         test_config_rejects_silly_values,
         test_divergence_detector_finds_bullish_divergence,
         test_smc_fvg_detection,
@@ -5276,6 +5395,10 @@ def main() -> int:
         test_factor_score_breakdown_dedups_within_group,
         test_factor_score_caps_at_one,
         test_factor_score_weighted_combines_groups,
+        test_overlay_factor_score_renormalizes_when_flow_absent,
+        test_next_hour_decision_favors_aligned_long,
+        test_next_hour_decision_waits_when_one_hour_disagrees,
+        test_sub_hour_payload_marks_cache_ready_from_core_horizons,
         test_signal_records_factor_breakdown,
         test_adaptive_threshold_drawdown_raises_bar,
         test_adaptive_threshold_hot_streak_eases,

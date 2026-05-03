@@ -286,6 +286,30 @@ def factor_score_weighted(
     return min(1.0, total)
 
 
+def factor_score_weighted_active(
+    breakdown: dict[str, float],
+    weights: dict[str, float],
+    active_groups: tuple[str, ...],
+) -> float:
+    """Weighted factor score normalized over the data groups actually present.
+
+    The trading engine deliberately gives live flow a large weight, but the
+    overlay computes longer horizons from 15m/1h/2h/4h candles where 10-second
+    tape and order-book pressure are not meaningful. If we leave the missing
+    flow bucket in the denominator, a clean one-hour trend can look weak simply
+    because short-lived microstructure inputs were excluded on purpose.
+    """
+    active = tuple(g for g in active_groups if g in _FACTOR_GROUPS)
+    total_weight = sum(max(0.0, weights.get(g, 0.0)) for g in active)
+    if total_weight <= 0:
+        return factor_score_weighted(breakdown, weights)
+    total = 0.0
+    for grp in active:
+        group_weight = max(0.0, weights.get(grp, 0.0)) / total_weight
+        total += group_weight * breakdown.get(grp, 0.0)
+    return min(1.0, max(0.0, total))
+
+
 def _continuation_confirmed(
     direction: Direction,
     highs: np.ndarray,
@@ -1020,8 +1044,18 @@ def compute_overlay_scores(
     # Factor breakdown + weighted combine
     breakdown_long = factor_score_breakdown(long_reasons, cfg.factor_saturation)
     breakdown_short = factor_score_breakdown(short_reasons, cfg.factor_saturation)
-    factor_long = factor_score_weighted(breakdown_long, cfg.factor_weights)
-    factor_short = factor_score_weighted(breakdown_short, cfg.factor_weights)
+    flow_available = (
+        ob_imbalance is not None
+        or real_cvd is not None
+        or aggression_10s is not None
+    )
+    active_groups = _FACTOR_GROUPS if flow_available else ("trend", "mean_rev", "context")
+    factor_long = factor_score_weighted_active(
+        breakdown_long, cfg.factor_weights, active_groups
+    )
+    factor_short = factor_score_weighted_active(
+        breakdown_short, cfg.factor_weights, active_groups
+    )
 
     pw = cfg.pattern_weight
     combined_long = pw * pattern_long_n + (1 - pw) * factor_long
