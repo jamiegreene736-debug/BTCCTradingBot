@@ -141,6 +141,10 @@ class BitunixBot:
         self.order_executor = OrderExecutor(self)
         self.stop_flag = False
         self.state = get_state()
+        # Per-(symbol, horizon) rolling score history for the overlay's
+        # 2-tick persistence filter. Shape: {sym: {horizon_key: [(score, side), ...]}}.
+        # Keeps the last _PERSISTENCE_WINDOW entries; older ones get trimmed.
+        self._overlay_score_history: dict[str, dict[str, list[tuple[float, str]]]] = {}
 
     # ------------------------------------------------------------------ setup
 
@@ -678,6 +682,17 @@ class BitunixBot:
         ("h_24h", "4h",  1800, "Next 24h"),
     )
 
+    # Persistence window — how many recent ticks of dominant scores per
+    # (symbol, horizon) we keep. 3 ticks at 10s = 30s of history, enough
+    # to require 2-tick confirmation without over-smoothing.
+    _PERSISTENCE_WINDOW = 3
+    # Score threshold that mirrors the frontend's ALARM_AT — kept here so
+    # the backend "stable" flag uses the same gate.
+    _ALARM_AT = 0.55
+    # Same gap as the frontend's BIAS_GAP — directional bias requires
+    # one side to lead by at least this much.
+    _BIAS_GAP = 0.05
+
     def _get_klines_cached(self, symbol: str, timeframe: str,
                            ttl_seconds: int, limit: int = 200) -> list | None:
         """Klines fetcher with per-(symbol, timeframe) TTL cache.
@@ -785,11 +800,79 @@ class BitunixBot:
 
             if not horizons:
                 continue
+
+            # ---- Score persistence ---------------------------------------
+            # Reliability research consistently shows that single-tick
+            # threshold crossings have far higher false-positive rates than
+            # crossings sustained across 2+ samples. We track the last
+            # _PERSISTENCE_WINDOW dominant scores per (symbol, horizon)
+            # and mark a horizon "stable" only if it's been ≥ ALARM_AT for
+            # at least 2 of the last 3 ticks AND on the same direction.
+            #
+            # This is the bot equivalent of "wait for 2-bar confirmation"
+            # — a standard rule in pro setups for filtering chop spikes.
+            hist = self._overlay_score_history.setdefault(sym_u, {})
+            for key, h in horizons.items():
+                ls = h["long_score"]
+                ss = h["short_score"]
+                dom = max(ls, ss)
+                side = "long" if ls > ss else "short" if ss > ls else "tie"
+                buf = hist.setdefault(key, [])
+                buf.append((dom, side))
+                if len(buf) > self._PERSISTENCE_WINDOW:
+                    del buf[:-self._PERSISTENCE_WINDOW]
+                # Stable iff the most recent reading is alarm-strength AND
+                # at least one prior reading also was, on the same side.
+                stable = False
+                if buf and buf[-1][0] >= self._ALARM_AT and buf[-1][1] != "tie":
+                    cur_side = buf[-1][1]
+                    confirms = sum(1 for s, sd in buf
+                                    if s >= self._ALARM_AT and sd == cur_side)
+                    stable = confirms >= 2
+                h["stable"] = stable
+
+            # ---- Cross-horizon alignment ---------------------------------
+            # When 4+ of 6 horizons agree on direction, false-positive rate
+            # drops dramatically. We expose the alignment counts so the
+            # frontend can both display the agreement ratio and use it to
+            # boost / cap the leverage suggestion.
+            long_agree = short_agree = 0
+            weighted_long = weighted_short = 0.0
+            for h in horizons.values():
+                ls = h["long_score"]; ss = h["short_score"]
+                if ls - ss >= self._BIAS_GAP:
+                    long_agree += 1
+                    weighted_long += ls
+                elif ss - ls >= self._BIAS_GAP:
+                    short_agree += 1
+                    weighted_short += ss
+            total_horizons = len(horizons)
+            if long_agree > short_agree:
+                dominant_side = "long"
+                agree = long_agree
+                avg_strength = weighted_long / max(1, long_agree)
+            elif short_agree > long_agree:
+                dominant_side = "short"
+                agree = short_agree
+                avg_strength = weighted_short / max(1, short_agree)
+            else:
+                dominant_side = "mixed"
+                agree = 0
+                avg_strength = 0.0
+            alignment = {
+                "dominant": dominant_side,
+                "agree": agree,
+                "total": total_horizons,
+                "ratio": round(agree / max(1, total_horizons), 3),
+                "avg_strength": round(avg_strength, 3),
+            }
+
             self.state.record_overlay(sym_u, {
                 "symbol": sym_u,
                 "price": latest_price,
                 "horizons": horizons,
                 "horizon_order": [k for k, _, _, _ in self._OVERLAY_HORIZONS if k in horizons],
+                "alignment": alignment,
                 "as_of": int(time.time()),
             })
 
