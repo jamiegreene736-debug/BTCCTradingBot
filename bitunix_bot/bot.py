@@ -710,6 +710,41 @@ class BitunixBot:
     _NEXT_HOUR_CORE_CONFLICT_GAP = 0.04
     _NEXT_HOUR_CONTEXT_CONFLICT_GAP = 0.07
 
+    @classmethod
+    def _next_hour_confidence_score(
+        cls,
+        *,
+        action: str,
+        abs_bias: float,
+        core_agree: int,
+        core_total: int,
+        blockers: list[str],
+        context_conflicts: list[dict[str, Any]],
+    ) -> int:
+        """Map the one-hour decision geometry to a human 0-100 confidence.
+
+        This is not a calibrated win probability. It is a readability score:
+        directional edge strength + core-horizon agreement, with explicit
+        penalties for blockers and 4h context headwinds.
+        """
+        if action not in ("long", "short"):
+            # Still show a useful number for WAIT: how close the setup is to
+            # becoming actionable, capped below the LOW tier.
+            edge = min(1.0, abs_bias / max(cls._NEXT_HOUR_MIN_ACTION_BIAS, 0.0001))
+            agree = core_agree / max(1, core_total)
+            score = 15 + (25 * edge) + (15 * agree) - (10 * len(blockers))
+            return max(0, min(49, int(round(score))))
+
+        # At the action threshold, start near 50. Stronger bias and broader
+        # core alignment push toward 100.
+        edge = min(1.0, abs_bias / 0.20)
+        agree = core_agree / max(1, core_total)
+        score = 35 + (40 * edge) + (25 * agree)
+        if context_conflicts:
+            score -= 12
+        score -= 8 * len(blockers)
+        return max(1, min(99, int(round(score))))
+
     @staticmethod
     def _gap_side(gap: float, neutral_gap: float = 0.0) -> str:
         if gap > neutral_gap:
@@ -760,6 +795,8 @@ class BitunixBot:
                 "action": "wait",
                 "lean": "mixed",
                 "confidence": "none",
+                "confidence_score": 0,
+                "confidenceScore": 0,
                 "bias": 0.0,
                 "weighted_long_score": 0.0,
                 "weighted_short_score": 0.0,
@@ -821,11 +858,21 @@ class BitunixBot:
                 confidence = "low"
             if context_conflicts and confidence == "high":
                 confidence = "medium"
+        confidence_score = cls._next_hour_confidence_score(
+            action=action,
+            abs_bias=abs_bias,
+            core_agree=core_agree,
+            core_total=core_total,
+            blockers=blockers,
+            context_conflicts=context_conflicts,
+        )
 
         return {
             "action": action,
             "lean": lean,
             "confidence": confidence,
+            "confidence_score": confidence_score,
+            "confidenceScore": confidence_score,
             "bias": round(bias, 4),
             "weighted_long_score": round(weighted_long, 4),
             "weighted_short_score": round(weighted_short, 4),
@@ -916,6 +963,8 @@ class BitunixBot:
             "direction": decision.get("action", "wait"),
             "lean": decision.get("lean", "mixed"),
             "confidence": decision.get("confidence", "none"),
+            "confidence_score": decision.get("confidence_score", 0),
+            "confidenceScore": decision.get("confidence_score", 0),
             "bias": decision.get("bias", 0.0),
             "agreement": decision.get("agreement", {}),
             "warnings": list(decision.get("warnings") or []),

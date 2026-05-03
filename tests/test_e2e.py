@@ -3473,6 +3473,7 @@ def test_next_hour_decision_favors_aligned_long():
     assert decision["action"] == "long"
     assert decision["lean"] == "long"
     assert decision["confidence"] == "high"
+    assert 80 <= decision["confidence_score"] <= 99
     assert decision["agreement"]["agree"] == 3
 
 
@@ -3486,6 +3487,7 @@ def test_next_hour_decision_waits_when_one_hour_disagrees():
     decision = BitunixBot._build_next_hour_decision(horizons)
     assert decision["lean"] == "long"
     assert decision["action"] == "wait"
+    assert 0 <= decision["confidence_score"] < 50
     assert "the one-hour horizon disagrees" in decision["warnings"]
 
 
