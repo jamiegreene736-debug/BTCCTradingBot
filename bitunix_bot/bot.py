@@ -715,6 +715,13 @@ class BitunixBot:
     _NEXT_HOUR_CHOP_ADX = 25.0
     _NEXT_HOUR_NEWS_ATR_PCT = 0.75
     _NEXT_HOUR_CASCADE_10S_PCT = 1.00
+    # Anti-chase guard for the 15m overlay: a high momentum score after a
+    # vertical move can be the worst entry, because the next 15 minutes often
+    # mean-revert before any continuation becomes tradeable.
+    _NEXT_HOUR_CHASE_3_ATR = 1.15
+    _NEXT_HOUR_CHASE_5_ATR = 1.60
+    _NEXT_HOUR_CHASE_RANGE_EDGE = 0.20
+    _NEXT_HOUR_CHASE_RETEST_ATR = 0.35
     _FOCUS_ENTER_CONFIRM_TICKS = 2
     _FOCUS_FLIP_CONFIRM_TICKS = 5
     _FOCUS_MIN_HOLD_SECONDS = 60
@@ -761,6 +768,77 @@ class BitunixBot:
         if gap < -neutral_gap:
             return "short"
         return "mixed"
+
+    @staticmethod
+    def _float_field(row: dict[str, Any], *keys: str, default: float = 0.0) -> float:
+        for key in keys:
+            try:
+                value = row.get(key)
+            except AttributeError:
+                return default
+            if value is None:
+                continue
+            try:
+                out = float(value)
+            except (TypeError, ValueError):
+                continue
+            if np.isfinite(out):
+                return out
+        return default
+
+    @classmethod
+    def _anti_chase_blocker(cls, lean: str, h15: dict[str, Any]) -> str | None:
+        if lean not in ("long", "short") or not h15:
+            return None
+
+        move_3_atr = cls._float_field(h15, "move_3_atr", "move3Atr")
+        move_5_atr = cls._float_field(h15, "move_5_atr", "move5Atr")
+        range_pos = cls._float_field(
+            h15, "position_in_recent_range_15", "positionInRecentRange15", default=0.5
+        )
+        low_dist = cls._float_field(
+            h15, "distance_from_recent_low_atr", "distanceFromRecentLowAtr", default=999.0
+        )
+        high_dist = cls._float_field(
+            h15, "distance_from_recent_high_atr", "distanceFromRecentHighAtr", default=999.0
+        )
+        down_closes = int(cls._float_field(h15, "down_closes_5", "downCloses5"))
+        up_closes = int(cls._float_field(h15, "up_closes_5", "upCloses5"))
+        down_candles = int(cls._float_field(h15, "down_candles_5", "downCandles5"))
+        up_candles = int(cls._float_field(h15, "up_candles_5", "upCandles5"))
+
+        extended_down = (
+            move_5_atr <= -cls._NEXT_HOUR_CHASE_5_ATR
+            or move_3_atr <= -cls._NEXT_HOUR_CHASE_3_ATR
+        )
+        extended_up = (
+            move_5_atr >= cls._NEXT_HOUR_CHASE_5_ATR
+            or move_3_atr >= cls._NEXT_HOUR_CHASE_3_ATR
+        )
+        pinned_low = (
+            range_pos <= cls._NEXT_HOUR_CHASE_RANGE_EDGE
+            or low_dist <= cls._NEXT_HOUR_CHASE_RETEST_ATR
+        )
+        pinned_high = (
+            range_pos >= 1.0 - cls._NEXT_HOUR_CHASE_RANGE_EDGE
+            or high_dist <= cls._NEXT_HOUR_CHASE_RETEST_ATR
+        )
+        one_way_down = (
+            down_closes >= 3
+            or down_candles >= 3
+            or move_3_atr <= -(cls._NEXT_HOUR_CHASE_3_ATR + 0.25)
+        )
+        one_way_up = (
+            up_closes >= 3
+            or up_candles >= 3
+            or move_3_atr >= cls._NEXT_HOUR_CHASE_3_ATR + 0.25
+        )
+
+        if lean == "short" and extended_down and pinned_low and one_way_down:
+            return "anti-chase: move is already extended down near local lows; wait for bounce/retest before shorting"
+        if lean == "long" and extended_up and pinned_high and one_way_up:
+            return "anti-chase: move is already extended up near local highs; wait for pullback/retest before longing"
+        return None
 
     @classmethod
     def _build_next_hour_decision(cls, horizons: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -903,6 +981,9 @@ class BitunixBot:
                 blockers.append("15m volatility spike is too hot")
             if change_10s >= cls._NEXT_HOUR_CASCADE_10S_PCT:
                 blockers.append("10s liquidation-cascade filter is active")
+            chase_blocker = cls._anti_chase_blocker(lean, h15)
+            if chase_blocker:
+                blockers.append(chase_blocker)
 
         context_conflicts = [
             d for d in details
@@ -1473,6 +1554,48 @@ class BitunixBot:
                 if overlay is None:
                     continue
                 atr_abs = overlay.price * overlay.atr_pct / 100.0
+
+                def _recent_move_pct(bars: int) -> float | None:
+                    if len(closes) <= bars:
+                        return None
+                    start = closes[-(bars + 1)]
+                    if start <= 0:
+                        return None
+                    return (closes[-1] - start) / start * 100.0
+
+                def _recent_move_atr(bars: int) -> float | None:
+                    if len(closes) <= bars or atr_abs <= 0:
+                        return None
+                    return (closes[-1] - closes[-(bars + 1)]) / atr_abs
+
+                def _round_metric(value: float | None, digits: int = 4) -> float | None:
+                    if value is None or not np.isfinite(value):
+                        return None
+                    return round(value, digits)
+
+                move_3_bars_pct = _round_metric(_recent_move_pct(3))
+                move_5_bars_pct = _round_metric(_recent_move_pct(5))
+                move_3_atr = _round_metric(_recent_move_atr(3))
+                move_5_atr = _round_metric(_recent_move_atr(5))
+                recent_lows = lows[-15:]
+                recent_highs = highs[-15:]
+                range_low = min(recent_lows)
+                range_high = max(recent_highs)
+                range_span = range_high - range_low
+                range_pos = (closes[-1] - range_low) / range_span if range_span > 0 else 0.5
+                range_pos = max(0.0, min(1.0, range_pos))
+                distance_from_low_atr = (closes[-1] - range_low) / atr_abs if atr_abs > 0 else None
+                distance_from_high_atr = (range_high - closes[-1]) / atr_abs if atr_abs > 0 else None
+                recent_close_pairs = list(zip(closes[-6:-1], closes[-5:]))
+                down_closes_5 = sum(1 for prev, cur in recent_close_pairs if cur < prev)
+                up_closes_5 = sum(1 for prev, cur in recent_close_pairs if cur > prev)
+                recent_candles = list(zip(opens[-5:], closes[-5:]))
+                down_candles_5 = sum(1 for op, cl in recent_candles if cl < op)
+                up_candles_5 = sum(1 for op, cl in recent_candles if cl > op)
+                range_pos_rounded = _round_metric(range_pos)
+                distance_from_low_atr = _round_metric(distance_from_low_atr)
+                distance_from_high_atr = _round_metric(distance_from_high_atr)
+
                 horizons[key] = {
                     "label": label,
                     "timeframe": tf,
@@ -1494,6 +1617,32 @@ class BitunixBot:
                     "priceChange10sPct": round(float(price_change_10s_pct), 4) if is_short_tf and price_change_10s_pct is not None else None,
                     "order_book_imbalance": round(float(ob_imb), 4) if is_short_tf and ob_imb is not None else None,
                     "orderBookImbalance": round(float(ob_imb), 4) if is_short_tf and ob_imb is not None else None,
+                    "move_3_bars_pct": move_3_bars_pct,
+                    "move3BarsPct": move_3_bars_pct,
+                    "move_5_bars_pct": move_5_bars_pct,
+                    "move5BarsPct": move_5_bars_pct,
+                    "move_3_atr": move_3_atr,
+                    "move3Atr": move_3_atr,
+                    "move_5_atr": move_5_atr,
+                    "move5Atr": move_5_atr,
+                    "range_low_15": round(range_low, meta.price_precision),
+                    "rangeLow15": round(range_low, meta.price_precision),
+                    "range_high_15": round(range_high, meta.price_precision),
+                    "rangeHigh15": round(range_high, meta.price_precision),
+                    "position_in_recent_range_15": range_pos_rounded,
+                    "positionInRecentRange15": range_pos_rounded,
+                    "distance_from_recent_low_atr": distance_from_low_atr,
+                    "distanceFromRecentLowAtr": distance_from_low_atr,
+                    "distance_from_recent_high_atr": distance_from_high_atr,
+                    "distanceFromRecentHighAtr": distance_from_high_atr,
+                    "down_closes_5": down_closes_5,
+                    "downCloses5": down_closes_5,
+                    "up_closes_5": up_closes_5,
+                    "upCloses5": up_closes_5,
+                    "down_candles_5": down_candles_5,
+                    "downCandles5": down_candles_5,
+                    "up_candles_5": up_candles_5,
+                    "upCandles5": up_candles_5,
                 }
                 if latest_price is None or key == "h_15m":
                     latest_price = overlay.price

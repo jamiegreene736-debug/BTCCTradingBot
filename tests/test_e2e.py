@@ -3621,6 +3621,70 @@ def test_next_hour_decision_waits_when_15m_trigger_is_mixed():
     assert "the 15-minute trigger is not decisive" in decision["warnings"]
 
 
+def test_next_hour_decision_blocks_chasing_extended_dump():
+    horizons = {
+        "h_15m": {
+            "label": "Next 15m",
+            "long_score": 0.18,
+            "short_score": 0.76,
+            "adx": 36,
+            "short_reasons": ["supertrend_down", "cvd_real-2.1", "agg-0.55"],
+            "aggression_10s": -0.55,
+            "real_cvd": -2.1,
+            "atr_pct": 0.10,
+            "price_change_10s_pct": 0.03,
+            "move_3_atr": -1.45,
+            "move_5_atr": -2.2,
+            "position_in_recent_range_15": 0.08,
+            "distance_from_recent_low_atr": 0.12,
+            "down_closes_5": 4,
+            "down_candles_5": 4,
+        },
+        "h_30m": {"label": "Next 30m", "long_score": 0.15, "short_score": 0.60, "adx": 31},
+        "h_1h": {"label": "Next 1h", "long_score": 0.39, "short_score": 0.38},
+        "h_4h": {"label": "Next 4h", "long_score": 0.50, "short_score": 0.48},
+    }
+
+    decision = BitunixBot._build_next_hour_decision(horizons)
+
+    assert decision["lean"] == "short"
+    assert decision["action"] == "wait"
+    assert 0 <= decision["confidence_score"] < 50
+    assert any("anti-chase" in warning for warning in decision["warnings"])
+
+
+def test_next_hour_decision_blocks_chasing_extended_pump():
+    horizons = {
+        "h_15m": {
+            "label": "Next 15m",
+            "long_score": 0.76,
+            "short_score": 0.18,
+            "adx": 36,
+            "long_reasons": ["supertrend_up", "cvd_real+2.1", "agg+0.55"],
+            "aggression_10s": 0.55,
+            "real_cvd": 2.1,
+            "atr_pct": 0.10,
+            "price_change_10s_pct": 0.03,
+            "move_3_atr": 1.45,
+            "move_5_atr": 2.2,
+            "position_in_recent_range_15": 0.92,
+            "distance_from_recent_high_atr": 0.12,
+            "up_closes_5": 4,
+            "up_candles_5": 4,
+        },
+        "h_30m": {"label": "Next 30m", "long_score": 0.60, "short_score": 0.15, "adx": 31},
+        "h_1h": {"label": "Next 1h", "long_score": 0.39, "short_score": 0.38},
+        "h_4h": {"label": "Next 4h", "long_score": 0.50, "short_score": 0.48},
+    }
+
+    decision = BitunixBot._build_next_hour_decision(horizons)
+
+    assert decision["lean"] == "long"
+    assert decision["action"] == "wait"
+    assert 0 <= decision["confidence_score"] < 50
+    assert any("anti-chase" in warning for warning in decision["warnings"])
+
+
 def test_next_hour_smoothing_requires_confirmed_side_flip():
     reset_state()
     cfg = fresh_cfg()
