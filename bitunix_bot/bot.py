@@ -832,39 +832,54 @@ class BitunixBot:
                 h["stable"] = stable
 
             # ---- Cross-horizon alignment ---------------------------------
-            # When 4+ of 6 horizons agree on direction, false-positive rate
-            # drops dramatically. We expose the alignment counts so the
-            # frontend can both display the agreement ratio and use it to
-            # boost / cap the leverage suggestion.
-            long_agree = short_agree = 0
-            weighted_long = weighted_short = 0.0
-            for h in horizons.values():
-                ls = h["long_score"]; ss = h["short_score"]
-                if ls - ss >= self._BIAS_GAP:
-                    long_agree += 1
-                    weighted_long += ls
-                elif ss - ls >= self._BIAS_GAP:
-                    short_agree += 1
-                    weighted_short += ss
-            total_horizons = len(horizons)
-            if long_agree > short_agree:
-                dominant_side = "long"
-                agree = long_agree
-                avg_strength = weighted_long / max(1, long_agree)
-            elif short_agree > long_agree:
-                dominant_side = "short"
-                agree = short_agree
-                avg_strength = weighted_short / max(1, short_agree)
-            else:
+            # Weighted-mean approach: sum the signed bias (long_score -
+            # short_score) across all horizons and divide by N. This
+            # captures direction AND magnitude — a small consistent lean
+            # across all 6 horizons is far more meaningful than 3 mild
+            # longs vs 3 mild shorts (which the old binary counting
+            # called "mixed" even when the actual scores were nearly
+            # identical to a clean bull case).
+            #
+            # Strength tiers are tuned to typical values observed in live
+            # data:
+            #   |mean_bias| ≥ 0.20  → ALL-IN  (strongest readings, e.g. all
+            #                                   horizons solidly directional)
+            #   |mean_bias| ≥ 0.13  → STRONG  (5+ horizons clearly leaning)
+            #   |mean_bias| ≥ 0.07  → MODERATE (mild but consistent lean)
+            #   |mean_bias| ≥ 0.03  → WEAK    (barely directional)
+            #   else                → NO CONSENSUS (truly flat)
+            signed = [h["long_score"] - h["short_score"] for h in horizons.values()]
+            total_horizons = len(signed)
+            mean_bias = sum(signed) / max(1, total_horizons) if signed else 0.0
+            abs_bias = abs(mean_bias)
+
+            if abs_bias < 0.03:
                 dominant_side = "mixed"
+                strength_tier = "none"
+            else:
+                dominant_side = "long" if mean_bias > 0 else "short"
+                if abs_bias >= 0.20:   strength_tier = "all_in"
+                elif abs_bias >= 0.13: strength_tier = "strong"
+                elif abs_bias >= 0.07: strength_tier = "moderate"
+                else:                   strength_tier = "weak"
+
+            # Count horizons that lean the dominant direction (any positive
+            # gap, no BIAS_GAP threshold — used for the secondary "5 of 6"
+            # display detail).
+            if dominant_side == "long":
+                agree = sum(1 for sb in signed if sb > 0)
+            elif dominant_side == "short":
+                agree = sum(1 for sb in signed if sb < 0)
+            else:
                 agree = 0
-                avg_strength = 0.0
+
             alignment = {
                 "dominant": dominant_side,
+                "strength": strength_tier,
+                "mean_bias": round(mean_bias, 4),
                 "agree": agree,
                 "total": total_horizons,
                 "ratio": round(agree / max(1, total_horizons), 3),
-                "avg_strength": round(avg_strength, 3),
             }
 
             self.state.record_overlay(sym_u, {
