@@ -139,6 +139,10 @@ def fresh_cfg():
     cfg.trading.max_same_direction = 2
     cfg.trading.use_post_only_entries = False
     cfg.trading.cooldown_seconds = 60
+    # Most live-mode fixture tests exercise caps, SL ratchets, stale exits,
+    # etc. Disable the production 15m hard-close clock unless a test opts in.
+    cfg.trading.max_position_age_seconds = 0
+    cfg.trading.time_exit_only_if_losing = True
     cfg.risk.partial_tp_enabled = True
     cfg.risk.take_profit_r = 2.5
     # Disable fee reserve in fixture so size-sensitive tests assert volumes
@@ -356,6 +360,7 @@ def test_time_based_exit_closes_stale_LOSING_position():
     cfg = fresh_cfg()
     cfg.mode = "live"
     cfg.trading.max_position_age_seconds = 60
+    cfg.trading.time_exit_only_if_losing = True
     bot = BitunixBot(cfg)
     bot.client = make_mock_client()
     stale_loser = {
@@ -377,6 +382,7 @@ def test_time_based_exit_LETS_WINNER_RUN():
     cfg = fresh_cfg()
     cfg.mode = "live"
     cfg.trading.max_position_age_seconds = 60
+    cfg.trading.time_exit_only_if_losing = True
     bot = BitunixBot(cfg)
     bot.client = make_mock_client()
     stale_winner = {
@@ -390,6 +396,28 @@ def test_time_based_exit_LETS_WINNER_RUN():
     bot._resolve_symbol_meta()
     bot._tick()
     bot.client.flash_close_position.assert_not_called()
+
+
+def test_time_based_exit_closes_winner_when_loss_only_disabled():
+    """The 15m manual-trade clock closes stale positions regardless of PnL."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.trading.max_position_age_seconds = 60
+    cfg.trading.time_exit_only_if_losing = False
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    stale_winner = {
+        "positionId": "WINNER2", "symbol": "BTCUSDT", "qty": "0.01",
+        "side": "LONG", "leverage": 100,
+        "ctime": int(time.time() * 1000) - 600_000,
+        "unrealizedPNL": "+1.50",
+    }
+    bot.client.pending_positions.return_value = [stale_winner]
+    bot.client.klines.side_effect = lambda *a, **kw: make_uptrend_klines()
+    bot._resolve_symbol_meta()
+    bot._tick()
+    bot.client.flash_close_position.assert_called_once_with("WINNER2")
 
 
 def test_live_mode_with_zero_margin_skips_orders():
@@ -528,6 +556,66 @@ def test_momentum_endpoint_lazily_warms_empty_overlay():
     assert j["status"]["warmup_attempted"] is True
     assert j["status"]["symbols_count"] == 1
     assert "BTCUSDT" in j["symbols"]
+
+
+def test_momentum_endpoint_includes_15m_position_countdown():
+    reset_state()
+    cfg = fresh_cfg()
+    client = make_mock_client()
+    opened_ms = int(time.time() * 1000) - 60_000
+    client.pending_positions.return_value = [{
+        "positionId": "POS15", "symbol": "BTCUSDT", "qty": "0.01",
+        "side": "LONG", "ctime": opened_ms, "avgOpenPrice": "60000",
+        "unrealizedPNL": "0.25",
+    }]
+    get_state().record_overlay("BTCUSDT", {
+        "symbol": "BTCUSDT",
+        "price": 60000.0,
+        "horizons": {},
+        "horizon_order": [],
+        "alignment": {"dominant": "mixed"},
+        "next_15m": {"action": "wait"},
+        "as_of": int(time.time()),
+    })
+
+    app = create_app(cfg, client)
+    c = app.test_client()
+    good = base64.b64encode(b"admin:test_pass").decode()
+
+    r = c.get("/api/momentum", headers={"Authorization": f"Basic {good}"})
+    assert r.status_code == 200
+    j = r.get_json()
+    assert j["focus_horizon"] == "15m"
+    assert j["position_close_after_seconds"] == 900
+    pos = j["symbols"]["BTCUSDT"]["open_position"]
+    assert pos["position_id"] == "POS15"
+    assert 800 <= pos["seconds_remaining"] <= 900
+
+
+def test_close_symbol_endpoint_flash_closes_matching_position():
+    reset_state()
+    cfg = fresh_cfg()
+    client = make_mock_client()
+    client.pending_positions.return_value = [
+        {"positionId": "POS15", "symbol": "BTCUSDT", "qty": "0.01",
+         "side": "LONG", "ctime": int(time.time() * 1000)},
+        {"positionId": "ETH1", "symbol": "ETHUSDT", "qty": "0.01",
+         "side": "SHORT", "ctime": int(time.time() * 1000)},
+    ]
+    app = create_app(cfg, client)
+    c = app.test_client()
+    good = base64.b64encode(b"admin:test_pass").decode()
+
+    r = c.post(
+        "/api/admin/close-symbol",
+        json={"symbol": "BTCUSDT"},
+        headers={"Authorization": f"Basic {good}"},
+    )
+
+    assert r.status_code == 200
+    body = r.get_json()
+    assert body["closed_count"] == 1
+    client.flash_close_position.assert_called_once_with("POS15")
 
 
 def _setup_bot_with_open_position(side: str, entry: float, current_price: float,
@@ -3464,8 +3552,11 @@ def test_overlay_factor_score_renormalizes_when_flow_absent():
 
 def test_next_hour_decision_favors_aligned_long():
     horizons = {
-        "h_15m": {"label": "Next 15m", "long_score": 0.56, "short_score": 0.45},
-        "h_30m": {"label": "Next 30m", "long_score": 0.64, "short_score": 0.43},
+        "h_15m": {
+            "label": "Next 15m", "long_score": 0.56, "short_score": 0.45,
+            "adx": 29, "long_reasons": ["agg+0.44"],
+        },
+        "h_30m": {"label": "Next 30m", "long_score": 0.64, "short_score": 0.43, "adx": 28},
         "h_1h": {"label": "Next 1h", "long_score": 0.68, "short_score": 0.44},
         "h_4h": {"label": "Next 4h", "long_score": 0.52, "short_score": 0.48},
     }
@@ -3474,21 +3565,23 @@ def test_next_hour_decision_favors_aligned_long():
     assert decision["lean"] == "long"
     assert decision["confidence"] == "high"
     assert 80 <= decision["confidence_score"] <= 99
-    assert decision["agreement"]["agree"] == 3
+    assert decision["agreement"]["agree"] == 2
+    assert decision["method"] == "weighted_next_15m"
+    assert decision["horizon"] == "15m"
 
 
-def test_next_hour_decision_waits_when_one_hour_disagrees():
+def test_next_hour_decision_waits_when_15m_trigger_is_mixed():
     horizons = {
-        "h_15m": {"label": "Next 15m", "long_score": 0.80, "short_score": 0.40},
-        "h_30m": {"label": "Next 30m", "long_score": 0.75, "short_score": 0.45},
-        "h_1h": {"label": "Next 1h", "long_score": 0.45, "short_score": 0.56},
+        "h_15m": {"label": "Next 15m", "long_score": 0.52, "short_score": 0.50, "adx": 30},
+        "h_30m": {"label": "Next 30m", "long_score": 0.85, "short_score": 0.35, "adx": 30},
+        "h_1h": {"label": "Next 1h", "long_score": 0.75, "short_score": 0.45},
         "h_4h": {"label": "Next 4h", "long_score": 0.60, "short_score": 0.50},
     }
     decision = BitunixBot._build_next_hour_decision(horizons)
     assert decision["lean"] == "long"
     assert decision["action"] == "wait"
     assert 0 <= decision["confidence_score"] < 50
-    assert "the one-hour horizon disagrees" in decision["warnings"]
+    assert "the 15-minute trigger is not decisive" in decision["warnings"]
 
 
 def test_sub_hour_payload_marks_cache_ready_from_core_horizons():
@@ -3515,7 +3608,7 @@ def test_sub_hour_payload_marks_cache_ready_from_core_horizons():
     assert payload["ready"] is True
     assert payload["filled"] is True
     assert payload["action"] == decision["action"]
-    assert len(payload["signals"]) == 3
+    assert len(payload["signals"]) == 2
     assert payload["signals"][0]["side"] == "short"
     assert payload["signals"][0]["firing"] is True
     assert payload["firing_signals"], "expected at least one firing sub-hour signal"
@@ -3562,7 +3655,12 @@ def test_suggested_trade_plan_prefers_maker_limit_with_exit_target():
 
     decision = {"action": "long", "confidence_score": 72, "confidence": "medium"}
     horizons = {
-        "h_15m": {"price": 60_001.0, "atr": 95.0, "long_reasons": ["agg+0.44"]},
+        "h_15m": {
+            "label": "Next 15m",
+            "price": 60_001.0,
+            "atr": 95.0,
+            "long_reasons": ["agg+0.44"],
+        },
         "h_1h": {
             "label": "Next 1h",
             "price": 60_001.0,
@@ -3582,6 +3680,7 @@ def test_suggested_trade_plan_prefers_maker_limit_with_exit_target():
     assert plan["take_profit"] > plan["entry_price"]
     assert plan["max_exit_price"] == plan["take_profit"]
     assert plan["valid_for_seconds"] == cfg.trading.post_only_timeout_secs
+    assert plan["horizon"] == "Next 15m"
 
 
 def test_suggested_trade_plan_waits_without_action():
@@ -5373,11 +5472,14 @@ def main() -> int:
         test_bar_dedupe_blocks_same_candle_re_eval,
         test_time_based_exit_closes_stale_LOSING_position,
         test_time_based_exit_LETS_WINNER_RUN,
+        test_time_based_exit_closes_winner_when_loss_only_disabled,
         test_live_mode_with_zero_margin_skips_orders,
         test_paper_mode_with_zero_margin_simulates_anyway,
         test_live_mode_actually_calls_place_order,
         test_dashboard_routes_and_auth,
         test_momentum_endpoint_lazily_warms_empty_overlay,
+        test_momentum_endpoint_includes_15m_position_countdown,
+        test_close_symbol_endpoint_flash_closes_matching_position,
         test_breakeven_sl_move_at_1r_long,
         test_trailing_sl_at_2r_long,
         test_breakeven_sl_short,
@@ -5475,7 +5577,7 @@ def main() -> int:
         test_factor_score_weighted_combines_groups,
         test_overlay_factor_score_renormalizes_when_flow_absent,
         test_next_hour_decision_favors_aligned_long,
-        test_next_hour_decision_waits_when_one_hour_disagrees,
+        test_next_hour_decision_waits_when_15m_trigger_is_mixed,
         test_sub_hour_payload_marks_cache_ready_from_core_horizons,
         test_sub_hour_payload_exposes_primary_when_no_signal_fires,
         test_signal_records_factor_breakdown,

@@ -59,16 +59,13 @@ trading:
   # 15m timeframe: 600s (10 min) cooldown — reverted from 900 per Grok filter-loosening review;
   # 900 was too conservative for a 15-symbol set.
   cooldown_seconds: 120         # was 600 — Grok 2026-04-27: drop to 120s for several trades/hour
-  # Force-close stale positions. On 15m timeframe, 4 hours = 16 bars is the
-  # window for a setup to resolve — beyond that the signal regime has
-  # almost certainly shifted.
-  max_position_age_seconds: 14400  # was 5400 (90 min) — scaled for 15m
-  # Profit-aware time exit: when max age hits, ONLY force-close if the
-  # position is at a loss. Winners keep running under the SL ratchet —
-  # a winning trade that's been alive 90+ min has already proven the
-  # signal was right; we want to harvest more. The SL ratchet (already
-  # at break-even or trailing by then) protects the downside.
-  time_exit_only_if_losing: true
+  # Hard 15-minute position clock for the Chrome-extension workflow. The user
+  # is now making 15m decisions manually; after 15 minutes the extension asks
+  # the dashboard to flash-close that coin at market, regardless of PnL. If
+  # the bot is ever switched back to live mode, this same max-age is the
+  # server-side fallback.
+  max_position_age_seconds: 900
+  time_exit_only_if_losing: false
   # Streak protection: pause a symbol for streak_loss_pause_seconds after
   # N consecutive losses. Live data showed 6 XRP SHORTs in a row losing —
   # bot kept doubling down on a wrong-regime call. This catches it.

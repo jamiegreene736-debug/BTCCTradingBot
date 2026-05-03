@@ -210,6 +210,7 @@ _FACTOR_CLASSIFICATIONS: tuple[tuple[str, str, str], ...] = (
     ("mfi(",                "mean_rev", "mfi"),
     ("sr_bounce",           "mean_rev", "sr"),
     ("sr_reject",           "mean_rev", "sr"),
+    ("wick_pattern_",       "mean_rev", "wick_pattern"),
     ("CMB:smc_reversal",    "mean_rev", "smc_reversal_combo"),
     ("CMB:bb_extreme_revert","mean_rev","bb_extreme_combo"),
     # ----- Flow group -----
@@ -601,10 +602,28 @@ def evaluate(
     chart_hits = chart_patterns.detect_all(h, l, c, cfg.swing_lookback)
     candle_long, candle_short = patterns.score(candle_hits)
     chart_long, chart_short = chart_patterns.score(chart_hits)
+    pat_long_names = [p.name for p in candle_hits if p.direction == "bullish"]
+    pat_short_names = [p.name for p in candle_hits if p.direction == "bearish"]
+    pat_neutral_names = [p.name for p in candle_hits if p.direction == "neutral"]
+    chart_long_names = [p.name for p in chart_hits if p.direction == "bullish"]
+    chart_short_names = [p.name for p in chart_hits if p.direction == "bearish"]
     pattern_long = candle_long + chart_long
     pattern_short = candle_short + chart_short
     pattern_long_n = min(1.0, pattern_long / cfg.pattern_norm)
     pattern_short_n = min(1.0, pattern_short / cfg.pattern_norm)
+
+    # 15m scalper refinement from the Grok review: a long rejection wick only
+    # matters when a reversal pattern and live aggression agree with it.
+    last_range = h[i] - l[i]
+    if last_range > 0 and aggression_10s is not None:
+        lower_wick = (min(o[i], c[i]) - l[i]) / last_range
+        upper_wick = (h[i] - max(o[i], c[i])) / last_range
+        bull_wick_patterns = {"hammer", "inverted_hammer", "tweezer_bottom", "morning_star"}
+        bear_wick_patterns = {"shooting_star", "hanging_man", "tweezer_top", "evening_star"}
+        if lower_wick >= 0.60 and aggression_10s >= 0.30 and bull_wick_patterns.intersection(pat_long_names):
+            long_reasons.append("wick_pattern_long")
+        if upper_wick >= 0.60 and aggression_10s <= -0.30 and bear_wick_patterns.intersection(pat_short_names):
+            short_reasons.append("wick_pattern_short")
 
     # ------------------------------------------------------------------ combine
     # Factor-group scoring replaces raw vote counting. Each side's votes are
@@ -668,12 +687,6 @@ def evaluate(
     # the regime-adaptive threshold. These values are passed through to the
     # Signal object for logging and position-sizing use only.
     _ = session_weight, activity_mult  # referenced below in _build
-
-    pat_long_names = [p.name for p in candle_hits if p.direction == "bullish"]
-    pat_short_names = [p.name for p in candle_hits if p.direction == "bearish"]
-    pat_neutral_names = [p.name for p in candle_hits if p.direction == "neutral"]
-    chart_long_names = [p.name for p in chart_hits if p.direction == "bullish"]
-    chart_short_names = [p.name for p in chart_hits if p.direction == "bearish"]
 
     def _build(direction: Direction) -> Signal:
         is_long = direction == "long"
@@ -1030,6 +1043,18 @@ def compute_overlay_scores(
     chart_long, chart_short = chart_patterns.score(chart_hits)
     pattern_long_n = min(1.0, (candle_long + chart_long) / cfg.pattern_norm)
     pattern_short_n = min(1.0, (candle_short + chart_short) / cfg.pattern_norm)
+    pat_long_names = [p.name for p in candle_hits if p.direction == "bullish"]
+    pat_short_names = [p.name for p in candle_hits if p.direction == "bearish"]
+    last_range = h[i] - l[i]
+    if last_range > 0 and aggression_10s is not None:
+        lower_wick = (min(float(opens[-1]), c[i]) - l[i]) / last_range
+        upper_wick = (h[i] - max(float(opens[-1]), c[i])) / last_range
+        bull_wick_patterns = {"hammer", "inverted_hammer", "tweezer_bottom", "morning_star"}
+        bear_wick_patterns = {"shooting_star", "hanging_man", "tweezer_top", "evening_star"}
+        if lower_wick >= 0.60 and aggression_10s >= 0.30 and bull_wick_patterns.intersection(pat_long_names):
+            long_reasons.append("wick_pattern_long")
+        if upper_wick >= 0.60 and aggression_10s <= -0.30 and bear_wick_patterns.intersection(pat_short_names):
+            short_reasons.append("wick_pattern_short")
     for pat in candle_hits:
         if pat.direction == "bullish":
             long_reasons.append(f"PAT:{pat.name}")
@@ -1050,11 +1075,23 @@ def compute_overlay_scores(
         or aggression_10s is not None
     )
     active_groups = _FACTOR_GROUPS if flow_available else ("trend", "mean_rev", "context")
+    # For the 15m overlay path, live order flow is the fastest useful input.
+    # When flow is available (only the shortest horizons receive it), promote
+    # tape/CVD/OB to 80% and demote slower trend/context votes.
+    overlay_weights = cfg.factor_weights
+    if flow_available:
+        overlay_weights = {
+            **cfg.factor_weights,
+            "trend": 0.05,
+            "mean_rev": 0.10,
+            "flow": 0.80,
+            "context": 0.05,
+        }
     factor_long = factor_score_weighted_active(
-        breakdown_long, cfg.factor_weights, active_groups
+        breakdown_long, overlay_weights, active_groups
     )
     factor_short = factor_score_weighted_active(
-        breakdown_short, cfg.factor_weights, active_groups
+        breakdown_short, overlay_weights, active_groups
     )
 
     pw = cfg.pattern_weight

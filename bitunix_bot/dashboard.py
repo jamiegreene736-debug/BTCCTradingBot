@@ -41,6 +41,77 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
     app = Flask(__name__)
     state = get_state()
     password = os.environ.get("DASHBOARD_PASSWORD", "")
+    manual_close_after_seconds = 15 * 60
+
+    def _float(value: Any, default: float = 0.0) -> float:
+        try:
+            return float(value) if value not in (None, "", "null") else default
+        except (TypeError, ValueError):
+            return default
+
+    def _symbol(value: Any) -> str:
+        return str(value or "").strip().upper()
+
+    def _position_ctime_ms(p: dict[str, Any]) -> int:
+        raw = (
+            p.get("ctime")
+            or p.get("createdTime")
+            or p.get("created_time")
+            or p.get("openTime")
+            or p.get("open_time")
+        )
+        ts = _float(raw)
+        if ts <= 0:
+            return 0
+        # Bitunix usually returns ms. Accept seconds too for testability and
+        # defensive compatibility with schema variants.
+        if ts < 10_000_000_000:
+            ts *= 1000
+        return int(ts)
+
+    def _position_summary(p: dict[str, Any], now_s: int | None = None) -> dict[str, Any]:
+        now_s = now_s or int(time.time())
+        ctime_ms = _position_ctime_ms(p)
+        opened_at = int(ctime_ms // 1000) if ctime_ms else None
+        close_at = opened_at + manual_close_after_seconds if opened_at else None
+        remaining = max(0, close_at - now_s) if close_at else None
+        side = str(p.get("side") or p.get("positionSide") or "").upper()
+        symbol = _symbol(p.get("symbol"))
+        qty = _float(p.get("qty") or p.get("size") or p.get("volume"))
+        return {
+            "position_id": str(p.get("positionId") or p.get("position_id") or ""),
+            "positionId": str(p.get("positionId") or p.get("position_id") or ""),
+            "symbol": symbol,
+            "side": side,
+            "qty": qty,
+            "avg_open_price": _float(p.get("avgOpenPrice") or p.get("entryPrice") or p.get("openPrice")),
+            "avgOpenPrice": _float(p.get("avgOpenPrice") or p.get("entryPrice") or p.get("openPrice")),
+            "unrealized_pnl": _float(p.get("unrealizedPNL") or p.get("unrealizedPnl")),
+            "unrealizedPNL": _float(p.get("unrealizedPNL") or p.get("unrealizedPnl")),
+            "opened_at": opened_at,
+            "openedAt": opened_at,
+            "auto_close_after_seconds": manual_close_after_seconds,
+            "autoCloseAfterSeconds": manual_close_after_seconds,
+            "auto_close_at": close_at,
+            "autoCloseAt": close_at,
+            "seconds_remaining": remaining,
+            "secondsRemaining": remaining,
+        }
+
+    def _open_positions_for_symbol(symbol: str) -> list[dict[str, Any]]:
+        sym_u = _symbol(symbol)
+        try:
+            rows = client.pending_positions(sym_u)
+        except TypeError:
+            rows = client.pending_positions()
+        matches: list[dict[str, Any]] = []
+        for p in rows or []:
+            if _symbol(p.get("symbol")) not in ("", sym_u):
+                continue
+            if _float(p.get("qty") or p.get("size") or p.get("volume")) == 0:
+                continue
+            matches.append(p)
+        return matches
 
     # ------------------------------------------------------------------ auth
 
@@ -355,6 +426,53 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
             },
         })
 
+    @app.post("/api/admin/close-symbol")
+    def close_symbol() -> Response:
+        """Market-close every open position for one symbol.
+
+        Used by the Chrome overlay's 15-minute countdown for manual trades.
+        This intentionally works even when the bot itself is in paper mode:
+        the user may place the Bitunix trade manually, while the extension
+        asks the authenticated dashboard to flash-close the real position.
+        """
+        body = request.get_json(silent=True) or {}
+        symbol = _symbol(body.get("symbol"))
+        if not symbol:
+            return jsonify({"ok": False, "error": "symbol is required"}), 400
+
+        positions = _open_positions_for_symbol(symbol)
+        closed: list[dict[str, Any]] = []
+        errors: list[dict[str, Any]] = []
+        for p in positions:
+            pid = str(p.get("positionId") or p.get("position_id") or "")
+            if not pid:
+                errors.append({"symbol": symbol, "error": "missing positionId", "position": p})
+                continue
+            try:
+                resp = client.flash_close_position(pid)
+                item = _position_summary(p)
+                item["response"] = resp
+                closed.append(item)
+                state.record_order(f"{symbol} EXTENSION_15M_CLOSE positionId={pid}")
+            except BitunixError as e:
+                log.error("Extension close-symbol failed for %s/%s: %s", symbol, pid, e)
+                state.record_error(f"{symbol} extension close failed: {e.code} {e.msg}")
+                errors.append({"symbol": symbol, "positionId": pid, "error": f"{e.code}: {e.msg}"})
+            except Exception as e:
+                log.exception("Extension close-symbol failed for %s/%s", symbol, pid)
+                state.record_error(f"{symbol} extension close failed: {e}")
+                errors.append({"symbol": symbol, "positionId": pid, "error": str(e)})
+
+        status = 200 if not errors else (207 if closed else 502)
+        return jsonify({
+            "ok": not errors,
+            "symbol": symbol,
+            "closed_count": len(closed),
+            "closedCount": len(closed),
+            "closed": closed,
+            "errors": errors,
+        }), status
+
     @app.get("/api/momentum")
     def api_momentum() -> Response:
         """Per-symbol reversal scores for the Chrome-extension overlay.
@@ -368,11 +486,11 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
                      For someone holding a SHORT position, high values are
                      a reversal warning ("exit your short").
         short_score: mirror — "exit your long" warning.
-        next_hour:  dedicated long/short/wait decision for the next 60 minutes.
+        next_15m:   dedicated long/short/wait decision for the next 15 minutes.
 
         Note: these are confluence scores, not calibrated probabilities or
-        financial advice. The next_hour action intentionally returns "wait"
-        when the edge is unclear or the one-hour horizon disagrees.
+        financial advice. The next_15m action intentionally returns "wait"
+        when the edge is unclear or the 15m scalp filters disagree.
         """
         def _overlay_stale(snapshot: dict[str, Any]) -> bool:
             if not snapshot:
@@ -401,19 +519,52 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
                 warmup_error = str(e)
                 state.record_error(f"momentum warmup failed: {e}")
 
+        symbols_payload: dict[str, Any] = {
+            sym: dict(row) if isinstance(row, dict) else row
+            for sym, row in (snap or {}).items()
+        }
+        open_positions: list[dict[str, Any]] = []
+        open_positions_error = None
+        try:
+            now_s = int(time.time())
+            for p in client.pending_positions() or []:
+                if _float(p.get("qty") or p.get("size") or p.get("volume")) == 0:
+                    continue
+                summary = _position_summary(p, now_s=now_s)
+                open_positions.append(summary)
+                sym = summary.get("symbol")
+                if sym in symbols_payload and isinstance(symbols_payload[sym], dict):
+                    row = symbols_payload[sym]
+                    row.setdefault("open_positions", [])
+                    row.setdefault("openPositions", [])
+                    row["open_positions"].append(summary)
+                    row["openPositions"].append(summary)
+                    # Convenience: most manual use has max one position/symbol.
+                    row["open_position"] = summary
+                    row["openPosition"] = summary
+        except Exception as e:
+            open_positions_error = str(e)
+
         return jsonify({
             "now": int(time.time()),
             "tick_seconds": cfg.loop.tick_seconds,
             "timeframe": cfg.trading.timeframe,
             "fire_threshold": cfg.strategy.fire_threshold,
+            "focus_horizon": "15m",
+            "focusHorizon": "15m",
+            "position_close_after_seconds": manual_close_after_seconds,
+            "positionCloseAfterSeconds": manual_close_after_seconds,
+            "open_positions": open_positions,
+            "openPositions": open_positions,
+            "open_positions_error": open_positions_error,
             "status": {
                 "ready": bool(snap),
-                "symbols_count": len(snap),
+                "symbols_count": len(symbols_payload),
                 "stale": _overlay_stale(snap),
                 "warmup_attempted": warmup_attempted,
                 "warmup_error": warmup_error,
             },
-            "symbols": snap,
+            "symbols": symbols_payload,
         })
 
     @app.get("/")
