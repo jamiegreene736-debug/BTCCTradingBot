@@ -188,6 +188,123 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
             "winRate": round(wins / total * 100.0, 1) if total else None,
         }
 
+    def _symbol_history_gate(symbol: str, rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+        """Pause a symbol when recent pump-fade shorts are proving untradeable."""
+        short_rows = [
+            r for r in rows
+            if str(r.get("side") or "").upper() in ("SHORT", "SELL")
+        ][:10]
+        if len(short_rows) < 2:
+            return None
+        stats = _closed_trade_stats(short_rows)
+        win_rate = stats.get("win_rate")
+        net_pnl = _float(stats.get("net_pnl"))
+        no_wins_two_losses = stats["wins"] == 0 and stats["losses"] >= 2
+        sustained_bad_edge = len(short_rows) >= 4 and net_pnl < 0 and (
+            win_rate is None or win_rate < 40.0
+        )
+        if not (no_wins_two_losses or sustained_bad_edge):
+            return None
+
+        return {
+            "symbol": _symbol(symbol),
+            "reason": (
+                f"symbol performance gate: recent {symbol} pump-fade shorts are losing "
+                f"({stats['wins']}W/{stats['losses']}L, net {net_pnl:+.2f} USDT); wait until stats recover"
+            ),
+            "stats": stats,
+        }
+
+    def _decision_aliases() -> tuple[str, ...]:
+        return (
+            "next_1h", "next1h", "next_15m", "next15m",
+            "fifteen_minute", "fifteenMinute", "next_hour", "nextHour",
+            "one_hour", "oneHour", "decision", "recommendation",
+        )
+
+    def _row_decision(row: dict[str, Any]) -> dict[str, Any]:
+        for key in _decision_aliases():
+            value = row.get(key)
+            if isinstance(value, dict):
+                return value
+        return {}
+
+    def _apply_symbol_history_gate(row: dict[str, Any], symbol: str, trades: list[dict[str, Any]]) -> None:
+        gate = _symbol_history_gate(symbol, trades)
+        decision = _row_decision(row)
+        if not gate or str(decision.get("action") or "").lower() != "short":
+            return
+
+        reason = str(gate["reason"])
+        warnings = [reason] + [
+            str(w) for w in (decision.get("warnings") or [])
+            if str(w) != reason
+        ]
+        wait_plan = {
+            "status": "wait",
+            "order_type": "WAIT",
+            "orderType": "WAIT",
+            "reason": reason,
+            "rationale": reason,
+        }
+        blocked = {
+            **decision,
+            "action": "wait",
+            "direction": "wait",
+            "lean": "mixed",
+            "confidence": "none",
+            "confidence_score": 0,
+            "confidenceScore": 0,
+            "bias": 0.0,
+            "weighted_long_score": 0.0,
+            "weighted_short_score": 0.0,
+            "warnings": warnings,
+            "blocked_by": "symbol_trade_quality",
+            "blockedBy": "symbol_trade_quality",
+            "symbol_trade_quality_gate": gate,
+            "symbolTradeQualityGate": gate,
+            "setup": None,
+            "suggested_lev": 0,
+            "suggestedLev": 0,
+            "trade_plan": wait_plan,
+            "tradePlan": wait_plan,
+        }
+        primary = blocked.get("primary_signal") or blocked.get("primarySignal")
+        if isinstance(primary, dict):
+            primary = {
+                **primary,
+                "firing": False,
+                "score": 0.0,
+                "short_score": 0.0,
+                "shortScore": 0.0,
+                "reasons": [reason] + list(primary.get("reasons") or []),
+            }
+            blocked["primary_signal"] = primary
+            blocked["primarySignal"] = primary
+
+        for key in _decision_aliases():
+            row[key] = blocked
+        row["trade_plan"] = wait_plan
+        row["tradePlan"] = wait_plan
+        row["symbol_trade_quality_gate"] = gate
+        row["symbolTradeQualityGate"] = gate
+
+        for key in ("sub_hour", "subHour", "sub_hour_cache", "subHourCache"):
+            sub = row.get(key)
+            if not isinstance(sub, dict):
+                continue
+            row[key] = {
+                **sub,
+                "action": "wait",
+                "direction": "wait",
+                "confidence": "none",
+                "confidence_score": 0,
+                "confidenceScore": 0,
+                "warnings": warnings,
+                "trade_plan": wait_plan,
+                "tradePlan": wait_plan,
+            }
+
     def _closed_history_snapshot(limit: int = 50, ttl_seconds: int = 15) -> tuple[list[dict[str, Any]], str | None]:
         nonlocal closed_history_cache, closed_history_cache_error, closed_history_cache_at
         now = time.time()
@@ -725,6 +842,7 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
                 row["tradeHistory"] = recent
                 row["closed_trade_stats"] = stats
                 row["closedTradeStats"] = stats
+                _apply_symbol_history_gate(row, sym, trades)
 
         return jsonify({
             "now": int(time.time()),

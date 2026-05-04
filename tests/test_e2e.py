@@ -649,6 +649,66 @@ def test_momentum_endpoint_includes_per_symbol_closed_trade_history():
     assert btc["closed_trades"][0]["price_pnl_pct"] == 0.3333
 
 
+def test_momentum_endpoint_blocks_symbol_after_losing_pump_fade_shorts():
+    reset_state()
+    cfg = fresh_cfg()
+    client = make_mock_client()
+    now_ms = int(time.time() * 1000)
+    client.history_positions.return_value = {"positionList": [
+        {"positionId": "XRP_LOSS_1", "symbol": "XRPUSDT", "side": "SELL",
+         "qty": "100", "avgOpenPrice": "1.4033", "avgClosePrice": "1.4055",
+         "ctime": now_ms - 420_000, "mtime": now_ms - 210_000,
+         "realizedPNL": "-1.00", "fee": "-0.20", "funding": "0.00"},
+        {"positionId": "XRP_LOSS_2", "symbol": "XRPUSDT", "side": "SELL",
+         "qty": "100", "avgOpenPrice": "1.4000", "avgClosePrice": "1.4020",
+         "ctime": now_ms - 900_000, "mtime": now_ms - 690_000,
+         "realizedPNL": "-0.80", "fee": "-0.20", "funding": "0.00"},
+    ], "total": 2}
+    short_decision = {
+        "action": "short",
+        "lean": "short",
+        "confidence": "high",
+        "confidence_score": 92,
+        "confidenceScore": 92,
+        "warnings": ["parabolic pump fade: quick short only"],
+        "method": "parabolic_pump_fade_short_only",
+        "mode": "pump_fade_only",
+        "setup": "parabolic_pump_fade",
+        "suggested_lev": 100,
+        "suggestedLev": 100,
+        "trade_plan": {"status": "ready", "order_type": "MARKET"},
+        "tradePlan": {"status": "ready", "order_type": "MARKET"},
+    }
+    get_state().record_overlay("XRPUSDT", {
+        "symbol": "XRPUSDT",
+        "price": 1.4,
+        "horizons": {},
+        "horizon_order": [],
+        "alignment": {"dominant": "mixed"},
+        "next_1h": short_decision,
+        "next_15m": short_decision,
+        "decision": short_decision,
+        "trade_plan": short_decision["trade_plan"],
+        "tradePlan": short_decision["tradePlan"],
+        "as_of": int(time.time()),
+    })
+
+    app = create_app(cfg, client)
+    c = app.test_client()
+    good = base64.b64encode(b"admin:test_pass").decode()
+
+    r = c.get("/api/momentum", headers={"Authorization": f"Basic {good}"})
+    assert r.status_code == 200
+    row = r.get_json()["symbols"]["XRPUSDT"]
+    assert row["next_1h"]["action"] == "wait"
+    assert row["next_1h"]["confidence_score"] == 0
+    assert row["next_1h"]["blocked_by"] == "symbol_trade_quality"
+    assert "recent XRPUSDT pump-fade shorts are losing" in row["next_1h"]["warnings"][0]
+    assert row["trade_plan"]["status"] == "wait"
+    assert row["closed_trade_stats"]["wins"] == 0
+    assert row["closed_trade_stats"]["losses"] == 2
+
+
 def test_close_symbol_endpoint_market_closes_full_matching_position():
     reset_state()
     cfg = fresh_cfg()
@@ -3747,7 +3807,7 @@ def test_next_hour_decision_shorts_parabolic_30m_pump_fade():
         "h_15m": {
             "label": "Next 15m",
             "long_score": 0.38,
-            "short_score": 0.16,
+            "short_score": 0.24,
             "adx": 56,
             "long_reasons": ["supertrend_up", "adx(56)"],
             "move_3_atr": 0.45,
@@ -3760,13 +3820,13 @@ def test_next_hour_decision_shorts_parabolic_30m_pump_fade():
         "h_30m": {
             "label": "Next 30m",
             "long_score": 0.78,
-            "short_score": 0.05,
+            "short_score": 0.26,
             "adx": 30,
             "long_reasons": ["supertrend_up", "adx(30)", "PAT:marubozu_bull"],
             "move_3_atr": 2.40,
             "move_5_atr": 4.20,
-            "position_in_recent_range_15": 0.85,
-            "distance_from_recent_high_atr": 0.93,
+            "position_in_recent_range_15": 0.92,
+            "distance_from_recent_high_atr": 0.50,
             "up_closes_5": 5,
             "up_candles_5": 5,
         },
@@ -3818,17 +3878,17 @@ def test_pump_fade_only_decision_publishes_short_immediately():
         "h_15m": {
             "label": "Next 15m",
             "long_score": 0.38,
-            "short_score": 0.16,
+            "short_score": 0.24,
             "real_cvd": -20000.0,
         },
         "h_30m": {
             "label": "Next 30m",
             "long_score": 0.78,
-            "short_score": 0.05,
+            "short_score": 0.26,
             "move_3_atr": 2.40,
             "move_5_atr": 4.20,
-            "position_in_recent_range_15": 0.85,
-            "distance_from_recent_high_atr": 0.93,
+            "position_in_recent_range_15": 0.92,
+            "distance_from_recent_high_atr": 0.50,
             "up_closes_5": 5,
             "up_candles_5": 5,
         },
@@ -5780,6 +5840,8 @@ def main() -> int:
         test_dashboard_routes_and_auth,
         test_momentum_endpoint_lazily_warms_empty_overlay,
         test_momentum_endpoint_includes_position_countdown,
+        test_momentum_endpoint_includes_per_symbol_closed_trade_history,
+        test_momentum_endpoint_blocks_symbol_after_losing_pump_fade_shorts,
         test_close_symbol_endpoint_market_closes_full_matching_position,
         test_close_symbol_endpoint_falls_back_to_flash_close_if_market_fails,
         test_breakeven_sl_move_at_1r_long,

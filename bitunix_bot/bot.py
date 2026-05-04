@@ -857,8 +857,8 @@ class BitunixBot:
 
         This is deliberately a reversal override, not a trend-following long.
         It requires a large 30m impulse, price in the upper local range, and
-        at least one short-term exhaustion tell such as negative CVD or a
-        bearish rejection/pattern on the 15m entry row.
+        at least two short-term exhaustion tells. The bot used to fire on a
+        single clue, which was too eager for clean momentum pumps.
         """
         status = cls._pump_fade_status(h15, h30, h1)
         if not status["usable"]:
@@ -868,6 +868,7 @@ class BitunixBot:
         range_pos = float(status["range_pos"])
         h15_cvd = float(status["h15_cvd"])
         h15_short_score = float(status["h15_short_score"])
+        h30_short_score = float(status["h30_short_score"])
         if not (
             status["pump"]
             and status["not_far_from_high"]
@@ -876,24 +877,28 @@ class BitunixBot:
         ):
             return None
 
-        confidence = 82
-        confidence += min(8, max(0, int(round((move_5_atr - 3.0) * 2))))
-        if range_pos >= 0.85:
+        confidence = 80
+        confidence += min(8, max(0, int(round((move_5_atr - 3.5) * 2))))
+        if range_pos >= 0.92:
             confidence += 4
-        if h15_cvd <= -2.0:
-            confidence += 4
-        if h15_short_score >= 0.15:
+        if h15_cvd <= -5.0:
+            confidence += 5
+        if h15_short_score >= 0.20:
+            confidence += 3
+        if h30_short_score >= 0.25:
             confidence += 2
-        confidence = max(80, min(96, confidence))
+        confidence = max(80, min(95, confidence))
 
         reasons = [
             f"parabolic pump: 30m move +{move_5_atr:.2f} ATR over 5 bars",
             f"price high in local range ({range_pos * 100:.0f}%)",
         ]
-        if h15_cvd <= -2.0:
-            reasons.append("60s CVD flipped negative into the pump")
-        if h15_short_score >= 0.12:
-            reasons.append("15m entry row has bearish exhaustion votes")
+        if h15_cvd <= -5.0:
+            reasons.append("60s CVD flipped strongly negative into the pump")
+        if h15_short_score >= 0.20:
+            reasons.append("15m entry row has real bearish exhaustion votes")
+        if h30_short_score >= 0.25:
+            reasons.append("30m confirms short-side pressure")
         for reason in h15.get("short_reasons") or []:
             if reason not in reasons:
                 reasons.append(str(reason))
@@ -950,37 +955,58 @@ class BitunixBot:
         h15_cvd = cls._float_field(h15, "real_cvd", "realCvd")
         h15_short_reasons = [str(r).lower() for r in h15.get("short_reasons") or []]
 
-        vertical_pump = (
-            (move_5_atr >= 3.0 or move_3_atr >= 2.0)
-            and (up_closes >= 4 or up_candles >= 4)
-        )
-        post_pump_rejection = (
-            move_5_atr >= 1.25
-            and range_pos >= 0.82
-            and h30_short_score >= 0.18
-        )
-        pump = (
-            range_pos >= 0.78
-            and (vertical_pump or post_pump_rejection)
-        )
-        not_far_from_high = high_dist <= 1.25 or range_pos >= 0.84
-        exhaustion = (
-            h15_cvd <= -2.0
-            or h15_short_score >= 0.12
-            or any(
-                tag in reason
-                for reason in h15_short_reasons
-                for tag in ("tweezer_top", "bear", "rsi_bearish", "cvd_real-")
+        bearish_pattern = any(
+            tag in reason
+            for reason in h15_short_reasons
+            for tag in (
+                "tweezer_top",
+                "bear",
+                "rsi_bearish",
+                "cvd_real-",
+                "absorb(buyflow",
+                "wick_pattern_short",
+                "supertrend_down",
             )
         )
-        trend_not_too_clean = h1_adx < 35.0 or h15_cvd <= -2.0
+        strong_negative_tape = h15_cvd <= -5.0
+        meaningful_short_votes = h15_short_score >= 0.20 and h30_short_score >= 0.18
+        bearish_rejection = bearish_pattern and (
+            h15_short_score >= 0.15
+            or h30_short_score >= 0.18
+            or strong_negative_tape
+        )
+        exhaustion_votes = sum((
+            bool(strong_negative_tape),
+            bool(meaningful_short_votes),
+            bool(bearish_rejection),
+        ))
+
+        vertical_pump = (
+            (move_5_atr >= 3.5 or move_3_atr >= 2.25)
+            and (up_closes >= 3 or up_candles >= 3)
+        )
+        post_pump_rejection = (
+            move_5_atr >= 2.0
+            and range_pos >= 0.88
+            and h30_short_score >= 0.25
+            and bearish_rejection
+        )
+        pump = (
+            range_pos >= 0.85
+            and (vertical_pump or post_pump_rejection)
+        )
+        not_far_from_high = high_dist <= 0.85 or range_pos >= 0.90
+        exhaustion = exhaustion_votes >= 2
+        trend_not_too_clean = h1_adx < 30.0 or (
+            strong_negative_tape and h30_short_score >= 0.18
+        )
 
         checks = [
             {
                 "key": "pump",
                 "label": "30m vertical pump",
                 "passed": bool(pump),
-                "detail": f"+{move_5_atr:.2f} ATR / range {range_pos * 100:.0f}%",
+                "detail": f"+{move_5_atr:.2f} ATR / range {range_pos * 100:.0f}% / up {up_closes}/5",
             },
             {
                 "key": "high",
@@ -990,15 +1016,18 @@ class BitunixBot:
             },
             {
                 "key": "exhaustion",
-                "label": "15m rejection",
+                "label": "Confirmed rejection",
                 "passed": bool(exhaustion),
-                "detail": f"short {h15_short_score * 100:.0f}/100, CVD {h15_cvd:.0f}",
+                "detail": (
+                    f"votes {exhaustion_votes}/3; 15m short {h15_short_score * 100:.0f}, "
+                    f"30m short {h30_short_score * 100:.0f}, CVD {h15_cvd:.0f}"
+                ),
             },
             {
                 "key": "trend_risk",
-                "label": "Squeeze risk ok",
+                "label": "Clean-trend risk ok",
                 "passed": bool(trend_not_too_clean),
-                "detail": f"1h ADX {h1_adx:.1f}",
+                "detail": f"1h ADX {h1_adx:.1f}; needs tape rollover if >=30",
             },
         ]
         score = sum(1 for row in checks if row["passed"]) * 25
@@ -1010,6 +1039,8 @@ class BitunixBot:
             "range_pos": round(range_pos, 4),
             "h15_cvd": round(h15_cvd, 4),
             "h15_short_score": round(h15_short_score, 4),
+            "h30_short_score": round(h30_short_score, 4),
+            "exhaustion_votes": int(exhaustion_votes),
             "pump": bool(pump),
             "not_far_from_high": bool(not_far_from_high),
             "exhaustion": bool(exhaustion),
