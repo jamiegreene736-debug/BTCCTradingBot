@@ -41,7 +41,7 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
     app = Flask(__name__)
     state = get_state()
     password = os.environ.get("DASHBOARD_PASSWORD", "")
-    manual_close_after_seconds = int(cfg.trading.max_position_age_seconds or 450)
+    manual_close_after_seconds = int(cfg.trading.max_position_age_seconds or 210)
     closed_history_cache: list[dict[str, Any]] = []
     closed_history_cache_error: str | None = None
     closed_history_cache_at = 0.0
@@ -252,7 +252,7 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
             order_type="MARKET",
             trade_side="CLOSE",
             reduce_only=True,
-            client_id=f"ext730-close-{pid or symbol}-{int(time.time())}",
+            client_id=f"ext330-close-{pid or symbol}-{int(time.time())}",
         )
 
     # ------------------------------------------------------------------ auth
@@ -572,7 +572,7 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
     def close_symbol() -> Response:
         """Market-close every open position for one symbol.
 
-        Used by the Chrome overlay's 7m30s countdown for manual trades.
+        Used by the Chrome overlay's 3m30s countdown for pump-fade scalps.
         This intentionally works even when the bot itself is in paper mode:
         the user may place the Bitunix trade manually, while the extension
         asks the authenticated dashboard to close the real position at market.
@@ -597,7 +597,7 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
                 item["closeMethod"] = "MARKET_REDUCE_ONLY"
                 item["response"] = resp
                 closed.append(item)
-                state.record_order(f"{symbol} EXTENSION_7M30S_MARKET_CLOSE positionId={pid}")
+                state.record_order(f"{symbol} EXTENSION_3M30S_MARKET_CLOSE positionId={pid}")
                 _invalidate_closed_history_cache()
             except BitunixError as e:
                 log.error("Extension market close failed for %s/%s: %s; trying flash close",
@@ -609,7 +609,7 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
                     item["closeMethod"] = "FLASH_CLOSE_FALLBACK"
                     item["response"] = resp
                     closed.append(item)
-                    state.record_order(f"{symbol} EXTENSION_7M30S_FLASH_CLOSE_FALLBACK positionId={pid}")
+                    state.record_order(f"{symbol} EXTENSION_3M30S_FLASH_CLOSE_FALLBACK positionId={pid}")
                     _invalidate_closed_history_cache()
                 except Exception as fallback_e:
                     state.record_error(
@@ -645,17 +645,14 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
         one synchronous refresh so the extension does not sit on "warming up"
         waiting for the next worker tick.
 
-        long_score:  0.0–1.0 — "how strongly indicators favor going LONG".
-                     For someone holding a SHORT position, high values are
-                     a reversal warning ("exit your short").
-        short_score: mirror — "exit your long" warning.
-        next_hour: dedicated long/short/wait decision for the next hour.
+        long_score / short_score remain in the horizon diagnostics, but the
+        published action is pump-fade-only: SHORT when the parabolic exhaustion
+        setup is live, otherwise WAIT.
+        next_hour: compatibility alias for the pump-fade-only short decision.
         next_15m:  compatibility alias for older extension builds.
 
         Note: these are confluence scores, not calibrated probabilities or
-        financial advice. The next_hour action intentionally returns "wait"
-        when the edge is unclear, the 30m/1h horizons disagree, or the entry is
-        too stretched to chase.
+        financial advice. The extension is intentionally single-purpose now.
         """
         def _overlay_stale(snapshot: dict[str, Any]) -> bool:
             if not snapshot:
@@ -734,8 +731,8 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
             "tick_seconds": cfg.loop.tick_seconds,
             "timeframe": cfg.trading.timeframe,
             "fire_threshold": cfg.strategy.fire_threshold,
-            "focus_horizon": "1h",
-            "focusHorizon": "1h",
+            "focus_horizon": "pump_fade",
+            "focusHorizon": "pump_fade",
             "position_close_after_seconds": manual_close_after_seconds,
             "positionCloseAfterSeconds": manual_close_after_seconds,
             "open_positions": open_positions,

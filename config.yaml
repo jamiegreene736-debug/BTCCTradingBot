@@ -59,11 +59,11 @@ trading:
   # 15m timeframe: 600s (10 min) cooldown — reverted from 900 per Grok filter-loosening review;
   # 900 was too conservative for a 15-symbol set.
   cooldown_seconds: 120         # was 600 — Grok 2026-04-27: drop to 120s for several trades/hour
-  # Hard 7m30s position clock for the Chrome-extension workflow. The extension
+  # Hard 3m30s position clock for the Chrome-extension pump-fade workflow. The extension
   # asks the dashboard to market-close that coin at the timer, regardless of
   # PnL. If the bot is ever switched back to live mode, this same max-age is
   # the server-side fallback.
-  max_position_age_seconds: 450
+  max_position_age_seconds: 210
   time_exit_only_if_losing: false
   # Streak protection: pause a symbol for streak_loss_pause_seconds after
   # N consecutive losses. Live data showed 6 XRP SHORTs in a row losing —

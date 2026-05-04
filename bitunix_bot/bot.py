@@ -860,8 +860,79 @@ class BitunixBot:
         at least one short-term exhaustion tell such as negative CVD or a
         bearish rejection/pattern on the 15m entry row.
         """
-        if not h15 or not h30:
+        status = cls._pump_fade_status(h15, h30, h1)
+        if not status["usable"]:
             return None
+
+        move_5_atr = float(status["move_5_atr"])
+        range_pos = float(status["range_pos"])
+        h15_cvd = float(status["h15_cvd"])
+        h15_short_score = float(status["h15_short_score"])
+        if not (
+            status["pump"]
+            and status["not_far_from_high"]
+            and status["exhaustion"]
+            and status["trend_not_too_clean"]
+        ):
+            return None
+
+        confidence = 82
+        confidence += min(8, max(0, int(round((move_5_atr - 3.0) * 2))))
+        if range_pos >= 0.85:
+            confidence += 4
+        if h15_cvd <= -2.0:
+            confidence += 4
+        if h15_short_score >= 0.15:
+            confidence += 2
+        confidence = max(80, min(96, confidence))
+
+        reasons = [
+            f"parabolic pump: 30m move +{move_5_atr:.2f} ATR over 5 bars",
+            f"price high in local range ({range_pos * 100:.0f}%)",
+        ]
+        if h15_cvd <= -2.0:
+            reasons.append("60s CVD flipped negative into the pump")
+        if h15_short_score >= 0.12:
+            reasons.append("15m entry row has bearish exhaustion votes")
+        for reason in h15.get("short_reasons") or []:
+            if reason not in reasons:
+                reasons.append(str(reason))
+
+        return {
+            "action": "short",
+            "confidence_score": confidence,
+            "warning": "parabolic pump fade: quick short only; no long/trend-following trades",
+            "reasons": reasons[:8],
+            "move_5_atr": round(move_5_atr, 4),
+            "range_pos": round(range_pos, 4),
+            "checks": status["checks"],
+        }
+
+    @classmethod
+    def _pump_fade_status(
+        cls,
+        h15: dict[str, Any],
+        h30: dict[str, Any],
+        h1: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Explain how close the current chart is to the pump-fade short setup."""
+        if not h15 or not h30:
+            return {
+                "usable": False,
+                "score": 0,
+                "move_5_atr": 0.0,
+                "range_pos": 0.5,
+                "h15_cvd": 0.0,
+                "h15_short_score": 0.0,
+                "pump": False,
+                "not_far_from_high": False,
+                "exhaustion": False,
+                "trend_not_too_clean": False,
+                "checks": [
+                    {"key": "data", "label": "Data", "passed": False,
+                     "detail": "waiting for 15m and 30m overlay data"},
+                ],
+            }
 
         move_3_atr = cls._float_field(h30, "move_3_atr", "move3Atr")
         move_5_atr = cls._float_field(h30, "move_5_atr", "move5Atr")
@@ -904,38 +975,137 @@ class BitunixBot:
         )
         trend_not_too_clean = h1_adx < 35.0 or h15_cvd <= -2.0
 
-        if not (pump and not_far_from_high and exhaustion and trend_not_too_clean):
-            return None
-
-        confidence = 82
-        confidence += min(8, max(0, int(round((move_5_atr - 3.0) * 2))))
-        if range_pos >= 0.85:
-            confidence += 4
-        if h15_cvd <= -2.0:
-            confidence += 4
-        if h15_short_score >= 0.15:
-            confidence += 2
-        confidence = max(80, min(96, confidence))
-
-        reasons = [
-            f"parabolic pump: 30m move +{move_5_atr:.2f} ATR over 5 bars",
-            f"price high in local range ({range_pos * 100:.0f}%)",
+        checks = [
+            {
+                "key": "pump",
+                "label": "30m vertical pump",
+                "passed": bool(pump),
+                "detail": f"+{move_5_atr:.2f} ATR / range {range_pos * 100:.0f}%",
+            },
+            {
+                "key": "high",
+                "label": "Near local high",
+                "passed": bool(not_far_from_high),
+                "detail": f"{high_dist:.2f} ATR below high" if high_dist < 900 else "high distance unavailable",
+            },
+            {
+                "key": "exhaustion",
+                "label": "15m rejection",
+                "passed": bool(exhaustion),
+                "detail": f"short {h15_short_score * 100:.0f}/100, CVD {h15_cvd:.0f}",
+            },
+            {
+                "key": "trend_risk",
+                "label": "Squeeze risk ok",
+                "passed": bool(trend_not_too_clean),
+                "detail": f"1h ADX {h1_adx:.1f}",
+            },
         ]
-        if h15_cvd <= -2.0:
-            reasons.append("60s CVD flipped negative into the pump")
-        if h15_short_score >= 0.12:
-            reasons.append("15m entry row has bearish exhaustion votes")
-        for reason in h15.get("short_reasons") or []:
-            if reason not in reasons:
-                reasons.append(str(reason))
-
+        score = sum(1 for row in checks if row["passed"]) * 25
         return {
-            "action": "short",
-            "confidence_score": confidence,
-            "warning": "parabolic pump fade: wait for quick short, not a late long",
-            "reasons": reasons[:8],
+            "usable": True,
+            "score": score,
+            "move_3_atr": round(move_3_atr, 4),
             "move_5_atr": round(move_5_atr, 4),
             "range_pos": round(range_pos, 4),
+            "h15_cvd": round(h15_cvd, 4),
+            "h15_short_score": round(h15_short_score, 4),
+            "pump": bool(pump),
+            "not_far_from_high": bool(not_far_from_high),
+            "exhaustion": bool(exhaustion),
+            "trend_not_too_clean": bool(trend_not_too_clean),
+            "checks": checks,
+        }
+
+    @classmethod
+    def _build_pump_fade_only_decision(cls, horizons: dict[str, dict[str, Any]]) -> dict[str, Any]:
+        """Only publish the user's target setup: parabolic pump fade SHORT."""
+        h15 = horizons.get("h_15m") or {}
+        h30 = horizons.get("h_30m") or {}
+        h1 = horizons.get("h_1h") or {}
+        status = cls._pump_fade_status(h15, h30, h1)
+        pump_fade = cls._parabolic_pump_short_setup(h15, h30, h1)
+
+        details: list[dict[str, Any]] = []
+        for key in ("h_15m", "h_30m", "h_1h"):
+            row = horizons.get(key)
+            if not row:
+                continue
+            long_score = cls._float_field(row, "long_score", "longScore")
+            short_score = cls._float_field(row, "short_score", "shortScore")
+            details.append({
+                "key": key,
+                "label": row.get("label", key),
+                "long_score": round(long_score, 4),
+                "short_score": round(short_score, 4),
+                "gap": round(long_score - short_score, 4),
+                "side": cls._gap_side(long_score - short_score, cls._NEXT_HOUR_MIN_SIDE_GAP),
+            })
+
+        if pump_fade:
+            confidence_score = int(pump_fade["confidence_score"])
+            primary_signal = {
+                "key": "parabolic_pump_fade",
+                "label": "Pump fade short",
+                "timeframe": "3m30s",
+                "side": "short",
+                "score": round(confidence_score / 100.0, 4),
+                "long_score": 0.0,
+                "short_score": round(confidence_score / 100.0, 4),
+                "gap": round(-(confidence_score / 100.0), 4),
+                "stable": True,
+                "firing": True,
+                "reasons": pump_fade["reasons"],
+            }
+            return {
+                "action": "short",
+                "lean": "short",
+                "confidence": "high",
+                "confidence_score": confidence_score,
+                "confidenceScore": confidence_score,
+                "bias": round(-confidence_score / 100.0, 4),
+                "weighted_long_score": 0.0,
+                "weighted_short_score": round(confidence_score / 100.0, 4),
+                "agreement": {"agree": 1, "total": 1, "ratio": 1.0},
+                "warnings": [str(pump_fade["warning"])],
+                "method": "parabolic_pump_fade_short_only",
+                "mode": "pump_fade_only",
+                "horizon": "3m30s",
+                "setup": "parabolic_pump_fade",
+                "setupLabel": "Parabolic pump fade short",
+                "suggested_lev": 100,
+                "suggestedLev": 100,
+                "plan_horizon_key": "h_15m",
+                "planHorizonKey": "h_15m",
+                "primary_signal": primary_signal,
+                "primarySignal": primary_signal,
+                "pump_fade_checks": pump_fade["checks"],
+                "pumpFadeChecks": pump_fade["checks"],
+                "horizons": details,
+            }
+
+        confidence_score = min(49, int(status.get("score") or 0))
+        return {
+            "action": "wait",
+            "lean": "short" if confidence_score >= 50 else "mixed",
+            "confidence": "none",
+            "confidence_score": confidence_score,
+            "confidenceScore": confidence_score,
+            "bias": 0.0,
+            "weighted_long_score": 0.0,
+            "weighted_short_score": 0.0,
+            "agreement": {"agree": 0, "total": 1 if status.get("usable") else 0, "ratio": 0.0},
+            "warnings": ["waiting for parabolic pump + 15m rejection before shorting"],
+            "method": "parabolic_pump_fade_short_only",
+            "mode": "pump_fade_only",
+            "horizon": "3m30s",
+            "setup": None,
+            "setupLabel": "Parabolic pump fade short",
+            "suggested_lev": 0,
+            "suggestedLev": 0,
+            "pump_fade_checks": status["checks"],
+            "pumpFadeChecks": status["checks"],
+            "horizons": details,
         }
 
     @classmethod
@@ -1032,7 +1202,7 @@ class BitunixBot:
             primary_signal = {
                 "key": "parabolic_pump_fade",
                 "label": "Pump fade",
-                "timeframe": "7m30s",
+                "timeframe": "3m30s",
                 "side": "short",
                 "score": round(confidence_score / 100.0, 4),
                 "long_score": 0.0,
@@ -1057,8 +1227,8 @@ class BitunixBot:
                     "ratio": round(1 / max(1, core_total), 3),
                 },
                 "warnings": [str(pump_fade["warning"])],
-                "method": "parabolic_pump_fade_next_1h",
-                "horizon": "7m30s",
+                "method": "parabolic_pump_fade_short_only",
+                "horizon": "3m30s",
                 "setup": "parabolic_pump_fade",
                 "setupLabel": "Parabolic pump fade",
                 "suggested_lev": 100,
@@ -1469,7 +1639,7 @@ class BitunixBot:
                 "status": "wait",
                 "order_type": "WAIT",
                 "orderType": "WAIT",
-                "reason": "no actionable next-1h long/short setup",
+                "reason": "no parabolic pump-fade short setup",
             }
 
         meta = self.metas.get(sym_u, _DEFAULT_META)
@@ -1525,12 +1695,20 @@ class BitunixBot:
                     spread_pct is not None
                     and spread_pct <= max(0.01, self.cfg.trading.max_entry_spread_pct * 0.5)
                 )
-                urgent_market = confidence_score >= 85 and tight_spread and tape_aligned
+                pump_fade_scalp = decision.get("setup") == "parabolic_pump_fade"
+                urgent_market = (
+                    pump_fade_scalp
+                    or (confidence_score >= 85 and tight_spread and tape_aligned)
+                )
 
                 if urgent_market:
                     order_type = "MARKET"
                     entry_price = taker_price
-                    rationale = "high confidence with tight spread; market entry is acceptable"
+                    rationale = (
+                        "pump-fade scalp; market entry only if taking it immediately"
+                        if pump_fade_scalp
+                        else "high confidence with tight spread; market entry is acceptable"
+                    )
                 else:
                     order_type = "LIMIT_POST_ONLY" if self.cfg.trading.use_post_only_entries else "LIMIT"
                     entry_price = maker_limit
@@ -1888,10 +2066,7 @@ class BitunixBot:
                 "ratio": round(agree / max(1, total_horizons), 3),
             }
 
-            next_hour = self._smooth_next_hour_decision(
-                sym_u,
-                self._build_next_hour_decision(horizons),
-            )
+            next_hour = self._build_pump_fade_only_decision(horizons)
             trade_plan = self._build_suggested_trade_plan(sym_u, next_hour, horizons, latest_price)
             next_hour = {
                 **next_hour,
@@ -1905,8 +2080,8 @@ class BitunixBot:
                 "horizons": horizons,
                 "horizon_order": [k for k, _, _, _ in self._OVERLAY_HORIZONS if k in horizons],
                 "alignment": alignment,
-                "focus_horizon": "1h",
-                "focusHorizon": "1h",
+                "focus_horizon": "pump_fade",
+                "focusHorizon": "pump_fade",
                 "next_1h": next_hour,
                 "next1h": next_hour,
                 "next_15m": next_hour,

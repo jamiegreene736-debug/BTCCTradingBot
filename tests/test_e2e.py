@@ -585,11 +585,11 @@ def test_momentum_endpoint_includes_position_countdown():
     r = c.get("/api/momentum", headers={"Authorization": f"Basic {good}"})
     assert r.status_code == 200
     j = r.get_json()
-    assert j["focus_horizon"] == "1h"
-    assert j["position_close_after_seconds"] == 450
+    assert j["focus_horizon"] == "pump_fade"
+    assert j["position_close_after_seconds"] == 210
     pos = j["symbols"]["BTCUSDT"]["open_position"]
     assert pos["position_id"] == "POS15"
-    assert 350 <= pos["seconds_remaining"] <= 450
+    assert 140 <= pos["seconds_remaining"] <= 210
 
 
 def test_momentum_endpoint_includes_per_symbol_closed_trade_history():
@@ -3779,11 +3779,70 @@ def test_next_hour_decision_shorts_parabolic_30m_pump_fade():
     assert decision["lean"] == "short"
     assert decision["action"] == "short"
     assert decision["setup"] == "parabolic_pump_fade"
-    assert decision["method"] == "parabolic_pump_fade_next_1h"
+    assert decision["method"] == "parabolic_pump_fade_short_only"
+    assert decision["horizon"] == "3m30s"
     assert decision["plan_horizon_key"] == "h_15m"
     assert decision["suggested_lev"] == 100
     assert 80 <= decision["confidence_score"] <= 96
     assert any("parabolic pump fade" in warning for warning in decision["warnings"])
+
+
+def test_pump_fade_only_decision_ignores_aligned_long():
+    horizons = {
+        "h_15m": {
+            "label": "Next 15m", "long_score": 0.76, "short_score": 0.18,
+            "move_5_atr": 2.2, "position_in_recent_range_15": 0.92,
+            "distance_from_recent_high_atr": 0.12, "up_closes_5": 4,
+            "up_candles_5": 4, "real_cvd": 2.1,
+        },
+        "h_30m": {
+            "label": "Next 30m", "long_score": 0.72, "short_score": 0.08,
+            "move_5_atr": 2.2, "position_in_recent_range_15": 0.92,
+            "distance_from_recent_high_atr": 0.12, "up_closes_5": 4,
+            "up_candles_5": 4,
+        },
+        "h_1h": {"label": "Next 1h", "long_score": 0.70, "short_score": 0.12, "adx": 32},
+    }
+
+    decision = BitunixBot._build_pump_fade_only_decision(horizons)
+
+    assert decision["action"] == "wait"
+    assert decision["method"] == "parabolic_pump_fade_short_only"
+    assert decision["mode"] == "pump_fade_only"
+    assert decision["suggested_lev"] == 0
+    assert all("long" not in str(w).lower() for w in decision["warnings"])
+
+
+def test_pump_fade_only_decision_publishes_short_immediately():
+    horizons = {
+        "h_15m": {
+            "label": "Next 15m",
+            "long_score": 0.38,
+            "short_score": 0.16,
+            "real_cvd": -20000.0,
+        },
+        "h_30m": {
+            "label": "Next 30m",
+            "long_score": 0.78,
+            "short_score": 0.05,
+            "move_3_atr": 2.40,
+            "move_5_atr": 4.20,
+            "position_in_recent_range_15": 0.85,
+            "distance_from_recent_high_atr": 0.93,
+            "up_closes_5": 5,
+            "up_candles_5": 5,
+        },
+        "h_1h": {"label": "Next 1h", "long_score": 0.34, "short_score": 0.15, "adx": 28},
+    }
+
+    decision = BitunixBot._build_pump_fade_only_decision(horizons)
+
+    assert decision["action"] == "short"
+    assert decision["setup"] == "parabolic_pump_fade"
+    assert decision["horizon"] == "3m30s"
+    assert decision["suggested_lev"] == 100
+    assert decision["primary_signal"]["side"] == "short"
+    assert all(row["passed"] for row in decision["pump_fade_checks"])
 
 
 def test_next_hour_smoothing_requires_confirmed_side_flip():
@@ -5824,6 +5883,8 @@ def main() -> int:
         test_next_hour_decision_blocks_chasing_extended_dump,
         test_next_hour_decision_blocks_chasing_extended_pump,
         test_next_hour_decision_shorts_parabolic_30m_pump_fade,
+        test_pump_fade_only_decision_ignores_aligned_long,
+        test_pump_fade_only_decision_publishes_short_immediately,
         test_next_hour_smoothing_requires_confirmed_side_flip,
         test_sub_hour_payload_marks_cache_ready_from_core_horizons,
         test_sub_hour_payload_exposes_primary_when_no_signal_fires,
