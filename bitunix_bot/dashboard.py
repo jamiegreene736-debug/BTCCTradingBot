@@ -42,6 +42,9 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
     state = get_state()
     password = os.environ.get("DASHBOARD_PASSWORD", "")
     manual_close_after_seconds = int(cfg.trading.max_position_age_seconds or 450)
+    closed_history_cache: list[dict[str, Any]] = []
+    closed_history_cache_error: str | None = None
+    closed_history_cache_at = 0.0
 
     def _float(value: Any, default: float = 0.0) -> float:
         try:
@@ -97,6 +100,115 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
             "seconds_remaining": remaining,
             "secondsRemaining": remaining,
         }
+
+    def _position_mtime_ms(p: dict[str, Any]) -> int:
+        raw = (
+            p.get("mtime")
+            or p.get("updatedTime")
+            or p.get("updated_time")
+            or p.get("closeTime")
+            or p.get("close_time")
+        )
+        ts = _float(raw)
+        if ts <= 0:
+            return 0
+        if ts < 10_000_000_000:
+            ts *= 1000
+        return int(ts)
+
+    def _closed_position_summary(p: dict[str, Any]) -> dict[str, Any]:
+        symbol = _symbol(p.get("symbol"))
+        side_raw = str(p.get("side") or p.get("positionSide") or "").upper()
+        side = "LONG" if side_raw in ("BUY", "LONG") else ("SHORT" if side_raw in ("SELL", "SHORT") else side_raw)
+        qty = _float(p.get("qty") or p.get("size") or p.get("volume"))
+        entry = _float(p.get("avgOpenPrice") or p.get("entryPrice") or p.get("openPrice"))
+        exit_px = _float(p.get("avgClosePrice") or p.get("closePrice") or p.get("exitPrice"))
+        realized = _float(p.get("realizedPNL") or p.get("realizedPnl"))
+        fee = _float(p.get("fee"))
+        funding = _float(p.get("funding"))
+        net = realized + fee + funding
+        opened_ms = _position_ctime_ms(p)
+        closed_ms = _position_mtime_ms(p)
+        opened_at = int(opened_ms // 1000) if opened_ms else None
+        closed_at = int(closed_ms // 1000) if closed_ms else None
+        hold_seconds = max(0, closed_at - opened_at) if opened_at and closed_at else None
+
+        price_pnl_pct = None
+        if entry > 0 and exit_px > 0:
+            if side == "SHORT":
+                price_pnl_pct = (entry - exit_px) / entry * 100.0
+            else:
+                price_pnl_pct = (exit_px - entry) / entry * 100.0
+
+        out = {
+            "position_id": str(p.get("positionId") or p.get("position_id") or ""),
+            "positionId": str(p.get("positionId") or p.get("position_id") or ""),
+            "symbol": symbol,
+            "side": side,
+            "qty": qty,
+            "entry_price": entry,
+            "entryPrice": entry,
+            "exit_price": exit_px,
+            "exitPrice": exit_px,
+            "realized_pnl": realized,
+            "realizedPnl": realized,
+            "fee": fee,
+            "funding": funding,
+            "net_pnl": round(net, 8),
+            "netPnl": round(net, 8),
+            "pnl": round(net, 8),
+            "pnl_usdt": round(net, 8),
+            "pnlUsdt": round(net, 8),
+            "price_pnl_pct": round(price_pnl_pct, 4) if price_pnl_pct is not None else None,
+            "pricePnlPct": round(price_pnl_pct, 4) if price_pnl_pct is not None else None,
+            "opened_at": opened_at,
+            "openedAt": opened_at,
+            "closed_at": closed_at,
+            "closedAt": closed_at,
+            "hold_seconds": hold_seconds,
+            "holdSeconds": hold_seconds,
+            "result": "win" if net > 0 else ("loss" if net < 0 else "flat"),
+        }
+        return out
+
+    def _closed_trade_stats(rows: list[dict[str, Any]]) -> dict[str, Any]:
+        wins = sum(1 for r in rows if _float(r.get("net_pnl")) > 0)
+        losses = sum(1 for r in rows if _float(r.get("net_pnl")) < 0)
+        flats = max(0, len(rows) - wins - losses)
+        total = wins + losses
+        net = sum(_float(r.get("net_pnl")) for r in rows)
+        return {
+            "count": len(rows),
+            "wins": wins,
+            "losses": losses,
+            "flats": flats,
+            "net_pnl": round(net, 8),
+            "netPnl": round(net, 8),
+            "win_rate": round(wins / total * 100.0, 1) if total else None,
+            "winRate": round(wins / total * 100.0, 1) if total else None,
+        }
+
+    def _closed_history_snapshot(limit: int = 50, ttl_seconds: int = 15) -> tuple[list[dict[str, Any]], str | None]:
+        nonlocal closed_history_cache, closed_history_cache_error, closed_history_cache_at
+        now = time.time()
+        if closed_history_cache_at and (now - closed_history_cache_at) < ttl_seconds:
+            return closed_history_cache, closed_history_cache_error
+        try:
+            hist = client.history_positions(limit=limit)
+            rows = hist.get("positionList", []) if isinstance(hist, dict) else []
+            summaries = [_closed_position_summary(p) for p in rows or []]
+            summaries.sort(key=lambda r: int(r.get("closed_at") or 0), reverse=True)
+            closed_history_cache = summaries
+            closed_history_cache_error = None
+        except Exception as e:
+            closed_history_cache = []
+            closed_history_cache_error = str(e)
+        closed_history_cache_at = now
+        return closed_history_cache, closed_history_cache_error
+
+    def _invalidate_closed_history_cache() -> None:
+        nonlocal closed_history_cache_at
+        closed_history_cache_at = 0.0
 
     def _open_positions_for_symbol(symbol: str) -> list[dict[str, Any]]:
         sym_u = _symbol(symbol)
@@ -460,7 +572,7 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
     def close_symbol() -> Response:
         """Market-close every open position for one symbol.
 
-        Used by the Chrome overlay's 15-minute countdown for manual trades.
+        Used by the Chrome overlay's 7m30s countdown for manual trades.
         This intentionally works even when the bot itself is in paper mode:
         the user may place the Bitunix trade manually, while the extension
         asks the authenticated dashboard to close the real position at market.
@@ -485,7 +597,8 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
                 item["closeMethod"] = "MARKET_REDUCE_ONLY"
                 item["response"] = resp
                 closed.append(item)
-                state.record_order(f"{symbol} EXTENSION_15M_MARKET_CLOSE positionId={pid}")
+                state.record_order(f"{symbol} EXTENSION_7M30S_MARKET_CLOSE positionId={pid}")
+                _invalidate_closed_history_cache()
             except BitunixError as e:
                 log.error("Extension market close failed for %s/%s: %s; trying flash close",
                           symbol, pid, e)
@@ -496,7 +609,8 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
                     item["closeMethod"] = "FLASH_CLOSE_FALLBACK"
                     item["response"] = resp
                     closed.append(item)
-                    state.record_order(f"{symbol} EXTENSION_15M_FLASH_CLOSE_FALLBACK positionId={pid}")
+                    state.record_order(f"{symbol} EXTENSION_7M30S_FLASH_CLOSE_FALLBACK positionId={pid}")
+                    _invalidate_closed_history_cache()
                 except Exception as fallback_e:
                     state.record_error(
                         f"{symbol} extension market close failed: {e.code} {e.msg}; "
@@ -596,6 +710,25 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
         except Exception as e:
             open_positions_error = str(e)
 
+        closed_positions, closed_positions_error = _closed_history_snapshot(limit=50)
+        closed_by_symbol: dict[str, list[dict[str, Any]]] = {}
+        for trade in closed_positions:
+            sym = _symbol(trade.get("symbol"))
+            if not sym:
+                continue
+            closed_by_symbol.setdefault(sym, []).append(trade)
+        for sym, trades in closed_by_symbol.items():
+            if sym in symbols_payload and isinstance(symbols_payload[sym], dict):
+                row = symbols_payload[sym]
+                recent = trades[:8]
+                stats = _closed_trade_stats(trades)
+                row["closed_trades"] = recent
+                row["closedTrades"] = recent
+                row["trade_history"] = recent
+                row["tradeHistory"] = recent
+                row["closed_trade_stats"] = stats
+                row["closedTradeStats"] = stats
+
         return jsonify({
             "now": int(time.time()),
             "tick_seconds": cfg.loop.tick_seconds,
@@ -608,6 +741,11 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
             "open_positions": open_positions,
             "openPositions": open_positions,
             "open_positions_error": open_positions_error,
+            "closed_positions": closed_positions,
+            "closedPositions": closed_positions,
+            "closed_positions_error": closed_positions_error,
+            "closed_trade_stats": _closed_trade_stats(closed_positions),
+            "closedTradeStats": _closed_trade_stats(closed_positions),
             "status": {
                 "ready": bool(snap),
                 "symbols_count": len(symbols_payload),

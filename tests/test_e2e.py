@@ -592,6 +592,63 @@ def test_momentum_endpoint_includes_position_countdown():
     assert 350 <= pos["seconds_remaining"] <= 450
 
 
+def test_momentum_endpoint_includes_per_symbol_closed_trade_history():
+    reset_state()
+    cfg = fresh_cfg()
+    client = make_mock_client()
+    now_ms = int(time.time() * 1000)
+    client.history_positions.return_value = {"positionList": [
+        {"positionId": "BTC_WIN", "symbol": "BTCUSDT", "side": "SELL",
+         "qty": "0.01", "avgOpenPrice": "60000", "avgClosePrice": "59800",
+         "ctime": now_ms - 450_000, "mtime": now_ms - 5_000,
+         "realizedPNL": "2.00", "fee": "-0.10", "funding": "0.00"},
+        {"positionId": "BTC_LOSS", "symbol": "BTCUSDT", "side": "BUY",
+         "qty": "0.01", "avgOpenPrice": "60000", "avgClosePrice": "59900",
+         "ctime": now_ms - 900_000, "mtime": now_ms - 600_000,
+         "realizedPNL": "-1.00", "fee": "-0.08", "funding": "0.00"},
+        {"positionId": "ETH_WIN", "symbol": "ETHUSDT", "side": "BUY",
+         "qty": "0.1", "avgOpenPrice": "2300", "avgClosePrice": "2310",
+         "ctime": now_ms - 500_000, "mtime": now_ms - 300_000,
+         "realizedPNL": "1.00", "fee": "-0.03", "funding": "0.00"},
+    ], "total": 3}
+    get_state().record_overlay("BTCUSDT", {
+        "symbol": "BTCUSDT",
+        "price": 60000.0,
+        "horizons": {},
+        "horizon_order": [],
+        "alignment": {"dominant": "mixed"},
+        "next_15m": {"action": "wait"},
+        "as_of": int(time.time()),
+    })
+    get_state().record_overlay("ETHUSDT", {
+        "symbol": "ETHUSDT",
+        "price": 2300.0,
+        "horizons": {},
+        "horizon_order": [],
+        "alignment": {"dominant": "mixed"},
+        "next_15m": {"action": "wait"},
+        "as_of": int(time.time()),
+    })
+
+    app = create_app(cfg, client)
+    c = app.test_client()
+    good = base64.b64encode(b"admin:test_pass").decode()
+
+    r = c.get("/api/momentum", headers={"Authorization": f"Basic {good}"})
+    assert r.status_code == 200
+    j = r.get_json()
+    assert len(j["closed_positions"]) == 3
+    assert j["closed_trade_stats"]["net_pnl"] == 1.79
+    btc = j["symbols"]["BTCUSDT"]
+    assert [t["position_id"] for t in btc["closed_trades"]] == ["BTC_WIN", "BTC_LOSS"]
+    assert btc["closed_trade_stats"]["wins"] == 1
+    assert btc["closed_trade_stats"]["losses"] == 1
+    assert btc["closed_trade_stats"]["net_pnl"] == 0.82
+    assert btc["closed_trades"][0]["side"] == "SHORT"
+    assert btc["closed_trades"][0]["net_pnl"] == 1.9
+    assert btc["closed_trades"][0]["price_pnl_pct"] == 0.3333
+
+
 def test_close_symbol_endpoint_market_closes_full_matching_position():
     reset_state()
     cfg = fresh_cfg()
