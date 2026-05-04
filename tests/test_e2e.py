@@ -3940,6 +3940,42 @@ def test_pump_fade_blocks_cooled_off_recovery_after_pump():
     assert checks["entry_window"]["passed"] is False
 
 
+def test_pump_fade_watch_flags_big_pump_before_short_entry():
+    horizons = {
+        "h_15m": {
+            "label": "1m entry",
+            "long_score": 0.20,
+            "short_score": 0.31,
+            "real_cvd": 1.0,
+            "move_3_atr": -1.42,
+            "up_closes_5": 1,
+            "down_closes_5": 4,
+        },
+        "h_30m": {
+            "label": "5m pump",
+            "long_score": 0.52,
+            "short_score": 0.15,
+            "move_3_atr": 1.12,
+            "move_5_atr": 1.88,
+            "position_in_recent_range_15": 0.84,
+            "distance_from_recent_high_atr": 1.19,
+            "up_closes_5": 3,
+            "up_candles_5": 3,
+        },
+        "h_1h": {"label": "Trend context", "long_score": 0.34, "short_score": 0.15, "adx": 33},
+    }
+
+    decision = BitunixBot._build_pump_fade_only_decision(horizons)
+
+    assert decision["action"] == "wait"
+    assert decision["confidence_score"] == 0
+    assert decision["setup_stage"] == "pump_watch"
+    assert "pump detected" in decision["warnings"][0]
+    checks = {row["key"]: row for row in decision["pump_fade_checks"]}
+    assert checks["pump"]["passed"] is False
+    assert checks["entry_window"]["passed"] is False
+
+
 def test_next_hour_smoothing_requires_confirmed_side_flip():
     reset_state()
     cfg = fresh_cfg()
@@ -5983,6 +6019,7 @@ def main() -> int:
         test_pump_fade_only_decision_ignores_aligned_long,
         test_pump_fade_only_decision_publishes_short_immediately,
         test_pump_fade_blocks_cooled_off_recovery_after_pump,
+        test_pump_fade_watch_flags_big_pump_before_short_entry,
         test_next_hour_smoothing_requires_confirmed_side_flip,
         test_sub_hour_payload_marks_cache_ready_from_core_horizons,
         test_sub_hour_payload_exposes_primary_when_no_signal_fires,

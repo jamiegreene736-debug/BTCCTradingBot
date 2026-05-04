@@ -936,6 +936,7 @@ class BitunixBot:
                 "exhaustion": False,
                 "trend_not_too_clean": False,
                 "entry_window": False,
+                "pump_watch": False,
                 "checks": [
                     {"key": "data", "label": "Data", "passed": False,
                      "detail": "waiting for 1m entry and 5m pump data"},
@@ -990,6 +991,11 @@ class BitunixBot:
 
         vertical_pump = (
             (move_5_atr >= 3.5 or move_3_atr >= 2.25)
+            and (up_closes >= 3 or up_candles >= 3)
+        )
+        pump_watch = (
+            range_pos >= 0.72
+            and (move_5_atr >= 1.45 or move_3_atr >= 1.05)
             and (up_closes >= 3 or up_candles >= 3)
         )
         post_pump_rejection = (
@@ -1092,6 +1098,7 @@ class BitunixBot:
             "exhaustion": bool(exhaustion),
             "trend_not_too_clean": bool(trend_not_too_clean),
             "entry_window": bool(entry_window),
+            "pump_watch": bool(pump_watch),
             "cooled_off_recovery": bool(cooled_off_recovery),
             "still_squeezing_up": bool(still_squeezing_up),
             "checks": checks,
@@ -1165,6 +1172,10 @@ class BitunixBot:
             }
 
         checklist_score = min(49, int(status.get("score") or 0))
+        pump_watch = bool(status.get("pump_watch"))
+        warnings = ["waiting for parabolic pump + 1m entry rejection before shorting"]
+        if pump_watch:
+            warnings = ["pump detected; waiting for near-high 1m rejection before shorting"]
         return {
             "action": "wait",
             "lean": "mixed",
@@ -1173,11 +1184,13 @@ class BitunixBot:
             "confidenceScore": 0,
             "checklist_score": checklist_score,
             "checklistScore": checklist_score,
+            "setup_stage": "pump_watch" if pump_watch else "hunting",
+            "setupStage": "pump_watch" if pump_watch else "hunting",
             "bias": 0.0,
             "weighted_long_score": 0.0,
             "weighted_short_score": 0.0,
             "agreement": {"agree": 0, "total": 1 if status.get("usable") else 0, "ratio": 0.0},
-            "warnings": ["waiting for parabolic pump + 1m entry rejection before shorting"],
+            "warnings": warnings,
             "method": "parabolic_pump_fade_short_only",
             "mode": "pump_fade_only",
             "horizon": "3m30s",
