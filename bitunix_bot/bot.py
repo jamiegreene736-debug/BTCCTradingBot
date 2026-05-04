@@ -870,6 +870,8 @@ class BitunixBot:
         h15_cvd = float(status["h15_cvd"])
         h15_short_score = float(status["h15_short_score"])
         h30_short_score = float(status["h30_short_score"])
+        h15_move_3_atr = float(status["h15_move_3_atr"])
+        h15_down_closes = int(status["h15_down_closes"])
         if not (
             status["pump"]
             and status["not_far_from_high"]
@@ -880,19 +882,33 @@ class BitunixBot:
             return None
 
         confidence = 80
-        confidence += min(8, max(0, int(round((move_5_atr - 3.5) * 2))))
+        confidence += min(8, max(0, int(round((move_5_atr - 0.75) * 4))))
+        if status.get("micro_pump"):
+            confidence += 4
+        if status.get("micro_rejection"):
+            confidence += 4
         if range_pos >= 0.92:
             confidence += 4
+        elif range_pos >= 0.86:
+            confidence += 2
+        if status.get("not_far_from_high") and range_pos >= 0.82:
+            confidence += 2
         if h15_cvd <= -5.0:
             confidence += 5
-        if h15_short_score >= 0.20:
+        if h15_short_score >= 0.28:
+            confidence += 5
+        elif h15_short_score >= 0.20:
             confidence += 3
         if h30_short_score >= 0.25:
             confidence += 2
-        confidence = max(80, min(95, confidence))
+        if h15_move_3_atr <= -0.25:
+            confidence += 3
+        if h15_down_closes >= 3:
+            confidence += 2
+        confidence = max(80, min(98, confidence))
 
         reasons = [
-            f"parabolic pump: 30m move +{move_5_atr:.2f} ATR over 5 bars",
+            f"micro pump: 30m move +{move_5_atr:.2f} ATR over 5 bars",
             f"price high in local range ({range_pos * 100:.0f}%)",
         ]
         if h15_cvd <= -5.0:
@@ -1001,6 +1017,28 @@ class BitunixBot:
             (move_5_atr >= 3.5 or move_3_atr >= 2.25)
             and (up_closes >= 3 or up_candles >= 3)
         )
+        # High-leverage pump fades are not meant to wait for a giant move.
+        # The target is a small, fast pop near the local high that starts
+        # failing on the 1m tape. These thresholds intentionally key off ATR
+        # rather than raw percent so BTC/ETH/DOGE/XRP normalize reasonably.
+        micro_pump = (
+            range_pos >= 0.72
+            and (
+                (move_3_atr >= 0.55 and up_closes >= 2)
+                or (move_5_atr >= 0.75 and up_closes >= 2)
+                or (h15_move_10_atr >= 0.85 and h15_up_closes_10 >= 5)
+                or (h15_move_15_atr >= 1.10 and h15_up_closes_15 >= 7)
+            )
+        )
+        micro_pump_watch = (
+            range_pos >= 0.62
+            and (
+                (move_3_atr >= 0.35 and up_closes >= 2)
+                or (move_5_atr >= 0.50 and up_closes >= 2)
+                or (h15_move_10_atr >= 0.55 and h15_up_closes_10 >= 4)
+                or (h15_move_15_atr >= 0.80 and h15_up_closes_15 >= 6)
+            )
+        )
         session_pump = (
             range_pos >= 0.78
             and (
@@ -1011,9 +1049,10 @@ class BitunixBot:
             )
         )
         pump_watch = (
-            range_pos >= 0.72
+            range_pos >= 0.62
             and (
-                session_pump
+                micro_pump_watch
+                or session_pump
                 or (
                     (move_5_atr >= 1.45 or move_3_atr >= 1.05)
                     and (up_closes >= 3 or up_candles >= 3)
@@ -1027,25 +1066,32 @@ class BitunixBot:
             and bearish_rejection
         )
         pump = (
-            range_pos >= 0.85
-            and (vertical_pump or post_pump_rejection or session_pump)
+            range_pos >= 0.78
+            and (vertical_pump or post_pump_rejection or session_pump or micro_pump)
         )
-        not_far_from_high = high_dist <= 0.85 or range_pos >= 0.90
+        not_far_from_high = high_dist <= 1.25 or range_pos >= 0.82
         exhaustion = exhaustion_votes >= 2
         trend_not_too_clean = h1_adx < 30.0 or (
             strong_negative_tape and h30_short_score >= 0.18
-        )
-        near_blowoff_high = high_dist <= 0.55 or range_pos >= 0.93
+        ) or (strong_negative_tape and h15_short_score >= 0.24)
+        near_blowoff_high = high_dist <= 0.95 or range_pos >= 0.86
         lower_high_rejection = (
-            high_dist <= 1.10
-            and range_pos >= 0.86
-            and h15_move_3_atr <= -0.35
-            and h15_down_closes >= 3
-            and h15_short_score >= 0.22
-            and strong_negative_tape
+            high_dist <= 1.45
+            and range_pos >= 0.78
+            and h15_move_3_atr <= -0.18
+            and h15_down_closes >= 2
+            and h15_short_score >= 0.18
+            and (strong_negative_tape or h15_short_score >= 0.28)
+        )
+        micro_rejection = (
+            micro_pump
+            and range_pos >= 0.76
+            and h15_move_3_atr <= -0.12
+            and h15_down_closes >= 2
+            and (strong_negative_tape or h15_short_score >= 0.24)
         )
         cooled_off_recovery = (
-            high_dist > 0.55
+            high_dist > 0.95
             and h15_move_3_atr >= 0.15
             and (
                 h15_up_closes >= 3
@@ -1054,11 +1100,11 @@ class BitunixBot:
             )
         )
         still_squeezing_up = (
-            h15_move_3_atr >= 0.65
+            h15_move_3_atr >= 0.45
             and h15_up_closes >= 3
             and h15_long_score > h15_short_score
         )
-        entry_window = (near_blowoff_high or lower_high_rejection) and not (
+        entry_window = (near_blowoff_high or lower_high_rejection or micro_rejection) and not (
             cooled_off_recovery or still_squeezing_up
         )
 
@@ -1067,13 +1113,19 @@ class BitunixBot:
                 "key": "watch",
                 "label": "Pump watch",
                 "passed": bool(pump_watch),
-                "detail": f"5-bar +{move_5_atr:.2f} ATR, 12-bar +{move_12_atr:.2f} ATR",
+                "detail": (
+                    f"micro {'yes' if micro_pump_watch else 'no'} / "
+                    f"5-bar +{move_5_atr:.2f} ATR, 12-bar +{move_12_atr:.2f} ATR"
+                ),
             },
             {
                 "key": "pump",
                 "label": "Fade-ready pump",
                 "passed": bool(pump),
-                "detail": f"range {range_pos * 100:.0f}% / up {up_closes}/5, {up_closes_12}/12",
+                "detail": (
+                    f"micro {'yes' if micro_pump else 'no'} / "
+                    f"range {range_pos * 100:.0f}% / up {up_closes}/5, {up_closes_12}/12"
+                ),
             },
             {
                 "key": "high",
@@ -1128,11 +1180,14 @@ class BitunixBot:
             "h15_up_closes_15": int(h15_up_closes_15),
             "exhaustion_votes": int(exhaustion_votes),
             "pump": bool(pump),
+            "micro_pump": bool(micro_pump),
+            "micro_pump_watch": bool(micro_pump_watch),
             "session_pump": bool(session_pump),
             "not_far_from_high": bool(not_far_from_high),
             "exhaustion": bool(exhaustion),
             "trend_not_too_clean": bool(trend_not_too_clean),
             "entry_window": bool(entry_window),
+            "micro_rejection": bool(micro_rejection),
             "pump_watch": bool(pump_watch),
             "cooled_off_recovery": bool(cooled_off_recovery),
             "still_squeezing_up": bool(still_squeezing_up),

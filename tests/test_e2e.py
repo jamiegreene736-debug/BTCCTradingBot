@@ -3814,10 +3814,11 @@ def test_next_hour_decision_shorts_parabolic_30m_pump_fade():
             "short_score": 0.24,
             "adx": 56,
             "long_reasons": ["supertrend_up", "adx(56)"],
-            "move_3_atr": 0.45,
+            "move_3_atr": -0.45,
             "move_5_atr": 0.90,
             "position_in_recent_range_15": 0.63,
-            "up_closes_5": 4,
+            "up_closes_5": 1,
+            "down_closes_5": 4,
             "up_candles_5": 4,
             "real_cvd": -20000.0,
         },
@@ -3847,7 +3848,7 @@ def test_next_hour_decision_shorts_parabolic_30m_pump_fade():
     assert decision["horizon"] == "3m30s"
     assert decision["plan_horizon_key"] == "h_15m"
     assert decision["suggested_lev"] == 100
-    assert 80 <= decision["confidence_score"] <= 96
+    assert 80 <= decision["confidence_score"] <= 98
     assert any("parabolic pump fade" in warning for warning in decision["warnings"])
 
 
@@ -3976,8 +3977,9 @@ def test_pump_fade_watch_flags_big_pump_before_short_entry():
     assert decision["setup_stage"] == "pump_watch"
     assert "pump detected" in decision["warnings"][0]
     checks = {row["key"]: row for row in decision["pump_fade_checks"]}
-    assert checks["pump"]["passed"] is False
-    assert checks["entry_window"]["passed"] is False
+    assert checks["pump"]["passed"] is True
+    assert checks["entry_window"]["passed"] is True
+    assert checks["exhaustion"]["passed"] is False
 
 
 def test_pump_fade_watch_flags_broad_session_pump_after_last_bars_cool():
@@ -4021,8 +4023,91 @@ def test_pump_fade_watch_flags_broad_session_pump_after_last_bars_cool():
     assert "pump detected" in decision["warnings"][0]
     checks = {row["key"]: row for row in decision["pump_fade_checks"]}
     assert checks["watch"]["passed"] is True
+    assert checks["pump"]["passed"] is True
+    assert checks["entry_window"]["passed"] is False
+
+
+def test_micro_pump_watch_flags_small_fast_pop():
+    horizons = {
+        "h_15m": {
+            "label": "1m entry",
+            "long_score": 0.24,
+            "short_score": 0.18,
+            "real_cvd": 3.0,
+            "move_3_atr": 0.18,
+            "move_10_atr": 0.62,
+            "move_15_atr": 0.70,
+            "up_closes_5": 3,
+            "down_closes_5": 1,
+            "up_closes_10": 4,
+            "up_closes_15": 6,
+        },
+        "h_30m": {
+            "label": "5m pump",
+            "long_score": 0.41,
+            "short_score": 0.09,
+            "move_3_atr": 0.40,
+            "move_5_atr": 0.55,
+            "position_in_recent_range_15": 0.66,
+            "distance_from_recent_high_atr": 1.70,
+            "up_closes_5": 2,
+            "up_candles_5": 2,
+            "up_closes_10": 4,
+            "up_closes_12": 5,
+        },
+        "h_1h": {"label": "Trend context", "long_score": 0.35, "short_score": 0.10, "adx": 38},
+    }
+
+    decision = BitunixBot._build_pump_fade_only_decision(horizons)
+
+    assert decision["action"] == "wait"
+    assert decision["setup_stage"] == "pump_watch"
+    checks = {row["key"]: row for row in decision["pump_fade_checks"]}
+    assert checks["watch"]["passed"] is True
     assert checks["pump"]["passed"] is False
     assert checks["entry_window"]["passed"] is False
+
+
+def test_micro_pump_fade_publishes_high_confidence_short():
+    horizons = {
+        "h_15m": {
+            "label": "1m entry",
+            "long_score": 0.18,
+            "short_score": 0.30,
+            "real_cvd": -20.0,
+            "move_3_atr": -0.28,
+            "move_10_atr": 0.90,
+            "move_15_atr": 1.18,
+            "up_closes_5": 1,
+            "down_closes_5": 3,
+            "up_closes_10": 5,
+            "up_closes_15": 7,
+        },
+        "h_30m": {
+            "label": "5m pump",
+            "long_score": 0.44,
+            "short_score": 0.26,
+            "move_3_atr": 0.62,
+            "move_5_atr": 0.82,
+            "position_in_recent_range_15": 0.84,
+            "distance_from_recent_high_atr": 0.90,
+            "up_closes_5": 2,
+            "up_candles_5": 2,
+            "up_closes_10": 5,
+            "up_closes_12": 6,
+        },
+        "h_1h": {"label": "Trend context", "long_score": 0.42, "short_score": 0.18, "adx": 35},
+    }
+
+    decision = BitunixBot._build_pump_fade_only_decision(horizons)
+
+    assert decision["action"] == "short"
+    assert decision["setup"] == "parabolic_pump_fade"
+    assert decision["confidence_score"] >= 95
+    checks = {row["key"]: row for row in decision["pump_fade_checks"]}
+    assert checks["pump"]["passed"] is True
+    assert checks["entry_window"]["passed"] is True
+    assert checks["exhaustion"]["passed"] is True
 
 
 def test_auto_pump_fade_places_market_sell_at_100x():
@@ -6159,6 +6244,8 @@ def main() -> int:
         test_pump_fade_blocks_cooled_off_recovery_after_pump,
         test_pump_fade_watch_flags_big_pump_before_short_entry,
         test_pump_fade_watch_flags_broad_session_pump_after_last_bars_cool,
+        test_micro_pump_watch_flags_small_fast_pop,
+        test_micro_pump_fade_publishes_high_confidence_short,
         test_auto_pump_fade_places_market_sell_at_100x,
         test_auto_pump_fade_only_skips_legacy_strategy_without_strong_match,
         test_next_hour_smoothing_requires_confirmed_side_flip,
