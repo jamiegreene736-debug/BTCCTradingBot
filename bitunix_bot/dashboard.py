@@ -25,6 +25,15 @@ from flask import Flask, Response, jsonify, request, send_file
 
 from .client import BitunixClient, BitunixError
 from .config import Config
+from .pnl import (
+    closed_position_net_pnl,
+    position_entry_price,
+    position_exit_price,
+    position_gross_pnl,
+    position_price_pnl_pct,
+    position_qty,
+    position_side,
+)
 from .state import get as get_state
 
 log = logging.getLogger(__name__)
@@ -118,27 +127,21 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
 
     def _closed_position_summary(p: dict[str, Any]) -> dict[str, Any]:
         symbol = _symbol(p.get("symbol"))
-        side_raw = str(p.get("side") or p.get("positionSide") or "").upper()
-        side = "LONG" if side_raw in ("BUY", "LONG") else ("SHORT" if side_raw in ("SELL", "SHORT") else side_raw)
-        qty = _float(p.get("qty") or p.get("size") or p.get("volume"))
-        entry = _float(p.get("avgOpenPrice") or p.get("entryPrice") or p.get("openPrice"))
-        exit_px = _float(p.get("avgClosePrice") or p.get("closePrice") or p.get("exitPrice"))
+        side = position_side(p)
+        qty = position_qty(p)
+        entry = position_entry_price(p)
+        exit_px = position_exit_price(p)
         realized = _float(p.get("realizedPNL") or p.get("realizedPnl"))
         fee = _float(p.get("fee"))
         funding = _float(p.get("funding"))
-        net = realized + fee + funding
+        net = closed_position_net_pnl(p)
+        gross = position_gross_pnl(p)
         opened_ms = _position_ctime_ms(p)
         closed_ms = _position_mtime_ms(p)
         opened_at = int(opened_ms // 1000) if opened_ms else None
         closed_at = int(closed_ms // 1000) if closed_ms else None
         hold_seconds = max(0, closed_at - opened_at) if opened_at and closed_at else None
-
-        price_pnl_pct = None
-        if entry > 0 and exit_px > 0:
-            if side == "SHORT":
-                price_pnl_pct = (entry - exit_px) / entry * 100.0
-            else:
-                price_pnl_pct = (exit_px - entry) / entry * 100.0
+        price_pnl_pct = position_price_pnl_pct(p)
 
         out = {
             "position_id": str(p.get("positionId") or p.get("position_id") or ""),
@@ -154,6 +157,8 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
             "realizedPnl": realized,
             "fee": fee,
             "funding": funding,
+            "gross_pnl": round(gross, 8) if gross is not None else None,
+            "grossPnl": round(gross, 8) if gross is not None else None,
             "net_pnl": round(net, 8),
             "netPnl": round(net, 8),
             "pnl": round(net, 8),
@@ -509,17 +514,9 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
             closed = hist.get("positionList", [])
             out["history_positions"] = closed
 
-            # Win rate: count closed positions where net PnL (realized + fee +
-            # funding, all signed) is > 0. Bitunix's `realizedPNL` excludes
-            # fees and funding per spec, so add them back signed.
-            def _f(v):
-                try:
-                    return float(v) if v not in (None, "", "null") else 0.0
-                except (ValueError, TypeError):
-                    return 0.0
             wins = losses = 0
             for p in closed:
-                net = _f(p.get("realizedPNL")) + _f(p.get("fee")) + _f(p.get("funding"))
+                net = closed_position_net_pnl(p)
                 if net > 0:
                     wins += 1
                 elif net < 0:

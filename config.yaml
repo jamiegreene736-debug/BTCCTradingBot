@@ -33,12 +33,17 @@ trading:
   # symbol set [BTC, ETH, SOL]. Cooldown stays at 180s per-symbol so one
   # signal can't keep firing on the same pair, but two different pairs
   # can be in play simultaneously.
-  max_open_positions: 3         # was 5 — lowered per Grok DD-halt review; limits concurrent exposure on $35
+  max_open_positions: 1         # live audit 2026-05-04: one pump-fade scalp at a time until net edge recovers
   max_positions_per_symbol: 1   # never pyramid into the same trade
-  max_same_direction: 3         # was 2 — raised to 3 to allow more utilisation across 15 symbols
+  max_same_direction: 1         # all auto trades are shorts; avoid stacking correlated pump-fade exposure
   # 15m timeframe: 600s (10 min) cooldown — reverted from 900 per Grok filter-loosening review;
   # 900 was too conservative for a 15-symbol set.
-  cooldown_seconds: 120         # was 600 — Grok 2026-04-27: drop to 120s for several trades/hour
+  cooldown_seconds: 300         # live audit: reduce fee-burning repeat entries on the same coin
+  symbol_risk_mult:
+    BTCUSDT: 1.0
+    ETHUSDT: 0.75
+    DOGEUSDT: 0.35
+    XRPUSDT: 0.35
   # Hard 3m30s position clock for the Chrome-extension pump-fade workflow. The extension
   # asks the dashboard to market-close that coin at the timer, regardless of
   # PnL. If the bot is ever switched back to live mode, this same max-age is
@@ -52,8 +57,8 @@ trading:
   # Streak protection: pause a symbol for streak_loss_pause_seconds after
   # N consecutive losses. Live data showed 6 XRP SHORTs in a row losing —
   # bot kept doubling down on a wrong-regime call. This catches it.
-  streak_loss_limit: 3
-  streak_loss_pause_seconds: 7200    # 2 hours
+  streak_loss_limit: 2
+  streak_loss_pause_seconds: 3600    # 1 hour
   # Daily drawdown circuit breaker — halts NEW entries for the rest of the
   # UTC day if equity drops more than this % from session start. Existing
   # positions still managed (SL ratchet, time-exit). Resets at UTC midnight.
@@ -130,7 +135,7 @@ risk:
   #   ≈ 0.7 × 0.10% + 0.3 × 0.13% + 0.04% ≈ 0.15%
   # The bot guarantees TP will always be at least adaptive_tp_floor_r × SL
   # distance which exceeds this fee buffer, so winning trades ALWAYS net.
-  round_trip_fee_pct: 0.10    # was 0.15 — Bitunix maker fees ~0.08%; 0.15 was overcounting
+  round_trip_fee_pct: 0.14    # live market exits are ~0.12%; require extra edge above fees
   min_trade_notional: 10.0    # was 5.0 — raise floor to cut more fee-burning tiny trades
   # Adaptive TP — as a position ages without hitting the original target,
   # tighten the TP progressively. We always aim for profit (TP stays above

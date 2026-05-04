@@ -653,6 +653,47 @@ def test_momentum_endpoint_includes_per_symbol_closed_trade_history():
     assert btc["closed_trades"][0]["price_pnl_pct"] == 0.3333
 
 
+def test_momentum_endpoint_treats_positive_bitunix_fee_as_cost():
+    """Live Bitunix history uses positive fee with realizedPNL already net.
+
+    A DOGE short can win on price but still lose after fees; the dashboard
+    must show that as an actual loss, not add the fee back and call it a win.
+    """
+    reset_state()
+    cfg = fresh_cfg()
+    client = make_mock_client()
+    now_ms = int(time.time() * 1000)
+    client.history_positions.return_value = {"positionList": [
+        {"positionId": "DOGE_FEE_LOSS", "symbol": "DOGEUSDT", "side": "SELL",
+         "qty": "134", "entryPrice": "0.11042", "closePrice": "0.11032",
+         "ctime": now_ms - 240_000, "mtime": now_ms - 30_000,
+         "realizedPNL": "-0.004347496", "fee": "0.017747496", "funding": "0.00"},
+    ], "total": 1}
+    get_state().record_overlay("DOGEUSDT", {
+        "symbol": "DOGEUSDT",
+        "price": 0.11032,
+        "horizons": {},
+        "horizon_order": [],
+        "alignment": {"dominant": "mixed"},
+        "next_15m": {"action": "wait"},
+        "as_of": int(time.time()),
+    })
+
+    app = create_app(cfg, client)
+    c = app.test_client()
+    good = base64.b64encode(b"admin:test_pass").decode()
+
+    r = c.get("/api/momentum", headers={"Authorization": f"Basic {good}"})
+    assert r.status_code == 200
+    j = r.get_json()
+    row = j["symbols"]["DOGEUSDT"]["closed_trades"][0]
+    assert row["gross_pnl"] == 0.0134
+    assert row["net_pnl"] == -0.0043475
+    assert row["result"] == "loss"
+    assert row["price_pnl_pct"] == 0.0906
+    assert j["symbols"]["DOGEUSDT"]["closed_trade_stats"]["losses"] == 1
+
+
 def test_momentum_endpoint_blocks_symbol_after_losing_pump_fade_shorts():
     reset_state()
     cfg = fresh_cfg()
@@ -4447,7 +4488,7 @@ def test_adaptive_threshold_pipeline_flows_into_evaluate():
 
 
 def test_compute_trade_r_basic():
-    """R-multiple = (realized + fee + funding) / (qty * entry * sl_pct/100)."""
+    """R-multiple = actual net P&L / (qty * entry * sl_pct/100)."""
     pos = {
         "avgOpenPrice": "60000",
         "qty": "0.01",
@@ -4461,6 +4502,22 @@ def test_compute_trade_r_basic():
     # net = 0.5 - 0.05 = 0.45
     # R = 0.45 / 2.40 = 0.1875
     assert abs(r - 0.1875) < 1e-6
+
+
+def test_compute_trade_r_uses_live_bitunix_price_fields_and_positive_fee_net():
+    """Live rows use entryPrice/closePrice and positive fee already included in realizedPNL."""
+    pos = {
+        "side": "SELL",
+        "entryPrice": "0.1103",
+        "closePrice": "0.11038",
+        "qty": "137",
+        "realizedPNL": "-0.029099896",
+        "fee": "0.018139896",
+        "funding": "0",
+    }
+    r = BitunixBot._compute_trade_r(pos, sl_pct_default=0.25)
+    expected = -0.029099896 / (137 * 0.1103 * 0.25 / 100)
+    assert abs(r - expected) < 1e-6
 
 
 def test_compute_trade_r_handles_invalid():
@@ -4493,6 +4550,45 @@ def test_recent_trade_r_appended_on_close():
     # qty=0.01, entry=60000, sl=0.25% (Grok v6 tightening) → risk_dollars = 1.50
     # net = -0.55 → R = -0.367
     assert abs(bot.recent_trade_r[0] - (-0.367)) < 0.01
+
+
+def test_live_bitunix_positive_fee_losses_trigger_streak_and_journal_prices():
+    """Positive-fee live rows should no longer look flat or fee-profitable."""
+    import json
+    import tempfile
+    from bitunix_bot.journal import TradeJournal
+
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.trading.streak_loss_limit = 2
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    now_ms = int(time.time() * 1000)
+    bot.client.history_positions.return_value = {
+        "positionList": [
+            {"positionId": "D1", "symbol": "DOGEUSDT", "side": "SELL",
+             "qty": "134", "entryPrice": "0.11042", "closePrice": "0.11032",
+             "ctime": now_ms - 420_000, "mtime": now_ms - 210_000,
+             "realizedPNL": "-0.004347496", "fee": "0.017747496", "funding": "0"},
+            {"positionId": "D2", "symbol": "DOGEUSDT", "side": "SELL",
+             "qty": "137", "entryPrice": "0.1103", "closePrice": "0.11038",
+             "ctime": now_ms - 210_000, "mtime": now_ms,
+             "realizedPNL": "-0.029099896", "fee": "0.018139896", "funding": "0"},
+        ],
+        "total": 2,
+    }
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "trades.jsonl"
+        bot.journal = TradeJournal(path)
+        bot._update_streak_state()
+
+        assert "DOGEUSDT" in bot.streak_pause_until
+        exits = [json.loads(line) for line in path.read_text().strip().splitlines()]
+        exits = [e for e in exits if e["kind"] == "exit" and e["symbol"] == "DOGEUSDT"]
+        assert len(exits) == 2
+        assert exits[-1]["entry_price"] == 0.1103
+        assert exits[-1]["exit_price"] == 0.11038
+        assert exits[-1]["net_pnl"] == -0.029099896
 
 
 # ----------------------------------------------------------------- ChatGPT review v4
@@ -5573,7 +5669,7 @@ def test_correlation_sizing_unknown_symbol_defaults_to_full():
     # An asset not in the multiplier map.
     misc_plan = build_order(sig, free_margin=46.0, trading=tc, risk=rc,
                              min_volume=0.0001, volume_step=0.0001, digits=1,
-                             symbol="DOGEUSDT")
+                             symbol="LTCUSDT")
     # Same notional (both mult=1.0).
     assert abs(misc_plan.volume - btc_plan.volume) < 1e-9
 

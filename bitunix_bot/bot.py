@@ -32,6 +32,13 @@ from .orderbook import OrderBookFeed
 from .risk import OrderPlan, adaptive_tp_r, build_order
 from .state import get as get_state
 from .order_executor import OrderExecutor
+from .pnl import (
+    as_float,
+    closed_position_net_pnl,
+    position_entry_price,
+    position_exit_price,
+    position_qty,
+)
 from .position_manager import PositionManager
 from .strategy import Signal, compute_overlay_scores, evaluate
 from .symbol_meta import DEFAULT_META as _DEFAULT_META
@@ -372,21 +379,15 @@ class BitunixBot:
         it's close enough for a rolling tally to detect drawdown). Returns
         0.0 on insufficient data.
         """
-        try:
-            open_px = float(p.get("avgOpenPrice") or 0)
-            qty = float(p.get("qty") or 0)
-            realized = float(p.get("realizedPNL") or 0)
-            fee = float(p.get("fee") or 0)
-            funding = float(p.get("funding") or 0)
-        except (TypeError, ValueError):
-            return 0.0
+        open_px = position_entry_price(p)
+        qty = position_qty(p)
         if open_px <= 0 or qty <= 0 or sl_pct_default <= 0:
             return 0.0
         sl_dist = open_px * sl_pct_default / 100.0
         risk_dollars = qty * sl_dist
         if risk_dollars <= 0:
             return 0.0
-        return (realized + fee + funding) / risk_dollars
+        return closed_position_net_pnl(p) / risk_dollars
 
     def _update_streak_state(self) -> None:
         """Pull recent closed positions and update consecutive-loss counts
@@ -407,17 +408,10 @@ class BitunixBot:
             sym = str(p.get("symbol") or "").upper()
             if not sym:
                 continue
-            # Net PnL = realizedPNL + fee + funding (Bitunix excludes fees from
-            # realizedPNL per spec; fee/funding are signed).
-            def _f(v):
-                try:
-                    return float(v) if v not in (None, "", "null") else 0.0
-                except (ValueError, TypeError):
-                    return 0.0
-            realized = _f(p.get("realizedPNL"))
-            fee = _f(p.get("fee"))
-            funding = _f(p.get("funding"))
-            net = realized + fee + funding
+            realized = as_float(p.get("realizedPNL") or p.get("realizedPnl"))
+            fee = as_float(p.get("fee"))
+            funding = as_float(p.get("funding"))
+            net = closed_position_net_pnl(p)
 
             # Surface non-zero funding for verification (Grok rescan):
             # Bitunix's docs aren't crystal clear on whether realizedPNL
@@ -460,8 +454,8 @@ class BitunixBot:
             ctime_ms = int(p.get("ctime") or 0)
             mtime_ms = int(p.get("mtime") or 0)
             hold_sec = (mtime_ms - ctime_ms) / 1000.0 if (ctime_ms and mtime_ms) else 0.0
-            entry_px = _f(p.get("avgOpenPrice"))
-            exit_px = _f(p.get("avgClosePrice")) or None
+            entry_px = position_entry_price(p)
+            exit_px = position_exit_price(p) or None
             exit_reason = "win" if net > 0 else ("loss" if net < 0 else "flat")
             self.journal.record_exit(
                 symbol=sym,

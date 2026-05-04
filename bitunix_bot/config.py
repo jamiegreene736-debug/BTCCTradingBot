@@ -64,11 +64,14 @@ class TradingCfg:
     # estimates from realized 1m correlations:
     #   ETHUSDT — high cap, ~0.85 to BTC, slightly lower beta → 0.85
     #   SOLUSDT — mid cap, ~0.75 corr, higher beta → 0.70
-    #   XRPUSDT — mid cap, ~0.70 corr, higher idiosyncratic vol → 0.70
+    #   DOGEUSDT / XRPUSDT — fee-sensitive high-leverage scalps; down-sized
+    #   until live net P&L improves.
     # Symbols not listed default to 1.0 (no adjustment).
     symbol_risk_mult: dict[str, float] = field(default_factory=lambda: {
         "BTCUSDT":  1.0,
         "ETHUSDT":  0.85,
+        "DOGEUSDT": 0.35,
+        "XRPUSDT":  0.35,
         "SOLUSDT":  0.70,
         "BNBUSDT":  0.80,
     })
