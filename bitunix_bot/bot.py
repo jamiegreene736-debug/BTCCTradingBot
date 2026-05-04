@@ -872,6 +872,7 @@ class BitunixBot:
         if not (
             status["pump"]
             and status["not_far_from_high"]
+            and status["entry_window"]
             and status["exhaustion"]
             and status["trend_not_too_clean"]
         ):
@@ -933,6 +934,7 @@ class BitunixBot:
                 "not_far_from_high": False,
                 "exhaustion": False,
                 "trend_not_too_clean": False,
+                "entry_window": False,
                 "checks": [
                     {"key": "data", "label": "Data", "passed": False,
                      "detail": "waiting for 15m and 30m overlay data"},
@@ -950,9 +952,13 @@ class BitunixBot:
         up_closes = int(cls._float_field(h30, "up_closes_5", "upCloses5"))
         up_candles = int(cls._float_field(h30, "up_candles_5", "upCandles5"))
         h1_adx = cls._float_field(h1, "adx", default=99.0)
+        h15_long_score = cls._float_field(h15, "long_score", "longScore")
         h15_short_score = cls._float_field(h15, "short_score", "shortScore")
         h30_short_score = cls._float_field(h30, "short_score", "shortScore")
         h15_cvd = cls._float_field(h15, "real_cvd", "realCvd")
+        h15_move_3_atr = cls._float_field(h15, "move_3_atr", "move3Atr")
+        h15_up_closes = int(cls._float_field(h15, "up_closes_5", "upCloses5"))
+        h15_down_closes = int(cls._float_field(h15, "down_closes_5", "downCloses5"))
         h15_short_reasons = [str(r).lower() for r in h15.get("short_reasons") or []]
 
         bearish_pattern = any(
@@ -1000,6 +1006,32 @@ class BitunixBot:
         trend_not_too_clean = h1_adx < 30.0 or (
             strong_negative_tape and h30_short_score >= 0.18
         )
+        near_blowoff_high = high_dist <= 0.55 or range_pos >= 0.93
+        lower_high_rejection = (
+            high_dist <= 1.10
+            and range_pos >= 0.86
+            and h15_move_3_atr <= -0.35
+            and h15_down_closes >= 3
+            and h15_short_score >= 0.22
+            and strong_negative_tape
+        )
+        cooled_off_recovery = (
+            high_dist > 0.55
+            and h15_move_3_atr >= 0.15
+            and (
+                h15_up_closes >= 3
+                or h15_long_score >= h15_short_score + 0.10
+                or h15_cvd > 0.0
+            )
+        )
+        still_squeezing_up = (
+            h15_move_3_atr >= 0.65
+            and h15_up_closes >= 3
+            and h15_long_score > h15_short_score
+        )
+        entry_window = (near_blowoff_high or lower_high_rejection) and not (
+            cooled_off_recovery or still_squeezing_up
+        )
 
         checks = [
             {
@@ -1010,9 +1042,18 @@ class BitunixBot:
             },
             {
                 "key": "high",
-                "label": "Near local high",
+                "label": "Near blow-off high",
                 "passed": bool(not_far_from_high),
                 "detail": f"{high_dist:.2f} ATR below high" if high_dist < 900 else "high distance unavailable",
+            },
+            {
+                "key": "entry_window",
+                "label": "Fresh fade window",
+                "passed": bool(entry_window),
+                "detail": (
+                    f"1m move {h15_move_3_atr:+.2f} ATR, "
+                    f"up {h15_up_closes}/5, down {h15_down_closes}/5"
+                ),
             },
             {
                 "key": "exhaustion",
@@ -1040,11 +1081,18 @@ class BitunixBot:
             "h15_cvd": round(h15_cvd, 4),
             "h15_short_score": round(h15_short_score, 4),
             "h30_short_score": round(h30_short_score, 4),
+            "h15_long_score": round(h15_long_score, 4),
+            "h15_move_3_atr": round(h15_move_3_atr, 4),
+            "h15_up_closes": int(h15_up_closes),
+            "h15_down_closes": int(h15_down_closes),
             "exhaustion_votes": int(exhaustion_votes),
             "pump": bool(pump),
             "not_far_from_high": bool(not_far_from_high),
             "exhaustion": bool(exhaustion),
             "trend_not_too_clean": bool(trend_not_too_clean),
+            "entry_window": bool(entry_window),
+            "cooled_off_recovery": bool(cooled_off_recovery),
+            "still_squeezing_up": bool(still_squeezing_up),
             "checks": checks,
         }
 

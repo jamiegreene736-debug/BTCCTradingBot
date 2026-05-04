@@ -3905,6 +3905,41 @@ def test_pump_fade_only_decision_publishes_short_immediately():
     assert all(row["passed"] for row in decision["pump_fade_checks"])
 
 
+def test_pump_fade_blocks_cooled_off_recovery_after_pump():
+    horizons = {
+        "h_15m": {
+            "label": "Next 15m",
+            "long_score": 0.38,
+            "short_score": 0.24,
+            "real_cvd": -20000.0,
+            "move_3_atr": 0.45,
+            "up_closes_5": 4,
+            "down_closes_5": 1,
+        },
+        "h_30m": {
+            "label": "Next 30m",
+            "long_score": 0.78,
+            "short_score": 0.26,
+            "move_3_atr": 2.40,
+            "move_5_atr": 4.20,
+            "position_in_recent_range_15": 0.92,
+            "distance_from_recent_high_atr": 0.70,
+            "up_closes_5": 5,
+            "up_candles_5": 5,
+        },
+        "h_1h": {"label": "Next 1h", "long_score": 0.34, "short_score": 0.15, "adx": 28},
+    }
+
+    decision = BitunixBot._build_pump_fade_only_decision(horizons)
+
+    assert decision["action"] == "wait"
+    checks = {row["key"]: row for row in decision["pump_fade_checks"]}
+    assert checks["pump"]["passed"] is True
+    assert checks["high"]["passed"] is True
+    assert checks["exhaustion"]["passed"] is True
+    assert checks["entry_window"]["passed"] is False
+
+
 def test_next_hour_smoothing_requires_confirmed_side_flip():
     reset_state()
     cfg = fresh_cfg()
@@ -5947,6 +5982,7 @@ def main() -> int:
         test_next_hour_decision_shorts_parabolic_30m_pump_fade,
         test_pump_fade_only_decision_ignores_aligned_long,
         test_pump_fade_only_decision_publishes_short_immediately,
+        test_pump_fade_blocks_cooled_off_recovery_after_pump,
         test_next_hour_smoothing_requires_confirmed_side_flip,
         test_sub_hour_payload_marks_cache_ready_from_core_horizons,
         test_sub_hour_payload_exposes_primary_when_no_signal_fires,
