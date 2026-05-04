@@ -875,13 +875,22 @@ class BitunixBot:
         up_candles = int(cls._float_field(h30, "up_candles_5", "upCandles5"))
         h1_adx = cls._float_field(h1, "adx", default=99.0)
         h15_short_score = cls._float_field(h15, "short_score", "shortScore")
+        h30_short_score = cls._float_field(h30, "short_score", "shortScore")
         h15_cvd = cls._float_field(h15, "real_cvd", "realCvd")
         h15_short_reasons = [str(r).lower() for r in h15.get("short_reasons") or []]
 
-        pump = (
+        vertical_pump = (
             (move_5_atr >= 3.0 or move_3_atr >= 2.0)
-            and range_pos >= 0.78
             and (up_closes >= 4 or up_candles >= 4)
+        )
+        post_pump_rejection = (
+            move_5_atr >= 1.25
+            and range_pos >= 0.82
+            and h30_short_score >= 0.18
+        )
+        pump = (
+            range_pos >= 0.78
+            and (vertical_pump or post_pump_rejection)
         )
         not_far_from_high = high_dist <= 1.25 or range_pos >= 0.84
         exhaustion = (
