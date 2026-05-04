@@ -674,13 +674,14 @@ class BitunixBot:
     # Multi-horizon overlay configuration. Each entry is:
     #   (key, klines_tf, cache_ttl_seconds, display_label)
     # The kline timeframe was chosen so that 4-15 bars cover the user-facing
-    # horizon — so e.g. "Next 15m" reads from 1m bars where 15 bars produce
-    # stable indicator outputs. TTL is roughly bar_duration / 4 so we never
+    # horizon. For pump-fade mode, the first row is a 1m entry/tape window
+    # kept under the h_15m key for extension compatibility. TTL is roughly
+    # bar_duration / 4 so we never
     # show stale data and never refetch faster than necessary.
     _OVERLAY_HORIZONS: tuple[tuple[str, str, int, str], ...] = (
-        ("h_15m", "1m",  15,   "Next 15m"),
-        ("h_30m", "5m",  60,   "Next 30m"),
-        ("h_1h",  "15m", 180,  "Next 1h"),
+        ("h_15m", "1m",  15,   "1m entry"),
+        ("h_30m", "5m",  60,   "5m pump"),
+        ("h_1h",  "15m", 180,  "15m context"),
         ("h_4h",  "1h",  600,  "Next 4h"),
         ("h_8h",  "2h",  1200, "Next 8h"),
         ("h_24h", "4h",  1800, "Next 24h"),
@@ -1060,8 +1061,8 @@ class BitunixBot:
                 "label": "Confirmed rejection",
                 "passed": bool(exhaustion),
                 "detail": (
-                    f"votes {exhaustion_votes}/3; 15m short {h15_short_score * 100:.0f}, "
-                    f"30m short {h30_short_score * 100:.0f}, CVD {h15_cvd:.0f}"
+                    f"votes {exhaustion_votes}/3; 1m entry short {h15_short_score * 100:.0f}, "
+                    f"5m pump short {h30_short_score * 100:.0f}, CVD {h15_cvd:.0f}"
                 ),
             },
             {
