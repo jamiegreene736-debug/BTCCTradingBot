@@ -138,6 +138,10 @@ def fresh_cfg():
     cfg.trading.max_open_positions = 4
     cfg.trading.max_same_direction = 2
     cfg.trading.use_post_only_entries = False
+    cfg.trading.auto_execute_pump_fade_shorts = False
+    cfg.trading.auto_execute_pump_fade_only = False
+    cfg.trading.pump_fade_auto_min_confidence = 95
+    cfg.trading.pump_fade_auto_leverage = 100
     cfg.trading.cooldown_seconds = 60
     # Most live-mode fixture tests exercise caps, SL ratchets, stale exits,
     # etc. Disable the production hard-close clock unless a test opts in.
@@ -4021,6 +4025,95 @@ def test_pump_fade_watch_flags_broad_session_pump_after_last_bars_cool():
     assert checks["entry_window"]["passed"] is False
 
 
+def test_auto_pump_fade_places_market_sell_at_100x():
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.trading.symbols = ["BTCUSDT"]
+    cfg.trading.auto_execute_pump_fade_shorts = True
+    cfg.trading.auto_execute_pump_fade_only = True
+    cfg.trading.pump_fade_auto_min_confidence = 95
+    cfg.trading.pump_fade_auto_leverage = 100
+    cfg.trading.max_position_age_seconds = 210
+    cfg.trading.time_exit_only_if_losing = False
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot._resolve_symbol_meta()
+    bot._check_liquidation_cascade = lambda: False
+
+    def seed_overlay():
+        decision = {
+            "action": "short",
+            "confidence_score": 95,
+            "confidenceScore": 95,
+            "setup": "parabolic_pump_fade",
+            "primary_signal": {
+                "reasons": ["parabolic pump", "60s CVD flipped strongly negative"],
+            },
+        }
+        bot.state.record_overlay("BTCUSDT", {
+            "symbol": "BTCUSDT",
+            "price": 100.0,
+            "horizons": {
+                "h_15m": {"price": 100.0, "atr": 0.25, "last_bar_high": 101.0, "last_bar_low": 99.0},
+                "h_30m": {"price": 100.0, "atr": 0.35},
+            },
+            "decision": decision,
+            "next_1h": decision,
+        })
+
+    bot._compute_overlays = seed_overlay
+    bot._tick()
+
+    bot.client.set_leverage.assert_any_call("BTCUSDT", 100)
+    bot.client.place_order.assert_called_once()
+    kw = bot.client.place_order.call_args.kwargs
+    assert kw["symbol"] == "BTCUSDT"
+    assert kw["side"] == "SELL"
+    assert kw["order_type"] == "MARKET"
+    assert kw["trade_side"] == "OPEN"
+    assert kw["sl_price"]
+    assert kw["tp_price"]
+    assert "BTCUSDT" not in bot.pending_limits
+    orders = [e for e in bot.state.snapshot()["events"] if e["kind"] == "order"]
+    assert any("lev=100x" in e["text"] for e in orders)
+
+
+def test_auto_pump_fade_only_skips_legacy_strategy_without_strong_match():
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.trading.symbols = ["BTCUSDT"]
+    cfg.trading.auto_execute_pump_fade_shorts = True
+    cfg.trading.auto_execute_pump_fade_only = True
+    cfg.trading.pump_fade_auto_min_confidence = 95
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot._resolve_symbol_meta()
+    bot._check_liquidation_cascade = lambda: False
+
+    def seed_overlay():
+        decision = {
+            "action": "short",
+            "confidence_score": 90,
+            "confidenceScore": 90,
+            "setup": "parabolic_pump_fade",
+        }
+        bot.state.record_overlay("BTCUSDT", {
+            "symbol": "BTCUSDT",
+            "price": 100.0,
+            "horizons": {},
+            "decision": decision,
+            "next_1h": decision,
+        })
+
+    bot._compute_overlays = seed_overlay
+    bot._tick()
+
+    bot.client.place_order.assert_not_called()
+    bot.client.klines.assert_not_called()
+
+
 def test_next_hour_smoothing_requires_confirmed_side_flip():
     reset_state()
     cfg = fresh_cfg()
@@ -6066,6 +6159,8 @@ def main() -> int:
         test_pump_fade_blocks_cooled_off_recovery_after_pump,
         test_pump_fade_watch_flags_big_pump_before_short_entry,
         test_pump_fade_watch_flags_broad_session_pump_after_last_bars_cool,
+        test_auto_pump_fade_places_market_sell_at_100x,
+        test_auto_pump_fade_only_skips_legacy_strategy_without_strong_match,
         test_next_hour_smoothing_requires_confirmed_side_flip,
         test_sub_hour_payload_marks_cache_ready_from_core_horizons,
         test_sub_hour_payload_exposes_primary_when_no_signal_fires,

@@ -39,16 +39,16 @@ class OrderExecutor:
     # Public entry points
     # ------------------------------------------------------------------
 
-    def execute(self, symbol: str, plan: OrderPlan) -> bool:
+    def execute(self, symbol: str, plan: OrderPlan, *, force_market: bool = False) -> bool:
         """Execute an entry plan.
 
         Tape veto first ("don't fight the flow") — if the most recent
         10s of trade tape is contrary to our intended direction at
         ≥0.30 magnitude (~65/35 split or worse), skip the trade.
 
-        Then try post-only maker entry (saves ~0.04% per round-trip
-        in fees). If the OB feed isn't ready or post-only is rejected,
-        fall through to market.
+        Then try post-only maker entry unless the caller explicitly needs a
+        market entry (the pump-fade scalp does). If the OB feed isn't ready
+        or post-only is rejected, fall through to market.
         """
         bot = self._bot
         if bot.tape_feed is not None:
@@ -76,7 +76,8 @@ class OrderExecutor:
 
         # Try post-only maker entry first. If the OB feed isn't ready
         # or post-only is rejected, fall through to market.
-        if (bot.cfg.trading.use_post_only_entries
+        if (not force_market
+                and bot.cfg.trading.use_post_only_entries
                 and bot.ob_feed
                 and bot.ob_feed.is_connected()):
             if self._try_post_only(symbol, plan, order_text):

@@ -1,9 +1,9 @@
 # Bitunix TraderBot — aggressive multi-symbol futures.
 # 100% technical. No news / sentiment inputs are used.
 
-mode: paper              # paper | live  (paper never sends orders)
-                         # Switched to paper for the Chrome-extension overlay
-                         # workflow — we want signals, not auto-trades.
+mode: live               # paper | live  (paper never sends orders)
+                         # Live because the bot now auto-executes only the
+                         # strongest parabolic pump-fade SHORT setup.
 
 trading:
   # User trades these four manually; bot only computes signals for the overlay.
@@ -21,28 +21,8 @@ trading:
   # change: makes the maker-fee economics actually work.
   timeframe: 5m          # was 15m — Grok strategy review: 5m is sweet spot for
                          # high-leverage scalping; 15m holds too long at 10x
-  # ChatGPT review (gpt-5): leverage 25 → 10. Lower leverage on a $35 account
-  # cuts fee-bite as percent of margin while keeping liquidation buffer wide.
-  # The maker fee improvement is the bigger lever; this is supporting.
-  leverage: 10           # 10x — was 25x — pro scalper sweet spot. NOTE on misconception:
-                         # lowering leverage does NOT cut fees. Fees scale with
-                         # NOTIONAL (= risk_per_trade / sl_pct), which is
-                         # leverage-independent at fixed risk. A trade at 50x
-                         # and 25x with 1% risk + 0.25% SL has IDENTICAL notional
-                         # (~$184 on $46) and IDENTICAL round-trip fees ($0.31).
-                         #
-                         # What leverage DOES change is liquidation distance:
-                         #   100x → 1% adverse = liq
-                         #    50x → 2% adverse = liq
-                         #    25x → 4% adverse = liq   ← sweet spot
-                         #    10x → 10% adverse = liq
-                         #
-                         # With 0.25% SL we're never near liq in normal flow,
-                         # but flash wicks / oracle delays can momentarily skip
-                         # the SL trigger — bigger buffer = real protection.
-                         # 25x supports 4 concurrent positions on $46 (margin
-                         # use ~$22, ~50% buffer left). Bitunix per-symbol caps
-                         # (BTC 200x, ETH 100x, SOL/XRP 75x) all permit 25x.
+  leverage: 100          # Pump-fade scalps are deliberately high leverage and
+                         # short-lived; symbol caps still apply.
   margin_coin: USDT
   margin_mode: ISOLATION # ISOLATION isolates loss per position; CROSS shares margin
   # Reverted 2.0 → 0.75 per Grok DD-halt review. 2.0% triggered the 8%
@@ -65,6 +45,10 @@ trading:
   # the server-side fallback.
   max_position_age_seconds: 210
   time_exit_only_if_losing: false
+  auto_execute_pump_fade_shorts: true
+  auto_execute_pump_fade_only: true
+  pump_fade_auto_min_confidence: 95
+  pump_fade_auto_leverage: 100
   # Streak protection: pause a symbol for streak_loss_pause_seconds after
   # N consecutive losses. Live data showed 6 XRP SHORTs in a row losing —
   # bot kept doubling down on a wrong-regime call. This catches it.

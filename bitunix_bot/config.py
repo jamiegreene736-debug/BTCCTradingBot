@@ -29,6 +29,12 @@ class TradingCfg:
     max_same_direction: int = 2      # max concurrent LONGs (or SHORTs) — kills correlated risk
     cooldown_seconds: int = 60       # min seconds between actions on same symbol
     max_position_age_seconds: int = 210  # 3m30s pump-fade scalp clock; 0 disables
+    # Pump-fade auto execution. This intentionally only trades the dedicated
+    # parabolic-pump fade setup, never the older general long/short model.
+    auto_execute_pump_fade_shorts: bool = False
+    auto_execute_pump_fade_only: bool = True
+    pump_fade_auto_min_confidence: int = 95
+    pump_fade_auto_leverage: int = 100
     # Streak protection — pause a symbol after N consecutive losses there.
     # Catches "wrong about this symbol's regime" without manual intervention.
     streak_loss_limit: int = 3
@@ -364,6 +370,10 @@ def _validate(cfg: Config) -> None:
         errs.append("trading.max_positions_per_symbol must be >=1")
     if t.cooldown_seconds < 0:
         errs.append("trading.cooldown_seconds must be >=0")
+    if not (0 <= t.pump_fade_auto_min_confidence <= 100):
+        errs.append("trading.pump_fade_auto_min_confidence must be 0..100")
+    if not (1 <= t.pump_fade_auto_leverage <= 200):
+        errs.append("trading.pump_fade_auto_leverage must be 1..200")
     if not (0 < r.stop_loss_pct < 5):
         errs.append(f"risk.stop_loss_pct must be 0..5%, got {r.stop_loss_pct}")
     if not (0 < r.take_profit_r < 20):

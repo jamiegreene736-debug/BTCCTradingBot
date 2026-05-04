@@ -2282,6 +2282,209 @@ class BitunixBot:
                 "as_of": int(time.time()),
             })
 
+    def _build_auto_pump_fade_plan(
+        self,
+        symbol: str,
+        overlay: dict[str, Any],
+        decision: dict[str, Any],
+        *,
+        free_margin: float,
+        effective_leverage: int,
+        dd_risk_mult: float,
+    ) -> OrderPlan | None:
+        """Build the actual market-short order plan for auto pump fades."""
+        sym_u = symbol.upper()
+        meta = self.metas.get(sym_u, _DEFAULT_META)
+        horizons = overlay.get("horizons") or {}
+        h15 = horizons.get("h_15m") or {}
+        h30 = horizons.get("h_30m") or {}
+
+        entry_price = 0.0
+        if self.ob_feed is not None:
+            tob = self.ob_feed.get_top_of_book(sym_u)
+            if tob:
+                entry_price = float(tob[0])  # SELL market should fill near bid.
+        if entry_price <= 0:
+            try:
+                ticker = self.client.ticker(sym_u)
+                if isinstance(ticker, dict):
+                    entry_price = float(ticker.get("lastPrice") or 0)
+            except Exception:
+                entry_price = 0.0
+        entry_price = self._first_float(entry_price, h15.get("price"), overlay.get("price"), h30.get("price"))
+        if entry_price <= 0:
+            return None
+
+        atr = self._first_float(
+            h15.get("atr"),
+            h30.get("atr"),
+            entry_price * self._first_float(h15.get("atr_pct"), h30.get("atr_pct")) / 100.0,
+        )
+        primary = decision.get("primary_signal") or decision.get("primarySignal") or {}
+        reasons = list(primary.get("reasons") or [])
+        signal = Signal(
+            direction="short",
+            score=max(0.01, min(1.0, float(decision.get("confidence_score") or 0) / 100.0)),
+            indicator_score=len(reasons),
+            pattern_score=0.0,
+            reasons=reasons,
+            price=float(entry_price),
+            atr=atr,
+            fire_threshold_used=float(getattr(self.cfg.trading, "pump_fade_auto_min_confidence", 95)) / 100.0,
+            last_bar_high=self._first_float(h15.get("last_bar_high"), h30.get("last_bar_high")),
+            last_bar_low=self._first_float(h15.get("last_bar_low"), h30.get("last_bar_low")),
+        )
+        return build_order(
+            signal,
+            free_margin=free_margin,
+            trading=self.cfg.trading,
+            risk=self.cfg.risk,
+            min_volume=meta.min_qty,
+            volume_step=meta.base_precision,
+            digits=meta.price_precision,
+            effective_leverage=effective_leverage,
+            symbol=sym_u,
+            dd_risk_mult=dd_risk_mult,
+        )
+
+    def _auto_execute_pump_fade_entries(
+        self,
+        *,
+        n_open: int,
+        per_sym_count: dict[str, int],
+        short_count: int,
+        cached_acct: dict[str, Any] | None,
+        dd_risk_mult: float,
+        now: int,
+    ) -> tuple[dict[str, Any] | None, int, int]:
+        """Market-short only the strongest parabolic pump-fade matches.
+
+        This is intentionally separate from the legacy confluence strategy so
+        enabling auto execution does not revive generic LONG/SHORT trading.
+        """
+        trading = self.cfg.trading
+        if not getattr(trading, "auto_execute_pump_fade_shorts", False):
+            return cached_acct, n_open, short_count
+
+        min_conf = int(getattr(trading, "pump_fade_auto_min_confidence", 95))
+        target_lev = int(getattr(trading, "pump_fade_auto_leverage", 100))
+        overlays = self.state.overlay_snapshot()
+
+        for sym in trading.symbols:
+            if self.stop_flag or n_open >= trading.max_open_positions:
+                break
+            sym_u = sym.upper()
+            if per_sym_count.get(sym_u, 0) >= trading.max_positions_per_symbol:
+                continue
+            if short_count >= trading.max_same_direction:
+                self.state.record_skip(f"{sym_u}: same-direction cap ({short_count} shorts already)")
+                continue
+
+            mini_cd = self.mini_cooldown_until.get(sym_u, 0.0)
+            if mini_cd and now < mini_cd:
+                self.state.record_skip(
+                    f"{sym_u}: 2-loss mini-cooldown — {int(mini_cd - now)}s left"
+                )
+                continue
+            paused_until = self.streak_pause_until.get(sym_u, 0)
+            if paused_until and now < paused_until:
+                self.state.record_skip(
+                    f"{sym_u}: streak-paused for {(paused_until - now) // 60}m more"
+                )
+                continue
+            last = self.last_action_at.get(sym_u, 0)
+            if now - last < trading.cooldown_seconds:
+                continue
+
+            overlay = overlays.get(sym_u) or {}
+            decision = (
+                overlay.get("decision")
+                or overlay.get("recommendation")
+                or overlay.get("next_1h")
+                or overlay.get("next1h")
+                or {}
+            )
+            action = str(decision.get("action") or "").lower()
+            setup = str(decision.get("setup") or "")
+            conf = int(decision.get("confidence_score") or decision.get("confidenceScore") or 0)
+            if action != "short" or setup != "parabolic_pump_fade" or conf < min_conf:
+                continue
+
+            spread_pct = self.ob_feed.get_spread_pct(sym_u) if self.ob_feed else None
+            if spread_pct is not None and spread_pct > trading.max_entry_spread_pct:
+                self.state.record_skip(
+                    f"{sym_u}: spread {spread_pct:.3f}% > "
+                    f"{trading.max_entry_spread_pct:.3f}% threshold"
+                )
+                continue
+
+            if cached_acct is None:
+                try:
+                    cached_acct = self.client.account()
+                except Exception as e:
+                    log.error("account fetch failed: %s", e)
+                    self.state.record_error(f"account fetch failed: {e}")
+                    return cached_acct, n_open, short_count
+            free_margin = float(cached_acct.get("available") or 0)
+            if free_margin <= 0:
+                if not self.cfg.is_live:
+                    free_margin = 1000.0
+                else:
+                    self.state.record_skip(f"{sym_u}: no available margin")
+                    return cached_acct, n_open, short_count
+
+            meta = self.metas.get(sym_u, _DEFAULT_META)
+            eff_lev = min(target_lev, meta.max_leverage)
+            plan = self._build_auto_pump_fade_plan(
+                sym_u,
+                overlay,
+                decision,
+                free_margin=free_margin,
+                effective_leverage=eff_lev,
+                dd_risk_mult=dd_risk_mult,
+            )
+            if plan is None:
+                self.state.record_skip(f"{sym_u}: auto pump-fade risk manager rejected")
+                continue
+
+            min_notional = getattr(self.cfg.risk, "min_trade_notional", 0.0)
+            trade_notional = plan.volume * plan.price
+            if min_notional > 0 and trade_notional < min_notional:
+                self.state.record_skip(
+                    f"{sym_u}: notional ${trade_notional:.2f} < min ${min_notional:.2f} — fee drag too high"
+                )
+                continue
+
+            if self.cfg.is_live:
+                try:
+                    self.client.set_leverage(sym_u, eff_lev)
+                except BitunixError as e:
+                    self.state.record_error(
+                        f"{sym_u} auto pump-fade leverage set failed: {e.code} {e.msg}"
+                    )
+                    continue
+                except Exception as e:
+                    self.state.record_error(f"{sym_u} auto pump-fade leverage set failed: {e}")
+                    continue
+
+            self.state.record_signal(
+                f"{sym_u} AUTO PUMP-FADE SHORT conf={conf}/100 "
+                f"lev={eff_lev}x market @ {plan.price}"
+            )
+            if not self._execute(sym_u, plan, force_market=True):
+                continue
+
+            self.last_action_at[sym_u] = now
+            per_sym_count[sym_u] = per_sym_count.get(sym_u, 0) + 1
+            n_open += 1
+            short_count += 1
+            used_margin = (plan.volume * plan.price) / max(plan.leverage, 1)
+            cached_acct["available"] = str(max(0.0, free_margin - used_margin))
+            if n_open >= trading.max_open_positions:
+                break
+
+        return cached_acct, n_open, short_count
+
     def _tick(self) -> None:
         # 0. Update streak-loss state from newly-closed positions.
         self._update_streak_state()
@@ -2387,6 +2590,22 @@ class BitunixBot:
         cached_acct: dict[str, Any] | None = None
 
         now = int(time.time())
+        cached_acct, n_open, short_count = self._auto_execute_pump_fade_entries(
+            n_open=n_open,
+            per_sym_count=per_sym_count,
+            short_count=short_count,
+            cached_acct=cached_acct,
+            dd_risk_mult=dd_risk_mult,
+            now=now,
+        )
+        if n_open >= self.cfg.trading.max_open_positions:
+            return
+        if (
+            getattr(self.cfg.trading, "auto_execute_pump_fade_shorts", False)
+            and getattr(self.cfg.trading, "auto_execute_pump_fade_only", False)
+        ):
+            return
+
         for sym in self.cfg.trading.symbols:
             if self.stop_flag:
                 return
@@ -2815,8 +3034,8 @@ class BitunixBot:
     # and call sites in _tick don't have to change. The legacy
     # implementations have been moved to bitunix_bot/order_executor.py.
 
-    def _execute(self, symbol: str, plan: OrderPlan) -> bool:
-        return self.order_executor.execute(symbol, plan)
+    def _execute(self, symbol: str, plan: OrderPlan, *, force_market: bool = False) -> bool:
+        return self.order_executor.execute(symbol, plan, force_market=force_market)
 
     def _check_pending_limits(self, all_open_positions: list[dict[str, Any]]) -> None:
         self.order_executor.check_pending_limits(all_open_positions)
