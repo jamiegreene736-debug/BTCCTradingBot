@@ -681,7 +681,7 @@ class BitunixBot:
     _OVERLAY_HORIZONS: tuple[tuple[str, str, int, str], ...] = (
         ("h_15m", "1m",  15,   "1m entry"),
         ("h_30m", "5m",  60,   "5m pump"),
-        ("h_1h",  "15m", 180,  "15m context"),
+        ("h_1h",  "15m", 180,  "trend context"),
         ("h_4h",  "1h",  600,  "Next 4h"),
         ("h_8h",  "2h",  1200, "Next 8h"),
         ("h_24h", "4h",  1800, "Next 24h"),
@@ -700,7 +700,7 @@ class BitunixBot:
 
     # Dedicated one-hour decision model for the Chrome overlay. The shortest
     # horizons are too noisy to own the top card, so 1h is the anchor, 30m is
-    # the near-term confirmation, and 15m is only entry-timing / anti-chase
+    # the near-term confirmation, and the 1m entry row is only timing / anti-chase
     # context.
     _NEXT_HOUR_WEIGHTS: tuple[tuple[str, float], ...] = (
         ("h_15m", 0.10),
@@ -898,7 +898,7 @@ class BitunixBot:
         if h15_cvd <= -5.0:
             reasons.append("60s CVD flipped strongly negative into the pump")
         if h15_short_score >= 0.20:
-            reasons.append("15m entry row has real bearish exhaustion votes")
+            reasons.append("1m entry row has real bearish exhaustion votes")
         if h30_short_score >= 0.25:
             reasons.append("30m confirms short-side pressure")
         for reason in h15.get("short_reasons") or []:
@@ -938,7 +938,7 @@ class BitunixBot:
                 "entry_window": False,
                 "checks": [
                     {"key": "data", "label": "Data", "passed": False,
-                     "detail": "waiting for 15m and 30m overlay data"},
+                     "detail": "waiting for 1m entry and 5m pump data"},
                 ],
             }
 
@@ -1164,18 +1164,20 @@ class BitunixBot:
                 "horizons": details,
             }
 
-        confidence_score = min(49, int(status.get("score") or 0))
+        checklist_score = min(49, int(status.get("score") or 0))
         return {
             "action": "wait",
-            "lean": "short" if confidence_score >= 50 else "mixed",
+            "lean": "mixed",
             "confidence": "none",
-            "confidence_score": confidence_score,
-            "confidenceScore": confidence_score,
+            "confidence_score": 0,
+            "confidenceScore": 0,
+            "checklist_score": checklist_score,
+            "checklistScore": checklist_score,
             "bias": 0.0,
             "weighted_long_score": 0.0,
             "weighted_short_score": 0.0,
             "agreement": {"agree": 0, "total": 1 if status.get("usable") else 0, "ratio": 0.0},
-            "warnings": ["waiting for parabolic pump + 15m rejection before shorting"],
+            "warnings": ["waiting for parabolic pump + 1m entry rejection before shorting"],
             "method": "parabolic_pump_fade_short_only",
             "mode": "pump_fade_only",
             "horizon": "3m30s",
@@ -1377,7 +1379,7 @@ class BitunixBot:
             if change_10s >= cls._NEXT_HOUR_CASCADE_10S_PCT:
                 blockers.append("10s liquidation-cascade filter is active")
             chase_blockers = [
-                cls._anti_chase_blocker(lean, h15, label="15m entry move"),
+                cls._anti_chase_blocker(lean, h15, label="entry move"),
                 cls._anti_chase_blocker(lean, h30, label="30m confirmation move"),
             ]
             for chase_blocker in chase_blockers:
@@ -1521,7 +1523,7 @@ class BitunixBot:
             # more before we publish a tradeable long/short card.
             self._overlay_decision_memory[sym_u] = {
                 "shown": {**raw_decision, "action": "wait", "confidence": "none",
-                          "confidence_score": 49, "confidenceScore": 49},
+                          "confidence_score": 0, "confidenceScore": 0},
                 "changed_at": now,
                 "pending_key": f"wait->{raw_action}",
                 "pending_count": 1,
