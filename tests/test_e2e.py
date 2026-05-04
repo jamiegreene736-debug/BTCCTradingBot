@@ -585,7 +585,7 @@ def test_momentum_endpoint_includes_15m_position_countdown():
     r = c.get("/api/momentum", headers={"Authorization": f"Basic {good}"})
     assert r.status_code == 200
     j = r.get_json()
-    assert j["focus_horizon"] == "15m"
+    assert j["focus_horizon"] == "1h"
     assert j["position_close_after_seconds"] == 900
     pos = j["symbols"]["BTCUSDT"]["open_position"]
     assert pos["position_id"] == "POS15"
@@ -3603,22 +3603,22 @@ def test_next_hour_decision_favors_aligned_long():
     assert decision["confidence"] == "high"
     assert 80 <= decision["confidence_score"] <= 99
     assert decision["agreement"]["agree"] == 2
-    assert decision["method"] == "weighted_next_15m"
-    assert decision["horizon"] == "15m"
+    assert decision["method"] == "weighted_next_1h"
+    assert decision["horizon"] == "1h"
 
 
-def test_next_hour_decision_waits_when_15m_trigger_is_mixed():
+def test_next_hour_decision_waits_when_1h_anchor_is_mixed():
     horizons = {
-        "h_15m": {"label": "Next 15m", "long_score": 0.52, "short_score": 0.50, "adx": 30},
+        "h_15m": {"label": "Next 15m", "long_score": 0.85, "short_score": 0.35, "adx": 30},
         "h_30m": {"label": "Next 30m", "long_score": 0.85, "short_score": 0.35, "adx": 30},
-        "h_1h": {"label": "Next 1h", "long_score": 0.75, "short_score": 0.45},
+        "h_1h": {"label": "Next 1h", "long_score": 0.52, "short_score": 0.50},
         "h_4h": {"label": "Next 4h", "long_score": 0.60, "short_score": 0.50},
     }
     decision = BitunixBot._build_next_hour_decision(horizons)
     assert decision["lean"] == "long"
     assert decision["action"] == "wait"
     assert 0 <= decision["confidence_score"] < 50
-    assert "the 15-minute trigger is not decisive" in decision["warnings"]
+    assert "the one-hour anchor is not decisive" in decision["warnings"]
 
 
 def test_next_hour_decision_blocks_chasing_extended_dump():
@@ -3698,14 +3698,16 @@ def test_next_hour_smoothing_requires_confirmed_side_flip():
             "confidence_score": score,
             "confidenceScore": score,
             "warnings": [],
-            "method": "weighted_next_15m",
-            "horizon": "15m",
+            "method": "weighted_next_1h",
+            "horizon": "1h",
             "horizons": [],
         }
 
-    # First actionable tick has to confirm once more before publishing.
-    first = bot._smooth_next_hour_decision("ETHUSDT", decision("short", 90))
-    assert first["action"] == "wait"
+    # First actionable ticks have to persist before publishing.
+    shown = None
+    for _ in range(bot._FOCUS_ENTER_CONFIRM_TICKS - 1):
+        pending = bot._smooth_next_hour_decision("ETHUSDT", decision("short", 90))
+        assert pending["action"] == "wait"
     shown = bot._smooth_next_hour_decision("ETHUSDT", decision("short", 90))
     assert shown["action"] == "short"
 
@@ -3717,7 +3719,7 @@ def test_next_hour_smoothing_requires_confirmed_side_flip():
 
     # Once the prior side has been held long enough and the opposite side is
     # still there, the flip can publish.
-    bot._overlay_decision_memory["ETHUSDT"]["changed_at"] = time.time() - 61
+    bot._overlay_decision_memory["ETHUSDT"]["changed_at"] = time.time() - 301
     flipped = bot._smooth_next_hour_decision("ETHUSDT", decision("long", 85))
     assert flipped["action"] == "long"
     assert flipped["smoothing"]["status"] == "confirmed"
@@ -3732,7 +3734,7 @@ def test_sub_hour_payload_marks_cache_ready_from_core_horizons():
         },
         "h_30m": {
             "label": "Next 30m", "timeframe": "5m",
-            "long_score": 0.40, "short_score": 0.44,
+            "long_score": 0.40, "short_score": 0.47,
             "short_reasons": ["adx(28)"], "stable": False,
         },
         "h_1h": {
@@ -3748,8 +3750,8 @@ def test_sub_hour_payload_marks_cache_ready_from_core_horizons():
     assert payload["filled"] is True
     assert payload["action"] == decision["action"]
     assert len(payload["signals"]) == 2
-    assert payload["signals"][0]["side"] == "short"
-    assert payload["signals"][0]["firing"] is True
+    assert any(signal["side"] == "short" for signal in payload["signals"])
+    assert any(signal["firing"] is True for signal in payload["signals"])
     assert payload["firing_signals"], "expected at least one firing sub-hour signal"
 
 
@@ -3819,7 +3821,7 @@ def test_suggested_trade_plan_prefers_maker_limit_with_exit_target():
     assert plan["take_profit"] > plan["entry_price"]
     assert plan["max_exit_price"] == plan["take_profit"]
     assert plan["valid_for_seconds"] == cfg.trading.post_only_timeout_secs
-    assert plan["horizon"] == "Next 15m"
+    assert plan["horizon"] == "Next 1h"
 
 
 def test_suggested_trade_plan_waits_without_action():
@@ -5717,7 +5719,9 @@ def main() -> int:
         test_factor_score_weighted_combines_groups,
         test_overlay_factor_score_renormalizes_when_flow_absent,
         test_next_hour_decision_favors_aligned_long,
-        test_next_hour_decision_waits_when_15m_trigger_is_mixed,
+        test_next_hour_decision_waits_when_1h_anchor_is_mixed,
+        test_next_hour_decision_blocks_chasing_extended_dump,
+        test_next_hour_decision_blocks_chasing_extended_pump,
         test_next_hour_smoothing_requires_confirmed_side_flip,
         test_sub_hour_payload_marks_cache_ready_from_core_horizons,
         test_sub_hour_payload_exposes_primary_when_no_signal_fires,

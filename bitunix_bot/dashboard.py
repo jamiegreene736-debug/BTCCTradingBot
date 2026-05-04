@@ -535,11 +535,13 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
                      For someone holding a SHORT position, high values are
                      a reversal warning ("exit your short").
         short_score: mirror — "exit your long" warning.
-        next_15m:   dedicated long/short/wait decision for the next 15 minutes.
+        next_hour: dedicated long/short/wait decision for the next hour.
+        next_15m:  compatibility alias for older extension builds.
 
         Note: these are confluence scores, not calibrated probabilities or
-        financial advice. The next_15m action intentionally returns "wait"
-        when the edge is unclear or the 15m scalp filters disagree.
+        financial advice. The next_hour action intentionally returns "wait"
+        when the edge is unclear, the 30m/1h horizons disagree, or the entry is
+        too stretched to chase.
         """
         def _overlay_stale(snapshot: dict[str, Any]) -> bool:
             if not snapshot:
@@ -599,8 +601,8 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
             "tick_seconds": cfg.loop.tick_seconds,
             "timeframe": cfg.trading.timeframe,
             "fire_threshold": cfg.strategy.fire_threshold,
-            "focus_horizon": "15m",
-            "focusHorizon": "15m",
+            "focus_horizon": "1h",
+            "focusHorizon": "1h",
             "position_close_after_seconds": manual_close_after_seconds,
             "positionCloseAfterSeconds": manual_close_after_seconds,
             "open_positions": open_positions,

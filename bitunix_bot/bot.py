@@ -145,9 +145,9 @@ class BitunixBot:
         # 2-tick persistence filter. Shape: {sym: {horizon_key: [(score, side), ...]}}.
         # Keeps the last _PERSISTENCE_WINDOW entries; older ones get trimmed.
         self._overlay_score_history: dict[str, dict[str, list[tuple[float, str]]]] = {}
-        # Per-symbol published 15m decision memory. Raw 15m readings can flip
-        # long/short on one aggressive tape burst; the API should publish a
-        # stable call that every Chrome tab sees consistently.
+        # Per-symbol published one-hour decision memory. Short-term readings can
+        # flip long/short on one aggressive tape burst; the API should publish
+        # a stable call that every Chrome tab sees consistently.
         self._overlay_decision_memory: dict[str, dict[str, Any]] = {}
 
     # ------------------------------------------------------------------ setup
@@ -697,34 +697,34 @@ class BitunixBot:
     # one side to lead by at least this much.
     _BIAS_GAP = 0.05
 
-    # Dedicated 15-minute decision model for the Chrome overlay. The longer
-    # cross-horizon alignment is useful context, but the user is deciding
-    # "should I be long or short for the next 15 minutes?" 1m/5m-derived
-    # horizons drive it; 1h/4h are context only.
+    # Dedicated one-hour decision model for the Chrome overlay. The shortest
+    # horizons are too noisy to own the top card, so 1h is the anchor, 30m is
+    # the near-term confirmation, and 15m is only entry-timing / anti-chase
+    # context.
     _NEXT_HOUR_WEIGHTS: tuple[tuple[str, float], ...] = (
-        ("h_15m", 0.65),
+        ("h_15m", 0.10),
         ("h_30m", 0.25),
-        ("h_1h",  0.08),
-        ("h_4h",  0.02),
+        ("h_1h",  0.45),
+        ("h_4h",  0.20),
     )
-    _NEXT_HOUR_CORE_KEYS = ("h_15m", "h_30m")
-    _NEXT_HOUR_MIN_ACTION_BIAS = 0.065
-    _NEXT_HOUR_MIN_SIDE_GAP = 0.03
+    _NEXT_HOUR_CORE_KEYS = ("h_30m", "h_1h")
+    _NEXT_HOUR_MIN_ACTION_BIAS = 0.08
+    _NEXT_HOUR_MIN_SIDE_GAP = 0.04
     _NEXT_HOUR_CORE_CONFLICT_GAP = 0.04
-    _NEXT_HOUR_CONTEXT_CONFLICT_GAP = 0.07
+    _NEXT_HOUR_CONTEXT_CONFLICT_GAP = 0.08
     _NEXT_HOUR_CHOP_ADX = 25.0
     _NEXT_HOUR_NEWS_ATR_PCT = 0.75
     _NEXT_HOUR_CASCADE_10S_PCT = 1.00
-    # Anti-chase guard for the 15m overlay: a high momentum score after a
-    # vertical move can be the worst entry, because the next 15 minutes often
-    # mean-revert before any continuation becomes tradeable.
+    # Anti-chase guard for market entries: a high momentum score after a
+    # vertical move can be the worst entry, because the next leg often
+    # mean-reverts before any continuation becomes tradeable.
     _NEXT_HOUR_CHASE_3_ATR = 1.15
     _NEXT_HOUR_CHASE_5_ATR = 1.60
     _NEXT_HOUR_CHASE_RANGE_EDGE = 0.20
     _NEXT_HOUR_CHASE_RETEST_ATR = 0.35
-    _FOCUS_ENTER_CONFIRM_TICKS = 2
-    _FOCUS_FLIP_CONFIRM_TICKS = 5
-    _FOCUS_MIN_HOLD_SECONDS = 60
+    _FOCUS_ENTER_CONFIRM_TICKS = 3
+    _FOCUS_FLIP_CONFIRM_TICKS = 12
+    _FOCUS_MIN_HOLD_SECONDS = 300
 
     @classmethod
     def _next_hour_confidence_score(
@@ -737,7 +737,7 @@ class BitunixBot:
         blockers: list[str],
         context_conflicts: list[dict[str, Any]],
     ) -> int:
-        """Map the 15-minute decision geometry to a human 0-100 confidence.
+        """Map the one-hour decision geometry to a human 0-100 confidence.
 
         This is not a calibrated win probability. It is a readability score:
         directional edge strength + core-horizon agreement, with explicit
@@ -842,12 +842,12 @@ class BitunixBot:
 
     @classmethod
     def _build_next_hour_decision(cls, horizons: dict[str, dict[str, Any]]) -> dict[str, Any]:
-        """Build a tradeable 15-minute long/short/wait decision from horizons.
+        """Build a tradeable one-hour long/short/wait decision from horizons.
 
         This is intentionally stricter than raw overlay scores. A professional
         signal should be allowed to say "wait" when edge is too small, when
-        15m and 30m disagree, or when tape/chop filters say the setup is too
-        noisy for a 15-minute scalp.
+        30m and 1h disagree, or when the setup is too noisy for a one-hour
+        trade.
         """
         details: list[dict[str, Any]] = []
         weighted_long = 0.0
@@ -889,8 +889,8 @@ class BitunixBot:
                 "weighted_short_score": 0.0,
                 "agreement": {"agree": 0, "total": 0, "ratio": 0.0},
                 "warnings": ["no usable horizon data"],
-                "method": "weighted_next_15m",
-                "horizon": "15m",
+                "method": "weighted_next_1h",
+                "horizon": "1h",
                 "horizons": details,
             }
 
@@ -913,40 +913,44 @@ class BitunixBot:
         if lean == "mixed" or abs_bias < cls._NEXT_HOUR_MIN_ACTION_BIAS:
             blockers.append("weighted edge is too small")
 
-        trigger = next((d for d in details if d["key"] == "h_15m"), None)
+        trigger = next((d for d in details if d["key"] == "h_1h"), None)
         if trigger and lean != "mixed":
             trigger_gap = float(trigger["gap"])
             trigger_side = cls._gap_side(trigger_gap, cls._NEXT_HOUR_CORE_CONFLICT_GAP)
             if trigger_side == "mixed":
-                blockers.append("the 15-minute trigger is not decisive")
+                blockers.append("the one-hour anchor is not decisive")
             elif trigger_side != lean:
-                blockers.append("the 15-minute horizon disagrees")
+                blockers.append("the one-hour anchor disagrees")
 
         if core_total >= 2 and core_agree < 2:
-            blockers.append("15m and 30m horizons are not aligned")
+            blockers.append("30m and 1h horizons are not aligned")
 
         h15 = horizons.get("h_15m") or {}
         h30 = horizons.get("h_30m") or {}
+        h1 = horizons.get("h_1h") or {}
         if lean != "mixed":
-            side_reasons = list(h15.get(f"{lean}_reasons") or [])
+            side_reasons = (
+                list(h15.get(f"{lean}_reasons") or [])
+                + list(h30.get(f"{lean}_reasons") or [])
+            )
             flow_tags = ("agg", "cvd_real", "ob_imb", "absorb")
             has_flow = any(any(tag in str(reason) for tag in flow_tags) for reason in side_reasons)
-            try:
-                h15_adx = float(h15.get("adx") if h15.get("adx") is not None else "nan")
-            except (TypeError, ValueError):
-                h15_adx = float("nan")
             try:
                 h30_adx = float(h30.get("adx") if h30.get("adx") is not None else "nan")
             except (TypeError, ValueError):
                 h30_adx = float("nan")
+            try:
+                h1_adx = float(h1.get("adx") if h1.get("adx") is not None else "nan")
+            except (TypeError, ValueError):
+                h1_adx = float("nan")
             low_adx_pair = (
-                not np.isnan(h15_adx)
-                and not np.isnan(h30_adx)
-                and h15_adx < cls._NEXT_HOUR_CHOP_ADX
+                not np.isnan(h30_adx)
+                and not np.isnan(h1_adx)
                 and h30_adx < cls._NEXT_HOUR_CHOP_ADX
+                and h1_adx < cls._NEXT_HOUR_CHOP_ADX
             )
             if low_adx_pair and not has_flow:
-                blockers.append("15m chop filter: ADX below 25 without flow confirmation")
+                blockers.append("1h chop filter: ADX below 25 without flow confirmation")
 
             aggression = h15.get("aggression_10s")
             real_cvd = h15.get("real_cvd")
@@ -958,16 +962,16 @@ class BitunixBot:
                 cvd_f = float(real_cvd) if real_cvd is not None else None
             except (TypeError, ValueError):
                 cvd_f = None
-            if agg_f is not None and abs(agg_f) >= 0.30:
+            if agg_f is not None and abs(agg_f) >= 0.60:
                 if lean == "long" and agg_f < -0.30:
-                    blockers.append("10s tape aggression opposes the long")
+                    warnings.append("10s tape aggression opposes the long entry")
                 elif lean == "short" and agg_f > 0.30:
-                    blockers.append("10s tape aggression opposes the short")
-            if cvd_f is not None and abs(cvd_f) >= 1.0:
+                    warnings.append("10s tape aggression opposes the short entry")
+            if cvd_f is not None and abs(cvd_f) >= 2.0:
                 if lean == "long" and cvd_f < 0:
-                    blockers.append("60s CVD opposes the long")
+                    warnings.append("60s CVD opposes the long entry")
                 elif lean == "short" and cvd_f > 0:
-                    blockers.append("60s CVD opposes the short")
+                    warnings.append("60s CVD opposes the short entry")
 
             try:
                 atr_pct = float(h15.get("atr_pct") or 0.0)
@@ -978,7 +982,7 @@ class BitunixBot:
             except (TypeError, ValueError):
                 change_10s = 0.0
             if atr_pct >= cls._NEXT_HOUR_NEWS_ATR_PCT:
-                blockers.append("15m volatility spike is too hot")
+                blockers.append("short-term volatility spike is too hot")
             if change_10s >= cls._NEXT_HOUR_CASCADE_10S_PCT:
                 blockers.append("10s liquidation-cascade filter is active")
             chase_blocker = cls._anti_chase_blocker(lean, h15)
@@ -987,13 +991,13 @@ class BitunixBot:
 
         context_conflicts = [
             d for d in details
-            if d["key"] in ("h_1h", "h_4h")
+            if d["key"] in ("h_4h", "h_8h")
             and lean != "mixed"
             and d["side"] not in ("mixed", lean)
             and abs(float(d["gap"])) >= cls._NEXT_HOUR_CONTEXT_CONFLICT_GAP
         ]
         if context_conflicts:
-            warnings.append("higher-timeframe context leans against the 15-minute trade")
+            warnings.append("higher-timeframe context leans against the one-hour trade")
 
         action = "wait"
         confidence = "none"
@@ -1032,8 +1036,8 @@ class BitunixBot:
                 "ratio": round(core_agree / max(1, core_total), 3),
             },
             "warnings": warnings + blockers,
-            "method": "weighted_next_15m",
-            "horizon": "15m",
+            "method": "weighted_next_1h",
+            "horizon": "1h",
             "horizons": details,
         }
 
@@ -1042,12 +1046,12 @@ class BitunixBot:
         symbol: str,
         raw_decision: dict[str, Any],
     ) -> dict[str, Any]:
-        """Publish a stable 15m decision instead of raw one-tick side flips.
+        """Publish a stable one-hour decision instead of raw one-tick flips.
 
         A direct SHORT -> LONG publication is expensive for the human using the
         overlay: it invites whipsaw trades. Opposite actionable sides must
         persist across several bot ticks and the previous published side must
-        be at least a minute old. While the flip is proving itself, publish
+        be held for several minutes. While the flip is proving itself, publish
         WAIT with an explicit confirmation warning.
         """
         sym_u = symbol.upper()
@@ -1089,10 +1093,10 @@ class BitunixBot:
             warning = (
                 f"{raw_action.upper()} confirming "
                 f"({pending_count}/{required_count}); "
-                f"holding WAIT until the 15m flip is stable"
+                f"holding WAIT until the 1h flip is stable"
             )
             if shown_action in ("long", "short") and held_seconds < self._FOCUS_MIN_HOLD_SECONDS:
-                warning += f" and prior {shown_action.upper()} is at least 60s old"
+                warning += f" and prior {shown_action.upper()} is at least 5m old"
             warnings = [warning] + list(raw_decision.get("warnings") or [])
             return {
                 **raw_decision,
@@ -1176,9 +1180,9 @@ class BitunixBot:
         """Compatibility payload for the Chrome overlay's sub-hour card.
 
         Older overlay builds look for a "sub-hour cache" rather than the newer
-        `next_hour` decision. Treat the 15m/30m/1h horizons as that cache and
-        expose a simple ready/action/signals shape so the UI can render a real
-        decision instead of sitting on WARMING UP.
+        `next_hour` decision. Expose the core confirmation horizons in that
+        shape so the UI can render a real decision instead of sitting on
+        WARMING UP.
         """
         signals: list[dict[str, Any]] = []
         for key in cls._NEXT_HOUR_CORE_KEYS:
@@ -1315,15 +1319,12 @@ class BitunixBot:
                 "status": "wait",
                 "order_type": "WAIT",
                 "orderType": "WAIT",
-                "reason": "no actionable next-15m long/short setup",
+                "reason": "no actionable next-1h long/short setup",
             }
 
         meta = self.metas.get(sym_u, _DEFAULT_META)
         side = "BUY" if action == "long" else "SELL"
-        plan_horizon_key = next(
-            (key for key in ("h_15m", "h_30m", "h_1h") if key in horizons),
-            None,
-        )
+        plan_horizon_key = next((key for key in ("h_1h", "h_30m", "h_15m") if key in horizons), None)
         plan_horizon = horizons.get(plan_horizon_key or "", {})
         reference_price = self._first_float(
             horizons.get("h_15m", {}).get("price"),
@@ -1748,8 +1749,10 @@ class BitunixBot:
                 "horizons": horizons,
                 "horizon_order": [k for k, _, _, _ in self._OVERLAY_HORIZONS if k in horizons],
                 "alignment": alignment,
-                "focus_horizon": "15m",
-                "focusHorizon": "15m",
+                "focus_horizon": "1h",
+                "focusHorizon": "1h",
+                "next_1h": next_hour,
+                "next1h": next_hour,
                 "next_15m": next_hour,
                 "next15m": next_hour,
                 "fifteen_minute": next_hour,
