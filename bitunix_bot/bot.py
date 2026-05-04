@@ -947,6 +947,8 @@ class BitunixBot:
                 "trend_not_too_clean": False,
                 "entry_window": False,
                 "pump_watch": False,
+                "pre_pump_building": False,
+                "pre_pump_score": 0,
                 "checks": [
                     {"key": "data", "label": "Data", "passed": False,
                      "detail": "waiting for 1m entry and 5m pump data"},
@@ -970,8 +972,10 @@ class BitunixBot:
         h1_adx = cls._float_field(h1, "adx", default=99.0)
         h15_long_score = cls._float_field(h15, "long_score", "longScore")
         h15_short_score = cls._float_field(h15, "short_score", "shortScore")
+        h30_long_score = cls._float_field(h30, "long_score", "longScore")
         h30_short_score = cls._float_field(h30, "short_score", "shortScore")
         h15_cvd = cls._float_field(h15, "real_cvd", "realCvd")
+        h15_aggression = cls._float_field(h15, "aggression_10s", "aggression10s")
         h15_move_3_atr = cls._float_field(h15, "move_3_atr", "move3Atr")
         h15_move_10_atr = cls._float_field(h15, "move_10_atr", "move10Atr")
         h15_move_15_atr = cls._float_field(h15, "move_15_atr", "move15Atr")
@@ -980,6 +984,8 @@ class BitunixBot:
         h15_up_closes_10 = int(cls._float_field(h15, "up_closes_10", "upCloses10"))
         h15_up_closes_15 = int(cls._float_field(h15, "up_closes_15", "upCloses15"))
         h15_short_reasons = [str(r).lower() for r in h15.get("short_reasons") or []]
+        h15_long_reasons = [str(r).lower() for r in h15.get("long_reasons") or []]
+        h30_long_reasons = [str(r).lower() for r in h30.get("long_reasons") or []]
 
         bearish_pattern = any(
             tag in reason
@@ -1033,6 +1039,28 @@ class BitunixBot:
                 or (h15_move_15_atr >= 0.80 and h15_up_closes_15 >= 6)
             )
         )
+        positive_tape = h15_cvd >= 2.0 or h15_aggression >= 0.35
+        lift_tags = ("vol_spike", "squeeze_up", "supertrend_up", "cvd_real+", "agg+")
+        momentum_tags = any(
+            tag in reason
+            for reason in (h15_long_reasons + h30_long_reasons)
+            for tag in lift_tags
+        )
+        early_lift = (
+            move_3_atr >= 0.25
+            or move_5_atr >= 0.35
+            or h15_move_3_atr >= 0.18
+            or h15_move_10_atr >= 0.45
+        )
+        not_blown_off_yet = range_pos < 0.78 and high_dist > 0.45
+        pre_pump_votes = sum((
+            range_pos >= 0.45,
+            bool(early_lift),
+            bool(positive_tape or momentum_tags),
+            h15_long_score >= h15_short_score + 0.10
+                or h30_long_score >= h30_short_score + 0.10,
+            bool(not_blown_off_yet),
+        ))
         session_pump = (
             range_pos >= 0.78
             and (
@@ -1092,6 +1120,10 @@ class BitunixBot:
                 or h15_long_score >= h15_short_score + 0.10
                 or h15_cvd > 0.0
             )
+        )
+        pre_pump_building = (
+            pre_pump_votes >= 4
+            and not pump_watch
         )
         still_squeezing_up = (
             h15_move_3_atr >= 0.45
@@ -1165,6 +1197,8 @@ class BitunixBot:
             "h15_short_score": round(h15_short_score, 4),
             "h30_short_score": round(h30_short_score, 4),
             "h15_long_score": round(h15_long_score, 4),
+            "h30_long_score": round(h30_long_score, 4),
+            "h15_aggression": round(h15_aggression, 4),
             "h15_move_3_atr": round(h15_move_3_atr, 4),
             "h15_move_10_atr": round(h15_move_10_atr, 4),
             "h15_move_15_atr": round(h15_move_15_atr, 4),
@@ -1183,6 +1217,10 @@ class BitunixBot:
             "entry_window": bool(entry_window),
             "micro_rejection": bool(micro_rejection),
             "pump_watch": bool(pump_watch),
+            "pre_pump_building": bool(pre_pump_building),
+            "prePumpBuilding": bool(pre_pump_building),
+            "pre_pump_score": int(min(49, max(0, pre_pump_votes * 10))),
+            "prePumpScore": int(min(49, max(0, pre_pump_votes * 10))),
             "cooled_off_recovery": bool(cooled_off_recovery),
             "still_squeezing_up": bool(still_squeezing_up),
             "checks": checks,
@@ -1257,9 +1295,16 @@ class BitunixBot:
 
         checklist_score = min(49, int(status.get("score") or 0))
         pump_watch = bool(status.get("pump_watch"))
+        pre_pump = bool(status.get("pre_pump_building"))
         warnings = ["waiting for parabolic pump + 1m entry rejection before shorting"]
+        setup_stage = "hunting"
         if pump_watch:
             warnings = ["pump detected; waiting for near-high 1m rejection before shorting"]
+            setup_stage = "pump_watch"
+        elif pre_pump:
+            warnings = ["pump building; wait for blow-off high, then bearish rejection before shorting"]
+            setup_stage = "pump_building"
+            checklist_score = max(checklist_score, int(status.get("pre_pump_score") or 0))
         return {
             "action": "wait",
             "lean": "mixed",
@@ -1268,8 +1313,12 @@ class BitunixBot:
             "confidenceScore": 0,
             "checklist_score": checklist_score,
             "checklistScore": checklist_score,
-            "setup_stage": "pump_watch" if pump_watch else "hunting",
-            "setupStage": "pump_watch" if pump_watch else "hunting",
+            "setup_stage": setup_stage,
+            "setupStage": setup_stage,
+            "pre_pump_building": pre_pump,
+            "prePumpBuilding": pre_pump,
+            "pre_pump_score": int(status.get("pre_pump_score") or 0),
+            "prePumpScore": int(status.get("pre_pump_score") or 0),
             "bias": 0.0,
             "weighted_long_score": 0.0,
             "weighted_short_score": 0.0,

@@ -4109,6 +4109,44 @@ def test_micro_pump_watch_flags_small_fast_pop():
     assert checks["entry_window"]["passed"] is False
 
 
+def test_pre_pump_building_flags_buy_pressure_before_pump_watch():
+    horizons = {
+        "h_15m": {
+            "label": "1m entry",
+            "long_score": 0.46,
+            "short_score": 0.20,
+            "long_reasons": ["cvd_real+8.0", "agg+0.42"],
+            "real_cvd": 8.0,
+            "aggression_10s": 0.42,
+            "move_3_atr": 0.22,
+            "move_10_atr": 0.48,
+            "up_closes_5": 3,
+            "down_closes_5": 1,
+        },
+        "h_30m": {
+            "label": "5m pump",
+            "long_score": 0.38,
+            "short_score": 0.10,
+            "long_reasons": ["vol_spike", "supertrend_up"],
+            "move_3_atr": 0.30,
+            "move_5_atr": 0.38,
+            "position_in_recent_range_15": 0.55,
+            "distance_from_recent_high_atr": 1.20,
+            "up_closes_5": 2,
+            "up_candles_5": 2,
+        },
+        "h_1h": {"label": "Trend context", "long_score": 0.30, "short_score": 0.10, "adx": 26},
+    }
+
+    decision = BitunixBot._build_pump_fade_only_decision(horizons)
+
+    assert decision["action"] == "wait"
+    assert decision["setup_stage"] == "pump_building"
+    assert decision["pre_pump_building"] is True
+    assert decision["pre_pump_score"] >= 40
+    assert "pump building" in decision["warnings"][0]
+
+
 def test_micro_pump_fade_publishes_high_confidence_short():
     horizons = {
         "h_15m": {
