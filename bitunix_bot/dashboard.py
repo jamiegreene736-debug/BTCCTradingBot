@@ -41,7 +41,7 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
     app = Flask(__name__)
     state = get_state()
     password = os.environ.get("DASHBOARD_PASSWORD", "")
-    manual_close_after_seconds = 15 * 60
+    manual_close_after_seconds = int(cfg.trading.max_position_age_seconds or 450)
 
     def _float(value: Any, default: float = 0.0) -> float:
         try:
@@ -140,7 +140,7 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
             order_type="MARKET",
             trade_side="CLOSE",
             reduce_only=True,
-            client_id=f"ext15m-close-{pid or symbol}-{int(time.time())}",
+            client_id=f"ext730-close-{pid or symbol}-{int(time.time())}",
         )
 
     # ------------------------------------------------------------------ auth

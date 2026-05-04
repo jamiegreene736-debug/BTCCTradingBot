@@ -25,7 +25,7 @@ fundamentals — only price action and indicators.
 * **Multi-symbol, multi-position**: trades a list of symbols simultaneously
   with a global position cap, per-symbol cap, and per-symbol cooldown.
 * **Time-based exit**: force-closes positions older than
-  `max_position_age_seconds` (default 15 min). Prevents stale trades from
+  `max_position_age_seconds` (default 7m30s). Prevents stale trades from
   bleeding funding fees.
 * **Bar-dedupe**: within the same candle, a symbol is only evaluated once —
   no double-firing on the same bar.
@@ -82,7 +82,7 @@ Logs stream to stdout and `logs/bot.log`.
 | `trading`  | `max_open_positions`      | `4`                         | Global cap across all symbols |
 | `trading`  | `max_positions_per_symbol`| `1`                         | Never pyramid into the same trade |
 | `trading`  | `cooldown_seconds`        | `60`                        | Min seconds between trades on same symbol |
-| `trading`  | `max_position_age_seconds`| `900`                       | Force-close after 15min (0 disables) |
+| `trading`  | `max_position_age_seconds`| `450`                       | Force-close after 7m30s (0 disables) |
 | `risk`     | `stop_loss_pct`           | `0.25`                      | Tight SL as % of entry price |
 | `risk`     | `take_profit_r`           | `5.0`                       | TP distance = R × SL distance |
 | `risk`     | `use_atr`                 | `false`                     | Flip to true for ATR-based SL/TP |

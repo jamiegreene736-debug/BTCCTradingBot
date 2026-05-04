@@ -787,25 +787,31 @@ class BitunixBot:
         return default
 
     @classmethod
-    def _anti_chase_blocker(cls, lean: str, h15: dict[str, Any]) -> str | None:
-        if lean not in ("long", "short") or not h15:
+    def _anti_chase_blocker(
+        cls,
+        lean: str,
+        row: dict[str, Any],
+        *,
+        label: str = "move",
+    ) -> str | None:
+        if lean not in ("long", "short") or not row:
             return None
 
-        move_3_atr = cls._float_field(h15, "move_3_atr", "move3Atr")
-        move_5_atr = cls._float_field(h15, "move_5_atr", "move5Atr")
+        move_3_atr = cls._float_field(row, "move_3_atr", "move3Atr")
+        move_5_atr = cls._float_field(row, "move_5_atr", "move5Atr")
         range_pos = cls._float_field(
-            h15, "position_in_recent_range_15", "positionInRecentRange15", default=0.5
+            row, "position_in_recent_range_15", "positionInRecentRange15", default=0.5
         )
         low_dist = cls._float_field(
-            h15, "distance_from_recent_low_atr", "distanceFromRecentLowAtr", default=999.0
+            row, "distance_from_recent_low_atr", "distanceFromRecentLowAtr", default=999.0
         )
         high_dist = cls._float_field(
-            h15, "distance_from_recent_high_atr", "distanceFromRecentHighAtr", default=999.0
+            row, "distance_from_recent_high_atr", "distanceFromRecentHighAtr", default=999.0
         )
-        down_closes = int(cls._float_field(h15, "down_closes_5", "downCloses5"))
-        up_closes = int(cls._float_field(h15, "up_closes_5", "upCloses5"))
-        down_candles = int(cls._float_field(h15, "down_candles_5", "downCandles5"))
-        up_candles = int(cls._float_field(h15, "up_candles_5", "upCandles5"))
+        down_closes = int(cls._float_field(row, "down_closes_5", "downCloses5"))
+        up_closes = int(cls._float_field(row, "up_closes_5", "upCloses5"))
+        down_candles = int(cls._float_field(row, "down_candles_5", "downCandles5"))
+        up_candles = int(cls._float_field(row, "up_candles_5", "upCandles5"))
 
         extended_down = (
             move_5_atr <= -cls._NEXT_HOUR_CHASE_5_ATR
@@ -835,10 +841,93 @@ class BitunixBot:
         )
 
         if lean == "short" and extended_down and pinned_low and one_way_down:
-            return "anti-chase: move is already extended down near local lows; wait for bounce/retest before shorting"
+            return f"anti-chase: {label} is already extended down near local lows; wait for bounce/retest before shorting"
         if lean == "long" and extended_up and pinned_high and one_way_up:
-            return "anti-chase: move is already extended up near local highs; wait for pullback/retest before longing"
+            return f"anti-chase: {label} is already extended up near local highs; wait for pullback/retest before longing"
         return None
+
+    @classmethod
+    def _parabolic_pump_short_setup(
+        cls,
+        h15: dict[str, Any],
+        h30: dict[str, Any],
+        h1: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        """Detect the user's desired quick fade: a hard pump into exhaustion.
+
+        This is deliberately a reversal override, not a trend-following long.
+        It requires a large 30m impulse, price in the upper local range, and
+        at least one short-term exhaustion tell such as negative CVD or a
+        bearish rejection/pattern on the 15m entry row.
+        """
+        if not h15 or not h30:
+            return None
+
+        move_3_atr = cls._float_field(h30, "move_3_atr", "move3Atr")
+        move_5_atr = cls._float_field(h30, "move_5_atr", "move5Atr")
+        range_pos = cls._float_field(
+            h30, "position_in_recent_range_15", "positionInRecentRange15", default=0.5
+        )
+        high_dist = cls._float_field(
+            h30, "distance_from_recent_high_atr", "distanceFromRecentHighAtr", default=999.0
+        )
+        up_closes = int(cls._float_field(h30, "up_closes_5", "upCloses5"))
+        up_candles = int(cls._float_field(h30, "up_candles_5", "upCandles5"))
+        h1_adx = cls._float_field(h1, "adx", default=99.0)
+        h15_short_score = cls._float_field(h15, "short_score", "shortScore")
+        h15_cvd = cls._float_field(h15, "real_cvd", "realCvd")
+        h15_short_reasons = [str(r).lower() for r in h15.get("short_reasons") or []]
+
+        pump = (
+            (move_5_atr >= 3.0 or move_3_atr >= 2.0)
+            and range_pos >= 0.78
+            and (up_closes >= 4 or up_candles >= 4)
+        )
+        not_far_from_high = high_dist <= 1.25 or range_pos >= 0.84
+        exhaustion = (
+            h15_cvd <= -2.0
+            or h15_short_score >= 0.12
+            or any(
+                tag in reason
+                for reason in h15_short_reasons
+                for tag in ("tweezer_top", "bear", "rsi_bearish", "cvd_real-")
+            )
+        )
+        trend_not_too_clean = h1_adx < 35.0 or h15_cvd <= -2.0
+
+        if not (pump and not_far_from_high and exhaustion and trend_not_too_clean):
+            return None
+
+        confidence = 82
+        confidence += min(8, max(0, int(round((move_5_atr - 3.0) * 2))))
+        if range_pos >= 0.85:
+            confidence += 4
+        if h15_cvd <= -2.0:
+            confidence += 4
+        if h15_short_score >= 0.15:
+            confidence += 2
+        confidence = max(80, min(96, confidence))
+
+        reasons = [
+            f"parabolic pump: 30m move +{move_5_atr:.2f} ATR over 5 bars",
+            f"price high in local range ({range_pos * 100:.0f}%)",
+        ]
+        if h15_cvd <= -2.0:
+            reasons.append("60s CVD flipped negative into the pump")
+        if h15_short_score >= 0.12:
+            reasons.append("15m entry row has bearish exhaustion votes")
+        for reason in h15.get("short_reasons") or []:
+            if reason not in reasons:
+                reasons.append(str(reason))
+
+        return {
+            "action": "short",
+            "confidence_score": confidence,
+            "warning": "parabolic pump fade: wait for quick short, not a late long",
+            "reasons": reasons[:8],
+            "move_5_atr": round(move_5_atr, 4),
+            "range_pos": round(range_pos, 4),
+        }
 
     @classmethod
     def _build_next_hour_decision(cls, horizons: dict[str, dict[str, Any]]) -> dict[str, Any]:
@@ -928,6 +1017,49 @@ class BitunixBot:
         h15 = horizons.get("h_15m") or {}
         h30 = horizons.get("h_30m") or {}
         h1 = horizons.get("h_1h") or {}
+        pump_fade = cls._parabolic_pump_short_setup(h15, h30, h1)
+        if pump_fade:
+            confidence_score = int(pump_fade["confidence_score"])
+            primary_signal = {
+                "key": "parabolic_pump_fade",
+                "label": "Pump fade",
+                "timeframe": "7m30s",
+                "side": "short",
+                "score": round(confidence_score / 100.0, 4),
+                "long_score": 0.0,
+                "short_score": round(confidence_score / 100.0, 4),
+                "gap": round(-(confidence_score / 100.0), 4),
+                "stable": True,
+                "firing": True,
+                "reasons": pump_fade["reasons"],
+            }
+            return {
+                "action": "short",
+                "lean": "short",
+                "confidence": "high" if confidence_score >= 80 else "medium",
+                "confidence_score": confidence_score,
+                "confidenceScore": confidence_score,
+                "bias": round(-confidence_score / 100.0, 4),
+                "weighted_long_score": round(weighted_long, 4),
+                "weighted_short_score": round(weighted_short, 4),
+                "agreement": {
+                    "agree": 1,
+                    "total": max(1, core_total),
+                    "ratio": round(1 / max(1, core_total), 3),
+                },
+                "warnings": [str(pump_fade["warning"])],
+                "method": "parabolic_pump_fade_next_1h",
+                "horizon": "7m30s",
+                "setup": "parabolic_pump_fade",
+                "setupLabel": "Parabolic pump fade",
+                "suggested_lev": 100,
+                "suggestedLev": 100,
+                "plan_horizon_key": "h_15m",
+                "planHorizonKey": "h_15m",
+                "primary_signal": primary_signal,
+                "primarySignal": primary_signal,
+                "horizons": details,
+            }
         if lean != "mixed":
             side_reasons = (
                 list(h15.get(f"{lean}_reasons") or [])
@@ -985,9 +1117,13 @@ class BitunixBot:
                 blockers.append("short-term volatility spike is too hot")
             if change_10s >= cls._NEXT_HOUR_CASCADE_10S_PCT:
                 blockers.append("10s liquidation-cascade filter is active")
-            chase_blocker = cls._anti_chase_blocker(lean, h15)
-            if chase_blocker:
-                blockers.append(chase_blocker)
+            chase_blockers = [
+                cls._anti_chase_blocker(lean, h15, label="15m entry move"),
+                cls._anti_chase_blocker(lean, h30, label="30m confirmation move"),
+            ]
+            for chase_blocker in chase_blockers:
+                if chase_blocker:
+                    blockers.append(chase_blocker)
 
         context_conflicts = [
             d for d in details
@@ -1233,6 +1369,11 @@ class BitunixBot:
                     "reason": "strongest sub-hour lean below alarm threshold",
                     "threshold": cls._ALARM_AT,
                 }
+        decision_primary = decision.get("primary_signal") or decision.get("primarySignal")
+        if isinstance(decision_primary, dict):
+            primary = dict(decision_primary)
+            if primary.get("firing") and primary not in actual_firing:
+                actual_firing = [primary] + actual_firing
         # Compatibility: older overlay builds use the presence of
         # `firing_signals` as "cache filled". If nothing clears the alarm
         # threshold yet, expose the strongest candidate there too while keeping
@@ -1324,7 +1465,13 @@ class BitunixBot:
 
         meta = self.metas.get(sym_u, _DEFAULT_META)
         side = "BUY" if action == "long" else "SELL"
-        plan_horizon_key = next((key for key in ("h_1h", "h_30m", "h_15m") if key in horizons), None)
+        preferred_horizon = str(
+            decision.get("plan_horizon_key") or decision.get("planHorizonKey") or ""
+        )
+        plan_horizon_key = (
+            preferred_horizon if preferred_horizon in horizons
+            else next((key for key in ("h_1h", "h_30m", "h_15m") if key in horizons), None)
+        )
         plan_horizon = horizons.get(plan_horizon_key or "", {})
         reference_price = self._first_float(
             horizons.get("h_15m", {}).get("price"),

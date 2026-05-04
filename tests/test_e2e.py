@@ -140,7 +140,7 @@ def fresh_cfg():
     cfg.trading.use_post_only_entries = False
     cfg.trading.cooldown_seconds = 60
     # Most live-mode fixture tests exercise caps, SL ratchets, stale exits,
-    # etc. Disable the production 15m hard-close clock unless a test opts in.
+    # etc. Disable the production hard-close clock unless a test opts in.
     cfg.trading.max_position_age_seconds = 0
     cfg.trading.time_exit_only_if_losing = True
     cfg.risk.partial_tp_enabled = True
@@ -399,7 +399,7 @@ def test_time_based_exit_LETS_WINNER_RUN():
 
 
 def test_time_based_exit_closes_winner_when_loss_only_disabled():
-    """The 15m manual-trade clock closes stale positions regardless of PnL."""
+    """The hard manual-trade clock closes stale positions regardless of PnL."""
     reset_state()
     cfg = fresh_cfg()
     cfg.mode = "live"
@@ -558,7 +558,7 @@ def test_momentum_endpoint_lazily_warms_empty_overlay():
     assert "BTCUSDT" in j["symbols"]
 
 
-def test_momentum_endpoint_includes_15m_position_countdown():
+def test_momentum_endpoint_includes_position_countdown():
     reset_state()
     cfg = fresh_cfg()
     client = make_mock_client()
@@ -586,10 +586,10 @@ def test_momentum_endpoint_includes_15m_position_countdown():
     assert r.status_code == 200
     j = r.get_json()
     assert j["focus_horizon"] == "1h"
-    assert j["position_close_after_seconds"] == 900
+    assert j["position_close_after_seconds"] == 450
     pos = j["symbols"]["BTCUSDT"]["open_position"]
     assert pos["position_id"] == "POS15"
-    assert 800 <= pos["seconds_remaining"] <= 900
+    assert 350 <= pos["seconds_remaining"] <= 450
 
 
 def test_close_symbol_endpoint_market_closes_full_matching_position():
@@ -3685,6 +3685,50 @@ def test_next_hour_decision_blocks_chasing_extended_pump():
     assert any("anti-chase" in warning for warning in decision["warnings"])
 
 
+def test_next_hour_decision_shorts_parabolic_30m_pump_fade():
+    horizons = {
+        "h_15m": {
+            "label": "Next 15m",
+            "long_score": 0.38,
+            "short_score": 0.16,
+            "adx": 56,
+            "long_reasons": ["supertrend_up", "adx(56)"],
+            "move_3_atr": 0.45,
+            "move_5_atr": 0.90,
+            "position_in_recent_range_15": 0.63,
+            "up_closes_5": 4,
+            "up_candles_5": 4,
+            "real_cvd": -20000.0,
+        },
+        "h_30m": {
+            "label": "Next 30m",
+            "long_score": 0.78,
+            "short_score": 0.05,
+            "adx": 30,
+            "long_reasons": ["supertrend_up", "adx(30)", "PAT:marubozu_bull"],
+            "move_3_atr": 2.40,
+            "move_5_atr": 4.20,
+            "position_in_recent_range_15": 0.85,
+            "distance_from_recent_high_atr": 0.93,
+            "up_closes_5": 5,
+            "up_candles_5": 5,
+        },
+        "h_1h": {"label": "Next 1h", "long_score": 0.34, "short_score": 0.15, "adx": 28},
+        "h_4h": {"label": "Next 4h", "long_score": 0.33, "short_score": 0.00},
+    }
+
+    decision = BitunixBot._build_next_hour_decision(horizons)
+
+    assert decision["lean"] == "short"
+    assert decision["action"] == "short"
+    assert decision["setup"] == "parabolic_pump_fade"
+    assert decision["method"] == "parabolic_pump_fade_next_1h"
+    assert decision["plan_horizon_key"] == "h_15m"
+    assert decision["suggested_lev"] == 100
+    assert 80 <= decision["confidence_score"] <= 96
+    assert any("parabolic pump fade" in warning for warning in decision["warnings"])
+
+
 def test_next_hour_smoothing_requires_confirmed_side_flip():
     reset_state()
     cfg = fresh_cfg()
@@ -5619,7 +5663,7 @@ def main() -> int:
         test_live_mode_actually_calls_place_order,
         test_dashboard_routes_and_auth,
         test_momentum_endpoint_lazily_warms_empty_overlay,
-        test_momentum_endpoint_includes_15m_position_countdown,
+        test_momentum_endpoint_includes_position_countdown,
         test_close_symbol_endpoint_market_closes_full_matching_position,
         test_close_symbol_endpoint_falls_back_to_flash_close_if_market_fails,
         test_breakeven_sl_move_at_1r_long,
@@ -5722,6 +5766,7 @@ def main() -> int:
         test_next_hour_decision_waits_when_1h_anchor_is_mixed,
         test_next_hour_decision_blocks_chasing_extended_dump,
         test_next_hour_decision_blocks_chasing_extended_pump,
+        test_next_hour_decision_shorts_parabolic_30m_pump_fade,
         test_next_hour_smoothing_requires_confirmed_side_flip,
         test_sub_hour_payload_marks_cache_ready_from_core_horizons,
         test_sub_hour_payload_exposes_primary_when_no_signal_fires,

@@ -28,12 +28,12 @@ class TradingCfg:
     max_positions_per_symbol: int = 1
     max_same_direction: int = 2      # max concurrent LONGs (or SHORTs) — kills correlated risk
     cooldown_seconds: int = 60       # min seconds between actions on same symbol
-    max_position_age_seconds: int = 900  # 15m manual-trade clock; 0 disables
+    max_position_age_seconds: int = 450  # 7m30s manual-trade clock; 0 disables
     # Streak protection — pause a symbol after N consecutive losses there.
     # Catches "wrong about this symbol's regime" without manual intervention.
     streak_loss_limit: int = 3
     streak_loss_pause_seconds: int = 7200    # 2 hours
-    # Manual 15m scalps are hard-capped by time, regardless of current PnL.
+    # Manual quick scalps are hard-capped by time, regardless of current PnL.
     time_exit_only_if_losing: bool = False
     # Daily drawdown circuit breaker — global kill switch for the day.
     # If equity drops below session_start × (1 - max_daily_dd_pct/100), all
@@ -132,7 +132,7 @@ class RiskCfg:
     # flash-close it. Pro-desk rule: a 1m scalp signal that hasn't moved in 6
     # minutes has lost its edge — the regime that birthed it has shifted or
     # the move never materialized. Pay the small loss and free the slot.
-    # Distinct from the 15m hard time exit and from
+    # Distinct from the hard time exit and from
     # the tape-driven exit (immediate, flow-flip based).
     # Grok review v9: 6-min / 0.5R was strangling winners — ETH 0.65-score
     # trade hit max_favor 0.012R then got stale-killed before it could
