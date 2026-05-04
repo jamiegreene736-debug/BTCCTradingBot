@@ -3976,6 +3976,51 @@ def test_pump_fade_watch_flags_big_pump_before_short_entry():
     assert checks["entry_window"]["passed"] is False
 
 
+def test_pump_fade_watch_flags_broad_session_pump_after_last_bars_cool():
+    horizons = {
+        "h_15m": {
+            "label": "1m entry",
+            "long_score": 0.18,
+            "short_score": 0.19,
+            "real_cvd": 1.0,
+            "move_3_atr": -0.08,
+            "move_10_atr": 0.80,
+            "move_15_atr": 1.20,
+            "up_closes_5": 2,
+            "down_closes_5": 3,
+            "up_closes_10": 5,
+            "up_closes_15": 8,
+        },
+        "h_30m": {
+            "label": "5m pump",
+            "long_score": 0.45,
+            "short_score": 0.12,
+            "move_3_atr": 0.12,
+            "move_5_atr": 0.21,
+            "move_10_atr": 2.10,
+            "move_12_atr": 2.60,
+            "position_in_recent_range_15": 0.82,
+            "distance_from_recent_high_atr": 0.96,
+            "up_closes_5": 2,
+            "up_candles_5": 2,
+            "up_closes_10": 5,
+            "up_closes_12": 7,
+        },
+        "h_1h": {"label": "Trend context", "long_score": 0.40, "short_score": 0.10, "adx": 34},
+    }
+
+    decision = BitunixBot._build_pump_fade_only_decision(horizons)
+
+    assert decision["action"] == "wait"
+    assert decision["confidence_score"] == 0
+    assert decision["setup_stage"] == "pump_watch"
+    assert "pump detected" in decision["warnings"][0]
+    checks = {row["key"]: row for row in decision["pump_fade_checks"]}
+    assert checks["watch"]["passed"] is True
+    assert checks["pump"]["passed"] is False
+    assert checks["entry_window"]["passed"] is False
+
+
 def test_next_hour_smoothing_requires_confirmed_side_flip():
     reset_state()
     cfg = fresh_cfg()
@@ -6020,6 +6065,7 @@ def main() -> int:
         test_pump_fade_only_decision_publishes_short_immediately,
         test_pump_fade_blocks_cooled_off_recovery_after_pump,
         test_pump_fade_watch_flags_big_pump_before_short_entry,
+        test_pump_fade_watch_flags_broad_session_pump_after_last_bars_cool,
         test_next_hour_smoothing_requires_confirmed_side_flip,
         test_sub_hour_payload_marks_cache_ready_from_core_horizons,
         test_sub_hour_payload_exposes_primary_when_no_signal_fires,

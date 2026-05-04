@@ -945,6 +945,8 @@ class BitunixBot:
 
         move_3_atr = cls._float_field(h30, "move_3_atr", "move3Atr")
         move_5_atr = cls._float_field(h30, "move_5_atr", "move5Atr")
+        move_10_atr = cls._float_field(h30, "move_10_atr", "move10Atr")
+        move_12_atr = cls._float_field(h30, "move_12_atr", "move12Atr")
         range_pos = cls._float_field(
             h30, "position_in_recent_range_15", "positionInRecentRange15", default=0.5
         )
@@ -953,14 +955,20 @@ class BitunixBot:
         )
         up_closes = int(cls._float_field(h30, "up_closes_5", "upCloses5"))
         up_candles = int(cls._float_field(h30, "up_candles_5", "upCandles5"))
+        up_closes_10 = int(cls._float_field(h30, "up_closes_10", "upCloses10"))
+        up_closes_12 = int(cls._float_field(h30, "up_closes_12", "upCloses12"))
         h1_adx = cls._float_field(h1, "adx", default=99.0)
         h15_long_score = cls._float_field(h15, "long_score", "longScore")
         h15_short_score = cls._float_field(h15, "short_score", "shortScore")
         h30_short_score = cls._float_field(h30, "short_score", "shortScore")
         h15_cvd = cls._float_field(h15, "real_cvd", "realCvd")
         h15_move_3_atr = cls._float_field(h15, "move_3_atr", "move3Atr")
+        h15_move_10_atr = cls._float_field(h15, "move_10_atr", "move10Atr")
+        h15_move_15_atr = cls._float_field(h15, "move_15_atr", "move15Atr")
         h15_up_closes = int(cls._float_field(h15, "up_closes_5", "upCloses5"))
         h15_down_closes = int(cls._float_field(h15, "down_closes_5", "downCloses5"))
+        h15_up_closes_10 = int(cls._float_field(h15, "up_closes_10", "upCloses10"))
+        h15_up_closes_15 = int(cls._float_field(h15, "up_closes_15", "upCloses15"))
         h15_short_reasons = [str(r).lower() for r in h15.get("short_reasons") or []]
 
         bearish_pattern = any(
@@ -993,10 +1001,24 @@ class BitunixBot:
             (move_5_atr >= 3.5 or move_3_atr >= 2.25)
             and (up_closes >= 3 or up_candles >= 3)
         )
+        session_pump = (
+            range_pos >= 0.78
+            and (
+                (move_12_atr >= 2.40 and up_closes_12 >= 6)
+                or (move_10_atr >= 2.00 and up_closes_10 >= 5)
+                or (h15_move_15_atr >= 2.20 and h15_up_closes_15 >= 8)
+                or (h15_move_10_atr >= 1.65 and h15_up_closes_10 >= 6)
+            )
+        )
         pump_watch = (
             range_pos >= 0.72
-            and (move_5_atr >= 1.45 or move_3_atr >= 1.05)
-            and (up_closes >= 3 or up_candles >= 3)
+            and (
+                session_pump
+                or (
+                    (move_5_atr >= 1.45 or move_3_atr >= 1.05)
+                    and (up_closes >= 3 or up_candles >= 3)
+                )
+            )
         )
         post_pump_rejection = (
             move_5_atr >= 2.0
@@ -1006,7 +1028,7 @@ class BitunixBot:
         )
         pump = (
             range_pos >= 0.85
-            and (vertical_pump or post_pump_rejection)
+            and (vertical_pump or post_pump_rejection or session_pump)
         )
         not_far_from_high = high_dist <= 0.85 or range_pos >= 0.90
         exhaustion = exhaustion_votes >= 2
@@ -1042,10 +1064,16 @@ class BitunixBot:
 
         checks = [
             {
+                "key": "watch",
+                "label": "Pump watch",
+                "passed": bool(pump_watch),
+                "detail": f"5-bar +{move_5_atr:.2f} ATR, 12-bar +{move_12_atr:.2f} ATR",
+            },
+            {
                 "key": "pump",
-                "label": "30m vertical pump",
+                "label": "Fade-ready pump",
                 "passed": bool(pump),
-                "detail": f"+{move_5_atr:.2f} ATR / range {range_pos * 100:.0f}% / up {up_closes}/5",
+                "detail": f"range {range_pos * 100:.0f}% / up {up_closes}/5, {up_closes_12}/12",
             },
             {
                 "key": "high",
@@ -1084,16 +1112,23 @@ class BitunixBot:
             "score": score,
             "move_3_atr": round(move_3_atr, 4),
             "move_5_atr": round(move_5_atr, 4),
+            "move_10_atr": round(move_10_atr, 4),
+            "move_12_atr": round(move_12_atr, 4),
             "range_pos": round(range_pos, 4),
             "h15_cvd": round(h15_cvd, 4),
             "h15_short_score": round(h15_short_score, 4),
             "h30_short_score": round(h30_short_score, 4),
             "h15_long_score": round(h15_long_score, 4),
             "h15_move_3_atr": round(h15_move_3_atr, 4),
+            "h15_move_10_atr": round(h15_move_10_atr, 4),
+            "h15_move_15_atr": round(h15_move_15_atr, 4),
             "h15_up_closes": int(h15_up_closes),
             "h15_down_closes": int(h15_down_closes),
+            "h15_up_closes_10": int(h15_up_closes_10),
+            "h15_up_closes_15": int(h15_up_closes_15),
             "exhaustion_votes": int(exhaustion_votes),
             "pump": bool(pump),
+            "session_pump": bool(session_pump),
             "not_far_from_high": bool(not_far_from_high),
             "exhaustion": bool(exhaustion),
             "trend_not_too_clean": bool(trend_not_too_clean),
@@ -1998,6 +2033,14 @@ class BitunixBot:
                         return None
                     return (closes[-1] - closes[-(bars + 1)]) / atr_abs
 
+                def _recent_close_counts(bars: int) -> tuple[int, int]:
+                    if len(closes) <= bars:
+                        return 0, 0
+                    pairs = list(zip(closes[-(bars + 1):-1], closes[-bars:]))
+                    down = sum(1 for prev, cur in pairs if cur < prev)
+                    up = sum(1 for prev, cur in pairs if cur > prev)
+                    return down, up
+
                 def _round_metric(value: float | None, digits: int = 4) -> float | None:
                     if value is None or not np.isfinite(value):
                         return None
@@ -2005,8 +2048,14 @@ class BitunixBot:
 
                 move_3_bars_pct = _round_metric(_recent_move_pct(3))
                 move_5_bars_pct = _round_metric(_recent_move_pct(5))
+                move_10_bars_pct = _round_metric(_recent_move_pct(10))
+                move_12_bars_pct = _round_metric(_recent_move_pct(12))
+                move_15_bars_pct = _round_metric(_recent_move_pct(15))
                 move_3_atr = _round_metric(_recent_move_atr(3))
                 move_5_atr = _round_metric(_recent_move_atr(5))
+                move_10_atr = _round_metric(_recent_move_atr(10))
+                move_12_atr = _round_metric(_recent_move_atr(12))
+                move_15_atr = _round_metric(_recent_move_atr(15))
                 recent_lows = lows[-15:]
                 recent_highs = highs[-15:]
                 range_low = min(recent_lows)
@@ -2016,9 +2065,10 @@ class BitunixBot:
                 range_pos = max(0.0, min(1.0, range_pos))
                 distance_from_low_atr = (closes[-1] - range_low) / atr_abs if atr_abs > 0 else None
                 distance_from_high_atr = (range_high - closes[-1]) / atr_abs if atr_abs > 0 else None
-                recent_close_pairs = list(zip(closes[-6:-1], closes[-5:]))
-                down_closes_5 = sum(1 for prev, cur in recent_close_pairs if cur < prev)
-                up_closes_5 = sum(1 for prev, cur in recent_close_pairs if cur > prev)
+                down_closes_5, up_closes_5 = _recent_close_counts(5)
+                down_closes_10, up_closes_10 = _recent_close_counts(10)
+                down_closes_12, up_closes_12 = _recent_close_counts(12)
+                down_closes_15, up_closes_15 = _recent_close_counts(15)
                 recent_candles = list(zip(opens[-5:], closes[-5:]))
                 down_candles_5 = sum(1 for op, cl in recent_candles if cl < op)
                 up_candles_5 = sum(1 for op, cl in recent_candles if cl > op)
@@ -2051,10 +2101,22 @@ class BitunixBot:
                     "move3BarsPct": move_3_bars_pct,
                     "move_5_bars_pct": move_5_bars_pct,
                     "move5BarsPct": move_5_bars_pct,
+                    "move_10_bars_pct": move_10_bars_pct,
+                    "move10BarsPct": move_10_bars_pct,
+                    "move_12_bars_pct": move_12_bars_pct,
+                    "move12BarsPct": move_12_bars_pct,
+                    "move_15_bars_pct": move_15_bars_pct,
+                    "move15BarsPct": move_15_bars_pct,
                     "move_3_atr": move_3_atr,
                     "move3Atr": move_3_atr,
                     "move_5_atr": move_5_atr,
                     "move5Atr": move_5_atr,
+                    "move_10_atr": move_10_atr,
+                    "move10Atr": move_10_atr,
+                    "move_12_atr": move_12_atr,
+                    "move12Atr": move_12_atr,
+                    "move_15_atr": move_15_atr,
+                    "move15Atr": move_15_atr,
                     "range_low_15": round(range_low, meta.price_precision),
                     "rangeLow15": round(range_low, meta.price_precision),
                     "range_high_15": round(range_high, meta.price_precision),
@@ -2069,6 +2131,18 @@ class BitunixBot:
                     "downCloses5": down_closes_5,
                     "up_closes_5": up_closes_5,
                     "upCloses5": up_closes_5,
+                    "down_closes_10": down_closes_10,
+                    "downCloses10": down_closes_10,
+                    "up_closes_10": up_closes_10,
+                    "upCloses10": up_closes_10,
+                    "down_closes_12": down_closes_12,
+                    "downCloses12": down_closes_12,
+                    "up_closes_12": up_closes_12,
+                    "upCloses12": up_closes_12,
+                    "down_closes_15": down_closes_15,
+                    "downCloses15": down_closes_15,
+                    "up_closes_15": up_closes_15,
+                    "upCloses15": up_closes_15,
                     "down_candles_5": down_candles_5,
                     "downCandles5": down_candles_5,
                     "up_candles_5": up_candles_5,
