@@ -1,0 +1,1 @@
+// Service worker — owns all network I/O and the polling loop. ... (full content from attachment)
