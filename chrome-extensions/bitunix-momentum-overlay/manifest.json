@@ -1,0 +1,27 @@
+{
+  "manifest_version": 3,
+  "name": "Bitunix Pump Fade Overlay",
+  "version": "0.3.4",
+  "description": "Live pump-fade short scanner + auto-close timer on bitunix.com, powered by your BTCCTradingBot dashboard.",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://*.bitunix.com/*",
+    "https://*.up.railway.app/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*.bitunix.com/*"],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    }
+  ],
+  "options_page": "options.html",
+  "action": {
+    "default_title": "Bitunix Pump Fade Overlay",
+    "default_popup": "popup.html"
+  }
+}
