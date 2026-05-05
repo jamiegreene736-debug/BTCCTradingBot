@@ -20,7 +20,7 @@ dashboard.
 - `PUMP WATCH`: pump is active, waiting for near-high rejection.
 - `FADE SHORT`: the backend has a confirmed pump-fade short setup.
 - Per-symbol closed trade history and net P&L.
-- 3:30 position countdown with full-position market close.
+- Open-position display. Timed auto-close is currently disabled.
 
 The extension does not compute signals locally. The backend is the source of
 truth; this folder only renders the overlay and relays admin actions.

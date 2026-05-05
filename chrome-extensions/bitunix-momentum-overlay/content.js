@@ -10,7 +10,6 @@
   let fetchedAt = 0;
   let activeSymbol = localStorage.getItem("bxm-active-symbol") || "";
   let collapsed = localStorage.getItem("bxm-collapsed") === "1";
-  let closeAttempts = {};
   let panelEl = null;
 
   function pick(obj, ...keys) {
@@ -72,10 +71,6 @@
     return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
   }
 
-  function positionKey(symbol, pos) {
-    return `${normSymbol(symbol)}:${pick(pos, "position_id", "positionId") || pick(pos, "opened_at", "openedAt") || "open"}`;
-  }
-
   function positionCountdown(pos) {
     const rawCloseAt = Number(pick(pos, "auto_close_at", "autoCloseAt"));
     if (Number.isFinite(rawCloseAt) && rawCloseAt > 0) {
@@ -113,34 +108,6 @@
       return pos;
     }
     return null;
-  }
-
-  function triggerAutoClose(symbol, pos, remainingSecs) {
-    if (remainingSecs === null || remainingSecs > 0) return;
-    const key = positionKey(symbol, pos);
-    const now = Date.now();
-    const last = closeAttempts[key];
-    if (last && now - last.at < 15000) return;
-
-    closeAttempts[key] = { at: now, status: "closing" };
-    chrome.runtime.sendMessage({
-      type: "close-symbol",
-      symbol: normSymbol(symbol),
-      positionId: pick(pos, "position_id", "positionId") || null,
-    }, (resp) => {
-      closeAttempts[key] = {
-        at: Date.now(),
-        status: resp?.ok ? "closed" : "error",
-        message: resp?.error || resp?.message || "",
-      };
-      chrome.runtime.sendMessage({ type: "force-refresh" }, (freshResp) => {
-        if (freshResp) {
-          latest = freshResp.payload;
-          fetchedAt = freshResp.fetchedAt || Date.now();
-          render();
-        }
-      });
-    });
   }
 
   function decisionFor(symData) {
@@ -239,19 +206,18 @@
     const pos = activeOpenPosition(symData, symbol);
     if (!pos) return "";
     const remaining = positionCountdown(pos);
-    triggerAutoClose(symbol, pos, remaining);
-    const key = positionKey(symbol, pos);
-    const attempt = closeAttempts[key] || {};
-    const expired = remaining !== null && remaining <= 0;
-    const urgent = remaining !== null && remaining <= 30;
-    const status = expired
-      ? (attempt.status === "error" ? `Close retry pending${attempt.message ? ": " + attempt.message : ""}` : "Market close in progress")
-      : "Full-position market close at 3:30";
+    const closeAfter = Number(pick(pos, "auto_close_after_seconds", "autoCloseAfterSeconds"));
+    const timedCloseEnabled = Number.isFinite(closeAfter) && closeAfter > 0 && remaining !== null;
+    const expired = timedCloseEnabled && remaining <= 0;
+    const urgent = timedCloseEnabled && remaining <= 30;
+    const status = timedCloseEnabled
+      ? "Timed auto-close armed"
+      : "Timed auto-close disabled";
     const side = pick(pos, "side") || "POSITION";
     const qty = pick(pos, "qty", "size", "volume");
     const entry = pick(pos, "avg_open_price", "avgOpenPrice", "entryPrice", "openPrice");
     return `<div class="bxm-countdown ${urgent ? "urgent" : ""} ${expired ? "expired" : ""}">
-      <div><span>3:30 auto-close</span><strong>${remaining === null ? "--:--" : fmtCountdown(remaining)}</strong></div>
+      <div><span>Open position</span><strong>${timedCloseEnabled ? fmtCountdown(remaining) : "manual"}</strong></div>
       <p>${escapeHtml(side)} ${qty ? escapeHtml(qty) : ""}${entry ? ` @ ${fmtPrice(entry)}` : ""} - ${escapeHtml(status)}</p>
     </div>`;
   }

@@ -562,7 +562,7 @@ def test_momentum_endpoint_lazily_warms_empty_overlay():
     assert "BTCUSDT" in j["symbols"]
 
 
-def test_momentum_endpoint_includes_position_countdown():
+def test_momentum_endpoint_omits_position_countdown_when_disabled():
     reset_state()
     cfg = fresh_cfg()
     client = make_mock_client()
@@ -590,6 +590,42 @@ def test_momentum_endpoint_includes_position_countdown():
     assert r.status_code == 200
     j = r.get_json()
     assert j["focus_horizon"] == "pump_fade"
+    assert j["position_close_after_seconds"] == 0
+    pos = j["symbols"]["BTCUSDT"]["open_position"]
+    assert pos["position_id"] == "POS15"
+    assert pos["auto_close_after_seconds"] == 0
+    assert pos["auto_close_at"] is None
+    assert pos["seconds_remaining"] is None
+
+
+def test_momentum_endpoint_includes_position_countdown_when_enabled():
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.trading.max_position_age_seconds = 210
+    client = make_mock_client()
+    opened_ms = int(time.time() * 1000) - 60_000
+    client.pending_positions.return_value = [{
+        "positionId": "POS15", "symbol": "BTCUSDT", "qty": "0.01",
+        "side": "LONG", "ctime": opened_ms, "avgOpenPrice": "60000",
+        "unrealizedPNL": "0.25",
+    }]
+    get_state().record_overlay("BTCUSDT", {
+        "symbol": "BTCUSDT",
+        "price": 60000.0,
+        "horizons": {},
+        "horizon_order": [],
+        "alignment": {"dominant": "mixed"},
+        "next_15m": {"action": "wait"},
+        "as_of": int(time.time()),
+    })
+
+    app = create_app(cfg, client)
+    c = app.test_client()
+    good = base64.b64encode(b"admin:test_pass").decode()
+
+    r = c.get("/api/momentum", headers={"Authorization": f"Basic {good}"})
+    assert r.status_code == 200
+    j = r.get_json()
     assert j["position_close_after_seconds"] == 210
     pos = j["symbols"]["BTCUSDT"]["open_position"]
     assert pos["position_id"] == "POS15"

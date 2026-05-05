@@ -2613,10 +2613,8 @@ class BitunixBot:
         if self.cfg.is_live:
             self._check_pending_limits(all_open)
 
-        # Time-based exit: force-close stale positions, but only if the
-        # position is at a loss when time_exit_only_if_losing=True. Winners
-        # past max-age stay alive under the SL ratchet — proven signals
-        # deserve the chance to harvest more profit.
+        # Optional time-based exit. Disabled when max_position_age_seconds is 0.
+        # If enabled, time_exit_only_if_losing can restrict the sweep to losers.
         max_age = self.cfg.trading.max_position_age_seconds
         only_if_losing = self.cfg.trading.time_exit_only_if_losing
         if max_age > 0 and self.cfg.is_live:

@@ -28,7 +28,7 @@ class TradingCfg:
     max_positions_per_symbol: int = 1
     max_same_direction: int = 2      # max concurrent LONGs (or SHORTs) — kills correlated risk
     cooldown_seconds: int = 60       # min seconds between actions on same symbol
-    max_position_age_seconds: int = 210  # 3m30s pump-fade scalp clock; 0 disables
+    max_position_age_seconds: int = 0    # Timed auto-close disabled by default.
     # Pump-fade auto execution. This intentionally only trades the dedicated
     # parabolic-pump fade setup, never the older general long/short model.
     auto_execute_pump_fade_shorts: bool = False

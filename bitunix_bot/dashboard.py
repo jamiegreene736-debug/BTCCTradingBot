@@ -50,7 +50,7 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
     app = Flask(__name__)
     state = get_state()
     password = os.environ.get("DASHBOARD_PASSWORD", "")
-    manual_close_after_seconds = int(cfg.trading.max_position_age_seconds or 210)
+    manual_close_after_seconds = max(0, int(cfg.trading.max_position_age_seconds or 0))
     closed_history_cache: list[dict[str, Any]] = []
     closed_history_cache_error: str | None = None
     closed_history_cache_at = 0.0
@@ -85,7 +85,11 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
         now_s = now_s or int(time.time())
         ctime_ms = _position_ctime_ms(p)
         opened_at = int(ctime_ms // 1000) if ctime_ms else None
-        close_at = opened_at + manual_close_after_seconds if opened_at else None
+        close_at = (
+            opened_at + manual_close_after_seconds
+            if opened_at and manual_close_after_seconds > 0
+            else None
+        )
         remaining = max(0, close_at - now_s) if close_at else None
         side = str(p.get("side") or p.get("positionSide") or "").upper()
         symbol = _symbol(p.get("symbol"))
@@ -686,10 +690,9 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
     def close_symbol() -> Response:
         """Market-close every open position for one symbol.
 
-        Used by the Chrome overlay's 3m30s countdown for pump-fade scalps.
-        This intentionally works even when the bot itself is in paper mode:
-        the user may place the Bitunix trade manually, while the extension
-        asks the authenticated dashboard to close the real position at market.
+        Kept as an authenticated manual/admin escape hatch. Timed extension
+        auto-close is disabled unless max_position_age_seconds is explicitly
+        set above zero.
         """
         body = request.get_json(silent=True) or {}
         symbol = _symbol(body.get("symbol"))

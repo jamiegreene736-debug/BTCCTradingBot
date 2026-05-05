@@ -44,11 +44,9 @@ trading:
     ETHUSDT: 0.75
     DOGEUSDT: 0.35
     XRPUSDT: 0.35
-  # Hard 3m30s position clock for the Chrome-extension pump-fade workflow. The extension
-  # asks the dashboard to market-close that coin at the timer, regardless of
-  # PnL. If the bot is ever switched back to live mode, this same max-age is
-  # the server-side fallback.
-  max_position_age_seconds: 210
+  # Timed auto-close is disabled. Positions stay open until an exchange TP/SL,
+  # manual close, or a future explicit exit rule handles them.
+  max_position_age_seconds: 0
   time_exit_only_if_losing: false
   auto_execute_pump_fade_shorts: true
   auto_execute_pump_fade_only: true
