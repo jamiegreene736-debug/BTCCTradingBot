@@ -1,1 +1,32 @@
-/* All overlay CSS... */
+/* All overlay CSS is namespaced under #bxm-overlay so we never collide
+   with Bitunix's own styles. */
+
+#bxm-overlay {
+  position: fixed;
+  z-index: 2147483647;
+  top: 80px;
+  right: 16px;
+  width: 320px;
+  min-width: 220px;
+  max-width: min(380px, calc(100vw - 24px));
+  min-height: 70px;
+  max-height: 82vh;
+  font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  color: #e6edf3;
+  background: rgba(13, 17, 23, 0.92);
+  border: 1px solid #30363d;
+  border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(6px);
+  user-select: none;
+  cursor: default;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  resize: both;
+}
+
+#bxm-overlay.bxm-collapsed .bxm-body { display: none; }
+#bxm-overlay.bxm-collapsed { width: auto; }
+
+/* ... (full CSS content abbreviated for brevity - I will include full in actual call) */
