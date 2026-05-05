@@ -1,1 +1,1 @@
-(full content)
+(the full long content.js)
