@@ -43,6 +43,12 @@ from .position_manager import PositionManager
 from .strategy import Signal, compute_overlay_scores, evaluate
 from .symbol_meta import DEFAULT_META as _DEFAULT_META
 from .symbol_meta import SymbolMeta
+from .symbol_meta import auto_symbol_risk_mult
+from .symbol_meta import parse_symbol_meta
+from .symbol_meta import row_max_leverage
+from .symbol_meta import row_quote_volume_usdt
+from .symbol_meta import row_symbol
+from .symbol_meta import select_dynamic_symbols
 from .tradetape import TradeFeed
 
 log = logging.getLogger(__name__)
@@ -78,6 +84,9 @@ class BitunixBot:
             margin_coin=cfg.trading.margin_coin,
         )
         self.metas: dict[str, SymbolMeta] = {}
+        self._configured_symbols = [s.upper() for s in cfg.trading.symbols]
+        self._market_rows_by_symbol: dict[str, dict[str, Any]] = {}
+        self._last_dynamic_symbol_refresh = 0.0
         # Per-symbol state for cooldown + bar-dedupe.
         self.last_action_at: dict[str, int] = {}    # unix sec
         self.last_bar_ts: dict[str, int] = {}       # unix sec/ms
@@ -159,33 +168,113 @@ class BitunixBot:
 
     # ------------------------------------------------------------------ setup
 
+    def _fetch_market_rows(self) -> list[dict[str, Any]]:
+        pairs = self.client.trading_pairs()
+        by_symbol = {row_symbol(r): dict(r) for r in pairs if row_symbol(r)}
+        try:
+            ticker_rows = self.client.tickers()
+            if not isinstance(ticker_rows, list):
+                ticker_rows = []
+        except Exception as e:
+            log.debug("tickers() failed during symbol refresh: %s", e)
+            ticker_rows = []
+        for row in ticker_rows:
+            sym = row_symbol(row)
+            if not sym:
+                continue
+            merged = by_symbol.setdefault(sym, {})
+            merged.update(row)
+            merged.setdefault("symbol", sym)
+        return list(by_symbol.values())
+
+    def _apply_dynamic_symbol_universe(
+        self,
+        rows: list[dict[str, Any]],
+        *,
+        force: bool = False,
+    ) -> None:
+        trading = self.cfg.trading
+        if not getattr(trading, "dynamic_symbols_enabled", False):
+            return
+        now = time.time()
+        refresh_secs = max(60, int(getattr(trading, "dynamic_symbol_refresh_secs", 900)))
+        if not force and (now - self._last_dynamic_symbol_refresh) < refresh_secs:
+            return
+        self._last_dynamic_symbol_refresh = now
+
+        keep = self._configured_symbols if getattr(trading, "dynamic_symbol_keep_configured", True) else []
+        selected = select_dynamic_symbols(
+            rows,
+            min_quote_volume_usdt=float(getattr(trading, "dynamic_symbol_min_quote_volume_usdt", 0.0)),
+            min_open_interest_usdt=float(getattr(trading, "dynamic_symbol_min_open_interest_usdt", 0.0)),
+            min_leverage=int(getattr(trading, "dynamic_symbol_min_leverage", 1)),
+            max_symbols=int(getattr(trading, "dynamic_symbol_max_symbols", 30)),
+            keep_symbols=keep,
+        )
+        if not selected:
+            log.warning("Dynamic symbol scan found no eligible pairs; keeping %s", trading.symbols)
+            return
+
+        old_symbols = [s.upper() for s in trading.symbols]
+        if selected != old_symbols:
+            added = sorted(set(selected) - set(old_symbols))
+            removed = sorted(set(old_symbols) - set(selected))
+            trading.symbols = selected
+            log.info("Dynamic symbol universe updated: %d symbols (+%s -%s)",
+                     len(selected), added, removed)
+            if self.ob_feed is not None:
+                self.ob_feed.update_symbols(selected)
+            if self.tape_feed is not None:
+                self.tape_feed.update_symbols(selected)
+
+        rows_by_symbol = {row_symbol(r): r for r in rows if row_symbol(r)}
+        for sym in selected:
+            row = rows_by_symbol.get(sym, {})
+            if sym not in trading.symbol_risk_mult:
+                trading.symbol_risk_mult[sym] = auto_symbol_risk_mult(
+                    sym,
+                    quote_volume_usdt=row_quote_volume_usdt(row),
+                    max_leverage=row_max_leverage(row),
+                )
+
+    def _refresh_dynamic_symbols(self, *, force: bool = False) -> None:
+        if not getattr(self.cfg.trading, "dynamic_symbols_enabled", False):
+            return
+        try:
+            rows = self._fetch_market_rows()
+        except Exception as e:
+            log.warning("Dynamic symbol refresh failed: %s", e)
+            return
+        self._market_rows_by_symbol = {row_symbol(r): r for r in rows if row_symbol(r)}
+        self._apply_dynamic_symbol_universe(rows, force=force)
+        for sym in self.cfg.trading.symbols:
+            row = self._market_rows_by_symbol.get(sym.upper())
+            if row:
+                self.metas[sym.upper()] = parse_symbol_meta(row)
+
     def _resolve_symbol_meta(self) -> None:
         try:
-            pairs = self.client.trading_pairs()
+            pairs = self._fetch_market_rows()
         except Exception as e:
             log.warning("trading_pairs() failed: %s — using defaults for all", e)
             for s in self.cfg.trading.symbols:
                 self.metas[s] = _DEFAULT_META
             return
 
-        by_name = {str(r.get("symbol", "")).upper(): r for r in pairs}
+        self._market_rows_by_symbol = {row_symbol(r): r for r in pairs if row_symbol(r)}
+        self._apply_dynamic_symbol_universe(pairs, force=True)
+        by_name = self._market_rows_by_symbol
         for sym in self.cfg.trading.symbols:
             row = by_name.get(sym.upper())
             if not row:
                 log.warning("Symbol %s not in trading_pairs; using defaults", sym)
                 self.metas[sym] = _DEFAULT_META
                 continue
-            raw_base = row.get("basePrecision")
-            if isinstance(raw_base, (int, float)) and raw_base >= 1:
-                base_step = 10 ** (-int(raw_base))
-            else:
-                base_step = float(raw_base) if raw_base else 0.001
-            price_prec = int(row.get("quotePrecision") or row.get("pricePrecision") or 2)
-            min_qty = float(row.get("minTradeVolume") or base_step)
-            max_lev = int(row.get("maxLeverage") or 100)
-            self.metas[sym] = SymbolMeta(base_step, price_prec, min_qty, max_lev)
+            meta = parse_symbol_meta(row)
+            self.metas[sym] = meta
             log.info("Meta %s: step=%s priceDigits=%s minQty=%s maxLev=%s",
-                     sym, base_step, price_prec, min_qty, max_lev)
+                     sym, meta.base_precision, meta.price_precision,
+                     meta.min_qty, meta.max_leverage)
 
     def _configure_account(self) -> None:
         # Position mode is global; set once.
@@ -200,7 +289,7 @@ class BitunixBot:
         # whatever was already set.
         for sym in self.cfg.trading.symbols:
             meta = self.metas.get(sym, _DEFAULT_META)
-            eff_lev = min(self.cfg.trading.leverage, meta.max_leverage)
+            eff_lev = self._target_leverage_for_symbol(sym, meta, self.cfg.trading.leverage)
             for fn, desc in [
                 (lambda s=sym: self.client.set_margin_mode(s, self.cfg.trading.margin_mode),
                  f"{sym} margin_mode={self.cfg.trading.margin_mode}"),
@@ -866,6 +955,8 @@ class BitunixBot:
         h30_short_score = float(status["h30_short_score"])
         h15_move_3_atr = float(status["h15_move_3_atr"])
         h15_down_closes = int(status["h15_down_closes"])
+        big_green_candle = bool(status.get("big_green_candle"))
+        rejection_candle = bool(status.get("one_min_rejection_candle"))
         if not (
             status["pump"]
             and status["not_far_from_high"]
@@ -880,6 +971,10 @@ class BitunixBot:
         if status.get("micro_pump"):
             confidence += 4
         if status.get("micro_rejection"):
+            confidence += 4
+        if big_green_candle:
+            confidence += 5
+        if rejection_candle:
             confidence += 4
         if range_pos >= 0.92:
             confidence += 4
@@ -905,6 +1000,10 @@ class BitunixBot:
             f"micro pump: 30m move +{move_5_atr:.2f} ATR over 5 bars",
             f"price high in local range ({range_pos * 100:.0f}%)",
         ]
+        if big_green_candle:
+            reasons.append("5m pump candle closed strong on elevated volume")
+        if rejection_candle:
+            reasons.append("1m entry candle shows wick/body rejection")
         if h15_cvd <= -5.0:
             reasons.append("60s CVD flipped strongly negative into the pump")
         if h15_short_score >= 0.20:
@@ -983,6 +1082,13 @@ class BitunixBot:
         h15_down_closes = int(cls._float_field(h15, "down_closes_5", "downCloses5"))
         h15_up_closes_10 = int(cls._float_field(h15, "up_closes_10", "upCloses10"))
         h15_up_closes_15 = int(cls._float_field(h15, "up_closes_15", "upCloses15"))
+        h15_body_atr = cls._float_field(h15, "last_bar_body_atr", "lastBarBodyAtr")
+        h15_upper_wick_atr = cls._float_field(h15, "last_bar_upper_wick_atr", "lastBarUpperWickAtr")
+        h15_close_pos = cls._float_field(h15, "last_bar_close_position", "lastBarClosePosition", default=0.5)
+        h15_volume_ratio = cls._float_field(h15, "volume_spike_ratio", "volumeSpikeRatio")
+        h30_body_atr = cls._float_field(h30, "last_bar_body_atr", "lastBarBodyAtr")
+        h30_close_pos = cls._float_field(h30, "last_bar_close_position", "lastBarClosePosition", default=0.5)
+        h30_volume_ratio = cls._float_field(h30, "volume_spike_ratio", "volumeSpikeRatio")
         h15_short_reasons = [str(r).lower() for r in h15.get("short_reasons") or []]
         h15_long_reasons = [str(r).lower() for r in h15.get("long_reasons") or []]
         h30_long_reasons = [str(r).lower() for r in h30.get("long_reasons") or []]
@@ -1012,9 +1118,19 @@ class BitunixBot:
             bool(meaningful_short_votes),
             bool(bearish_rejection),
         ))
+        big_green_candle = (
+            h30_body_atr >= 0.75
+            and h30_close_pos >= 0.70
+            and (h30_volume_ratio <= 0 or h30_volume_ratio >= 1.25)
+        )
+        one_min_rejection_candle = (
+            h15_body_atr < 0
+            or h15_upper_wick_atr >= 0.18
+            or h15_close_pos <= 0.45
+        )
 
         vertical_pump = (
-            (move_5_atr >= 3.5 or move_3_atr >= 2.25)
+            (move_5_atr >= 3.5 or move_3_atr >= 2.25 or big_green_candle)
             and (up_closes >= 3 or up_candles >= 3)
         )
         # High-leverage pump fades are not meant to wait for a giant move.
@@ -1133,6 +1249,16 @@ class BitunixBot:
         entry_window = (near_blowoff_high or lower_high_rejection or micro_rejection) and not (
             cooled_off_recovery or still_squeezing_up
         )
+        if any(k in h15 for k in (
+            "last_bar_body_atr",
+            "lastBarBodyAtr",
+            "last_bar_close_position",
+            "lastBarClosePosition",
+        )):
+            entry_window = entry_window and (
+                bool(one_min_rejection_candle)
+                or bool(strong_negative_tape and h15_short_score >= 0.26)
+            )
 
         checks = [
             {
@@ -1150,6 +1276,7 @@ class BitunixBot:
                 "passed": bool(pump),
                 "detail": (
                     f"micro {'yes' if micro_pump else 'no'} / "
+                    f"green {'yes' if big_green_candle else 'no'} / "
                     f"range {range_pos * 100:.0f}% / up {up_closes}/5, {up_closes_12}/12"
                 ),
             },
@@ -1165,7 +1292,8 @@ class BitunixBot:
                 "passed": bool(entry_window),
                 "detail": (
                     f"1m move {h15_move_3_atr:+.2f} ATR, "
-                    f"up {h15_up_closes}/5, down {h15_down_closes}/5"
+                    f"up {h15_up_closes}/5, down {h15_down_closes}/5, "
+                    f"wick {h15_upper_wick_atr:.2f} ATR"
                 ),
             },
             {
@@ -1207,6 +1335,12 @@ class BitunixBot:
             "h15_up_closes_10": int(h15_up_closes_10),
             "h15_up_closes_15": int(h15_up_closes_15),
             "exhaustion_votes": int(exhaustion_votes),
+            "big_green_candle": bool(big_green_candle),
+            "one_min_rejection_candle": bool(one_min_rejection_candle),
+            "h15_upper_wick_atr": round(h15_upper_wick_atr, 4),
+            "h15_close_position": round(h15_close_pos, 4),
+            "h30_body_atr": round(h30_body_atr, 4),
+            "h30_volume_ratio": round(h30_volume_ratio, 4),
             "pump": bool(pump),
             "micro_pump": bool(micro_pump),
             "micro_pump_watch": bool(micro_pump_watch),
@@ -1846,6 +1980,39 @@ class BitunixBot:
                 return out
         return 0.0
 
+    def _target_leverage_for_symbol(
+        self,
+        symbol: str,
+        meta: SymbolMeta,
+        requested: int,
+    ) -> int:
+        """Cap leverage by symbol class.
+
+        BTC/ETH can use the requested high leverage when Bitunix allows it.
+        Dynamic alts are capped harder because their spreads, ATR and book
+        depth are noisier even when they pass the liquidity scan.
+        """
+        sym = symbol.upper()
+        cap = int(requested)
+        if sym not in {"BTCUSDT", "ETHUSDT"}:
+            cap = min(cap, 100)
+            if sym not in self._configured_symbols:
+                risk_mult = self.cfg.trading.symbol_risk_mult.get(sym, 0.35)
+                if risk_mult <= 0.35:
+                    cap = min(cap, 75)
+        return max(1, min(cap, int(meta.max_leverage or 100)))
+
+    def _max_entry_spread_pct_for_symbol(self, symbol: str, meta: SymbolMeta) -> float:
+        base = float(self.cfg.trading.max_entry_spread_pct)
+        sym = symbol.upper()
+        if sym in {"BTCUSDT", "ETHUSDT"}:
+            return base
+        if sym not in self._configured_symbols:
+            return min(0.25, max(base, base * 1.5))
+        if meta.max_leverage < 100:
+            return min(0.20, max(base, base * 1.25))
+        return base
+
     def _build_suggested_trade_plan(
         self,
         symbol: str,
@@ -1971,7 +2138,7 @@ class BitunixBot:
             min_volume=meta.min_qty,
             volume_step=meta.base_precision,
             digits=meta.price_precision,
-            effective_leverage=min(self.cfg.trading.leverage, meta.max_leverage),
+            effective_leverage=self._target_leverage_for_symbol(sym_u, meta, self.cfg.trading.leverage),
             symbol=sym_u,
         )
         if order_plan is None:
@@ -2116,6 +2283,17 @@ class BitunixBot:
                     continue
                 if overlay is None:
                     continue
+                if (
+                    getattr(self.cfg.trading, "dynamic_symbols_enabled", False)
+                    and sym_u not in self._configured_symbols
+                ):
+                    row = self._market_rows_by_symbol.get(sym_u, {})
+                    self.cfg.trading.symbol_risk_mult[sym_u] = auto_symbol_risk_mult(
+                        sym_u,
+                        quote_volume_usdt=row_quote_volume_usdt(row),
+                        max_leverage=row_max_leverage(row),
+                        atr_pct=overlay.atr_pct,
+                    )
                 atr_abs = overlay.price * overlay.atr_pct / 100.0
 
                 def _recent_move_pct(bars: int) -> float | None:
@@ -2170,6 +2348,18 @@ class BitunixBot:
                 recent_candles = list(zip(opens[-5:], closes[-5:]))
                 down_candles_5 = sum(1 for op, cl in recent_candles if cl < op)
                 up_candles_5 = sum(1 for op, cl in recent_candles if cl > op)
+                last_open = opens[-1]
+                last_close = closes[-1]
+                last_high = highs[-1]
+                last_low = lows[-1]
+                last_range = max(0.0, last_high - last_low)
+                last_body = last_close - last_open
+                last_upper_wick = last_high - max(last_open, last_close)
+                last_lower_wick = min(last_open, last_close) - last_low
+                last_close_pos = ((last_close - last_low) / last_range) if last_range > 0 else 0.5
+                vol_ma_values = volumes[-21:-1] if len(volumes) >= 21 else volumes[:-1]
+                vol_ma = (sum(vol_ma_values) / len(vol_ma_values)) if vol_ma_values else 0.0
+                volume_ratio = volumes[-1] / vol_ma if vol_ma > 0 else None
                 range_pos_rounded = _round_metric(range_pos)
                 distance_from_low_atr = _round_metric(distance_from_low_atr)
                 distance_from_high_atr = _round_metric(distance_from_high_atr)
@@ -2182,6 +2372,22 @@ class BitunixBot:
                     "atr_pct": round(overlay.atr_pct, 4),
                     "last_bar_high": round(highs[-1], meta.price_precision),
                     "last_bar_low": round(lows[-1], meta.price_precision),
+                    "last_bar_open": round(last_open, meta.price_precision),
+                    "lastBarOpen": round(last_open, meta.price_precision),
+                    "last_bar_close": round(last_close, meta.price_precision),
+                    "lastBarClose": round(last_close, meta.price_precision),
+                    "last_bar_body_atr": _round_metric(last_body / atr_abs if atr_abs > 0 else None),
+                    "lastBarBodyAtr": _round_metric(last_body / atr_abs if atr_abs > 0 else None),
+                    "last_bar_range_atr": _round_metric(last_range / atr_abs if atr_abs > 0 else None),
+                    "lastBarRangeAtr": _round_metric(last_range / atr_abs if atr_abs > 0 else None),
+                    "last_bar_upper_wick_atr": _round_metric(last_upper_wick / atr_abs if atr_abs > 0 else None),
+                    "lastBarUpperWickAtr": _round_metric(last_upper_wick / atr_abs if atr_abs > 0 else None),
+                    "last_bar_lower_wick_atr": _round_metric(last_lower_wick / atr_abs if atr_abs > 0 else None),
+                    "lastBarLowerWickAtr": _round_metric(last_lower_wick / atr_abs if atr_abs > 0 else None),
+                    "last_bar_close_position": _round_metric(last_close_pos),
+                    "lastBarClosePosition": _round_metric(last_close_pos),
+                    "volume_spike_ratio": _round_metric(volume_ratio),
+                    "volumeSpikeRatio": _round_metric(volume_ratio),
                     "long_score": round(overlay.long_score, 4),
                     "short_score": round(overlay.short_score, 4),
                     "long_reasons": overlay.long_reasons,
@@ -2508,11 +2714,13 @@ class BitunixBot:
             if action != "short" or setup != "parabolic_pump_fade" or conf < min_conf:
                 continue
 
+            meta = self.metas.get(sym_u, _DEFAULT_META)
+            max_spread_pct = self._max_entry_spread_pct_for_symbol(sym_u, meta)
             spread_pct = self.ob_feed.get_spread_pct(sym_u) if self.ob_feed else None
-            if spread_pct is not None and spread_pct > trading.max_entry_spread_pct:
+            if spread_pct is not None and spread_pct > max_spread_pct:
                 self.state.record_skip(
                     f"{sym_u}: spread {spread_pct:.3f}% > "
-                    f"{trading.max_entry_spread_pct:.3f}% threshold"
+                    f"{max_spread_pct:.3f}% threshold"
                 )
                 continue
 
@@ -2531,8 +2739,7 @@ class BitunixBot:
                     self.state.record_skip(f"{sym_u}: no available margin")
                     return cached_acct, n_open, short_count
 
-            meta = self.metas.get(sym_u, _DEFAULT_META)
-            eff_lev = min(target_lev, meta.max_leverage)
+            eff_lev = self._target_leverage_for_symbol(sym_u, meta, target_lev)
             plan = self._build_auto_pump_fade_plan(
                 sym_u,
                 overlay,
@@ -2587,18 +2794,23 @@ class BitunixBot:
         # 0. Update streak-loss state from newly-closed positions.
         self._update_streak_state()
 
-        # 0a. Refresh overlay scores for all symbols. Runs unconditionally so
+        # 0a. Periodically broaden/narrow the scan universe to all liquid
+        # Bitunix USDT perpetuals that pass the configured leverage/liquidity
+        # filters. Existing manually configured symbols remain pinned.
+        self._refresh_dynamic_symbols()
+
+        # 0b. Refresh overlay scores for all symbols. Runs unconditionally so
         # the Chrome-extension overlay keeps updating even when the trading
         # loop is paused / capped / cooldowned for a symbol.
         self._compute_overlays()
 
-        # 0b. Daily drawdown — gradual throttle on risk sizing as DD deepens,
+        # 0c. Daily drawdown — gradual throttle on risk sizing as DD deepens,
         # full halt at the configured threshold. Existing positions still
         # managed normally.
         dd_risk_mult = self._daily_dd_risk_multiplier()
         dd_halted = dd_risk_mult <= 0.0
 
-        # 0c. Liquidation-cascade check — halt new entries when BTC moves
+        # 0d. Liquidation-cascade check — halt new entries when BTC moves
         # rapidly enough that indicators are about to give a false "huge
         # trend" reading at the worst possible moment.
         cascade_halted = self._check_liquidation_cascade()
@@ -2746,11 +2958,13 @@ class BitunixBot:
 
             # Spread filter — reject if order book spread is too wide.
             # Wide spreads cause adverse fills that eat the SL budget.
+            meta = self.metas.get(sym_u, _DEFAULT_META)
+            max_spread_pct = self._max_entry_spread_pct_for_symbol(sym_u, meta)
             spread_pct = self.ob_feed.get_spread_pct(sym) if self.ob_feed else None
-            if spread_pct is not None and spread_pct > self.cfg.trading.max_entry_spread_pct:
+            if spread_pct is not None and spread_pct > max_spread_pct:
                 self.state.record_skip(
                     f"{sym}: spread {spread_pct:.3f}% > "
-                    f"{self.cfg.trading.max_entry_spread_pct:.3f}% threshold"
+                    f"{max_spread_pct:.3f}% threshold"
                 )
                 continue
 
@@ -2904,7 +3118,7 @@ class BitunixBot:
 
             meta = self.metas.get(sym, _DEFAULT_META)
             # Per-symbol effective leverage: cap config at the symbol's max.
-            eff_lev = min(self.cfg.trading.leverage, meta.max_leverage)
+            eff_lev = self._target_leverage_for_symbol(sym, meta, self.cfg.trading.leverage)
             plan = build_order(
                 sig,
                 free_margin=free_margin,

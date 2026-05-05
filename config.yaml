@@ -33,9 +33,9 @@ trading:
   # symbol set [BTC, ETH, SOL]. Cooldown stays at 180s per-symbol so one
   # signal can't keep firing on the same pair, but two different pairs
   # can be in play simultaneously.
-  max_open_positions: 1         # live audit 2026-05-04: one pump-fade scalp at a time until net edge recovers
+  max_open_positions: 2         # broader scanner, still low global exposure
   max_positions_per_symbol: 1   # never pyramid into the same trade
-  max_same_direction: 1         # all auto trades are shorts; avoid stacking correlated pump-fade exposure
+  max_same_direction: 2         # allow two independent ultra-high-confidence pump fades
   # 15m timeframe: 600s (10 min) cooldown — reverted from 900 per Grok filter-loosening review;
   # 900 was too conservative for a 15-symbol set.
   cooldown_seconds: 300         # live audit: reduce fee-burning repeat entries on the same coin
@@ -50,8 +50,8 @@ trading:
   time_exit_only_if_losing: false
   auto_execute_pump_fade_shorts: true
   auto_execute_pump_fade_only: true
-  pump_fade_auto_min_confidence: 95
-  pump_fade_auto_leverage: 100
+  pump_fade_auto_min_confidence: 96
+  pump_fade_auto_leverage: 200
   # Streak protection: pause a symbol for streak_loss_pause_seconds after
   # N consecutive losses. Live data showed 6 XRP SHORTs in a row losing —
   # bot kept doubling down on a wrong-regime call. This catches it.
@@ -81,6 +81,16 @@ trading:
   # On 15m timeframe, 60s is reasonable — 1/15th of bar duration so a maker
   # entry has time to fill on natural pullback before the bar resolves.
   post_only_timeout_secs: 30    # was 60 (15m) — scaled for 5m (30s = 10% of bar)
+  # Scan every liquid Bitunix USDT perpetual instead of hardcoding four coins.
+  # Manually configured symbols stay pinned, then the scanner appends the
+  # highest-volume pairs that pass leverage/liquidity floors.
+  dynamic_symbols_enabled: true
+  dynamic_symbol_refresh_secs: 900
+  dynamic_symbol_min_quote_volume_usdt: 10000000
+  dynamic_symbol_min_open_interest_usdt: 0
+  dynamic_symbol_min_leverage: 50
+  dynamic_symbol_max_symbols: 30
+  dynamic_symbol_keep_configured: true
 
 risk:
   # STOP LOSS — % of entry price.
@@ -102,6 +112,7 @@ risk:
   # Compounded with fewer-but-better entries (fire_threshold 0.60), the
   # math actually works at this account size.
   take_profit_r: 1.0     # was 2.5
+  margin_profit_target_pct: 15.0
   # ATR-aware SL hybrid. When use_atr=true, SL distance is the MAX of the
   # fixed `stop_loss_pct` floor and `atr_multiplier_sl × ATR%`. In calm
   # markets the floor binds (tight SL); in vol expansion ATR binds and

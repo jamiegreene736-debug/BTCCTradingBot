@@ -158,9 +158,12 @@ class BitunixClient:
         )
         return data.get("data") or []
 
+    def tickers(self, symbols: str | None = None) -> list[dict[str, Any]]:
+        data = self._get("/api/v1/futures/market/tickers", {"symbols": symbols})
+        return data.get("data") or []
+
     def ticker(self, symbol: str) -> dict[str, Any]:
-        data = self._get("/api/v1/futures/market/tickers", {"symbols": symbol})
-        rows = data.get("data") or []
+        rows = self.tickers(symbol)
         return rows[0] if rows else {}
 
     def trading_pairs(self) -> list[dict[str, Any]]:

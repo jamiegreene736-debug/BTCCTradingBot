@@ -100,6 +100,25 @@ class OrderBookFeed:
             except Exception:
                 pass
 
+    def update_symbols(self, symbols: list[str]) -> None:
+        """Replace the subscription universe and reconnect if it changed."""
+        next_symbols = [s.upper() for s in symbols]
+        with self._lock:
+            if next_symbols == self.symbols:
+                return
+            old = set(self.symbols)
+            self.symbols = next_symbols
+            for sym in next_symbols:
+                self._books.setdefault(sym, Book())
+            added = sorted(set(next_symbols) - old)
+            removed = sorted(old - set(next_symbols))
+        log.info("OrderBookFeed symbols updated: +%s -%s", added, removed)
+        if self._ws:
+            try:
+                self._ws.close()
+            except Exception:
+                pass
+
     # ------------------------------------------------------------------ accessors
 
     def get_imbalance(self, symbol: str, max_age_secs: float = 30.0) -> float | None:

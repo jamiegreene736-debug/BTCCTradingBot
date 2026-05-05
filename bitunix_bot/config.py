@@ -56,6 +56,15 @@ class TradingCfg:
     # and fall back to a market order. Saves ~0.04% per round-trip.
     use_post_only_entries: bool = True
     post_only_timeout_secs: int = 8
+    # Dynamic universe scanner. When enabled, startup and periodic refreshes
+    # expand `symbols` to every liquid USDT perpetual passing the filters.
+    dynamic_symbols_enabled: bool = False
+    dynamic_symbol_refresh_secs: int = 900
+    dynamic_symbol_min_quote_volume_usdt: float = 5_000_000.0
+    dynamic_symbol_min_open_interest_usdt: float = 0.0
+    dynamic_symbol_min_leverage: int = 50
+    dynamic_symbol_max_symbols: int = 30
+    dynamic_symbol_keep_configured: bool = True
     # Correlation / beta-adjusted sizing per symbol. Crypto alts are heavily
     # correlated to BTC (typically 0.7+ on 1m), so a portfolio of "1 long BTC
     # + 3 long alts" carries effective BTC exposure of ~3.5x, not 4x of
@@ -136,6 +145,9 @@ class RiskCfg:
     # Always aim for profit — never go below the fee floor.
     adaptive_tp_enabled: bool = True
     adaptive_tp_floor_r: float = 0.7     # never tighten TP below this R (covers fees + small profit)
+    # Optional gross margin-profit target. 15 at 100x targets roughly a 0.15%
+    # favorable price move before fees; if 0, TP uses only take_profit_r.
+    margin_profit_target_pct: float = 0.0
     # Stale-trade early exit. If a position has been alive for stale_exit_min
     # minutes AND has never reached more than stale_exit_max_favor_r favorable,
     # flash-close it. Pro-desk rule: a 1m scalp signal that hasn't moved in 6
@@ -373,6 +385,16 @@ def _validate(cfg: Config) -> None:
         errs.append("trading.max_positions_per_symbol must be >=1")
     if t.cooldown_seconds < 0:
         errs.append("trading.cooldown_seconds must be >=0")
+    if t.dynamic_symbol_refresh_secs < 60:
+        errs.append("trading.dynamic_symbol_refresh_secs must be >=60")
+    if t.dynamic_symbol_min_quote_volume_usdt < 0:
+        errs.append("trading.dynamic_symbol_min_quote_volume_usdt must be >=0")
+    if t.dynamic_symbol_min_open_interest_usdt < 0:
+        errs.append("trading.dynamic_symbol_min_open_interest_usdt must be >=0")
+    if not (1 <= t.dynamic_symbol_min_leverage <= 200):
+        errs.append("trading.dynamic_symbol_min_leverage must be 1..200")
+    if t.dynamic_symbol_max_symbols < 1:
+        errs.append("trading.dynamic_symbol_max_symbols must be >=1")
     if not (0 <= t.pump_fade_auto_min_confidence <= 100):
         errs.append("trading.pump_fade_auto_min_confidence must be 0..100")
     if not (1 <= t.pump_fade_auto_leverage <= 200):
@@ -381,6 +403,8 @@ def _validate(cfg: Config) -> None:
         errs.append(f"risk.stop_loss_pct must be 0..5%, got {r.stop_loss_pct}")
     if not (0 < r.take_profit_r < 20):
         errs.append(f"risk.take_profit_r must be 0..20, got {r.take_profit_r}")
+    if r.margin_profit_target_pct < 0:
+        errs.append("risk.margin_profit_target_pct must be >=0")
     if r.breakeven_at_r < 0 or r.trailing_activate_r < 0 or r.trailing_distance_r < 0:
         errs.append("risk.breakeven_at_r / trailing_* must be >=0")
     if s.fire_threshold < 0 or s.fire_threshold > 1:

@@ -39,6 +39,10 @@ from bitunix_bot.bot import BitunixBot                        # noqa: E402
 from bitunix_bot.client import BitunixClient                  # noqa: E402
 from bitunix_bot.config import load                           # noqa: E402
 from bitunix_bot.dashboard import create_app                  # noqa: E402
+from bitunix_bot.risk import build_order                      # noqa: E402
+from bitunix_bot.strategy import Signal                       # noqa: E402
+from bitunix_bot.symbol_meta import auto_symbol_risk_mult     # noqa: E402
+from bitunix_bot.symbol_meta import select_dynamic_symbols    # noqa: E402
 from bitunix_bot.state import BotState, get as get_state      # noqa: E402
 
 
@@ -140,6 +144,7 @@ def fresh_cfg():
     cfg.trading.use_post_only_entries = False
     cfg.trading.auto_execute_pump_fade_shorts = False
     cfg.trading.auto_execute_pump_fade_only = False
+    cfg.trading.dynamic_symbols_enabled = False
     cfg.trading.pump_fade_auto_min_confidence = 95
     cfg.trading.pump_fade_auto_leverage = 100
     cfg.trading.cooldown_seconds = 60
@@ -200,6 +205,93 @@ def test_signing_matches_bitunix_spec_example():
     s1 = c._sign("NONCE", "1700000000000", "a=1", "{}")
     s2 = c._sign("NONCE", "1700000000000", "a=1", "{}")
     assert s1 == s2 and len(s1) == 64
+
+
+def test_dynamic_symbol_selector_keeps_liquid_usdt_perps_only():
+    rows = [
+        {"symbol": "BTCUSDT", "quoteVolume": "100000000", "maxLeverage": 200},
+        {"symbol": "ETHUSDT", "quoteVolume": "80000000", "maxLeverage": 200},
+        {"symbol": "THINUSDT", "quoteVolume": "1000000", "maxLeverage": 100},
+        {"symbol": "LOWLEVUSDT", "quoteVolume": "20000000", "maxLeverage": 25},
+        {"symbol": "BTCUSDC", "quoteVolume": "90000000", "maxLeverage": 100},
+    ]
+
+    selected = select_dynamic_symbols(
+        rows,
+        min_quote_volume_usdt=5_000_000,
+        min_open_interest_usdt=0,
+        min_leverage=50,
+        max_symbols=3,
+        keep_symbols=["XRPUSDT"],
+    )
+
+    assert selected == ["XRPUSDT", "BTCUSDT", "ETHUSDT"]
+
+
+def test_bot_dynamic_symbol_refresh_expands_universe_and_risk_multipliers():
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.trading.symbols = ["BTCUSDT"]
+    cfg.trading.dynamic_symbols_enabled = True
+    cfg.trading.dynamic_symbol_min_quote_volume_usdt = 5_000_000
+    cfg.trading.dynamic_symbol_min_leverage = 50
+    cfg.trading.dynamic_symbol_max_symbols = 4
+    cfg.trading.symbol_risk_mult = {"BTCUSDT": 1.0}
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.client.trading_pairs.return_value = [
+        {"symbol": "BTCUSDT", "basePrecision": 4, "quotePrecision": 1,
+         "minTradeVolume": "0.0001", "maxLeverage": 200, "quoteVolume": "100000000"},
+        {"symbol": "ETHUSDT", "basePrecision": 3, "quotePrecision": 2,
+         "minTradeVolume": "0.001", "maxLeverage": 200, "quoteVolume": "80000000"},
+        {"symbol": "SOLUSDT", "basePrecision": 1, "quotePrecision": 3,
+         "minTradeVolume": "0.1", "maxLeverage": 75, "quoteVolume": "20000000"},
+        {"symbol": "THINUSDT", "basePrecision": 1, "quotePrecision": 3,
+         "minTradeVolume": "1", "maxLeverage": 100, "quoteVolume": "1000000"},
+    ]
+    bot.client.tickers.return_value = []
+
+    bot._resolve_symbol_meta()
+
+    assert cfg.trading.symbols == ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+    assert bot.metas["ETHUSDT"].max_leverage == 200
+    assert cfg.trading.symbol_risk_mult["ETHUSDT"] == auto_symbol_risk_mult(
+        "ETHUSDT", quote_volume_usdt=80_000_000, max_leverage=200
+    )
+
+
+def test_margin_profit_target_caps_take_profit_distance():
+    cfg = fresh_cfg()
+    cfg.trading.symbols = ["BTCUSDT"]
+    cfg.trading.leverage = 100
+    cfg.risk.use_atr = False
+    cfg.risk.stop_loss_pct = 0.25
+    cfg.risk.take_profit_r = 1.0
+    cfg.risk.margin_profit_target_pct = 15.0
+    sig = Signal(
+        direction="short",
+        score=1.0,
+        indicator_score=1,
+        pattern_score=0.0,
+        reasons=["test"],
+        price=100.0,
+        atr=0.0,
+    )
+
+    plan = build_order(
+        sig,
+        free_margin=1000.0,
+        trading=cfg.trading,
+        risk=cfg.risk,
+        min_volume=0.001,
+        volume_step=0.001,
+        digits=4,
+        effective_leverage=100,
+        symbol="BTCUSDT",
+    )
+
+    assert plan is not None
+    assert plan.take_profit == 99.85
 
 
 def test_uptrend_produces_long_signal_with_paper_order():

@@ -13,15 +13,17 @@ fundamentals — only price action and indicators.
 
 * Fetches klines from `https://fapi.bitunix.com/api/v1/futures/market/kline`
   at a configurable timeframe.
-* Evaluates 7 technical rules: EMA stack, EMA-fast cross, RSI window, MACD
-  momentum, Bollinger basis, **ADX trend strength** (whipsaw filter), and
-  **Supertrend regime**. Requires a configurable N-of-7 confluence to fire.
+* Dynamically scans Bitunix USDT perpetuals from `trading_pairs`/`tickers` and
+  keeps the highest-liquidity symbols that pass volume and leverage floors.
+* Trades only the dedicated parabolic pump-fade SHORT setup when auto execution
+  is enabled: 5m pump, near-high location, 1m rejection, bearish tape/flow, and
+  trend-risk checks.
 * Opens positions on `/api/v1/futures/trade/place_order` with **native**
   `tpPrice` / `slPrice` attached — Bitunix enforces both server-side, so your
   SL still fires even if the bot crashes.
-* Stop loss is a tight % of entry price (default 0.25%). Take profit is a
-  multiple of the SL distance (default 5R = 1.25% price move). ATR-based
-  alternative available.
+* Stop loss is a tight % of entry price (default 0.25%). Take profit can be
+  capped by `margin_profit_target_pct`; the current pump-fade profile targets
+  roughly 15% gross margin profit before fees.
 * **Multi-symbol, multi-position**: trades a list of symbols simultaneously
   with a global position cap, per-symbol cap, and per-symbol cooldown.
 * **Position exit**: timed auto-close is disabled by default. Positions stay
@@ -72,19 +74,24 @@ Logs stream to stdout and `logs/bot.log`.
 
 | Group      | Key                       | Default                     | Purpose |
 |------------|---------------------------|-----------------------------|---------|
-| `trading`  | `symbols`                 | `[BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT]` | Universe of perpetuals to trade |
-| `trading`  | `timeframe`               | `1m`                        | 1m / 5m / 15m / 30m / 1h / 2h / 4h |
-| `trading`  | `leverage`                | `100`                       | Bitunix max is 200x on BTCUSDT — see fee math below |
+| `trading`  | `symbols`                 | `[BTCUSDT,ETHUSDT,DOGEUSDT,XRPUSDT]` | Pinned symbols; dynamic scan can append more |
+| `trading`  | `dynamic_symbols_enabled` | `true`                      | Scan liquid USDT perpetuals every refresh window |
+| `trading`  | `dynamic_symbol_min_quote_volume_usdt` | `10000000`      | 24h quote-volume floor for dynamic symbols |
+| `trading`  | `timeframe`               | `5m`                        | Legacy strategy timeframe; overlay uses 1m entry + 5m pump |
+| `trading`  | `leverage`                | `100`                       | Generic cap; pump-fade auto leverage is separate |
 | `trading`  | `margin_coin`             | `USDT`                      | |
 | `trading`  | `margin_mode`             | `ISOLATION`                 | ISOLATION / CROSS |
 | `trading`  | `risk_per_trade_pct`      | `1.0`                       | % of free margin risked if SL hits |
-| `trading`  | `max_open_positions`      | `4`                         | Global cap across all symbols |
+| `trading`  | `max_open_positions`      | `2`                         | Global cap across all symbols |
 | `trading`  | `max_positions_per_symbol`| `1`                         | Never pyramid into the same trade |
 | `trading`  | `cooldown_seconds`        | `60`                        | Min seconds between trades on same symbol |
 | `trading`  | `max_position_age_seconds`| `0`                         | Timed auto-close disabled; set >0 to enable |
+| `trading`  | `pump_fade_auto_min_confidence` | `96`                  | Ultra-confidence gate before auto market short |
+| `trading`  | `pump_fade_auto_leverage` | `200`                       | BTC/ETH may use 200x; alts are capped lower |
 | `risk`     | `stop_loss_pct`           | `0.25`                      | Tight SL as % of entry price |
-| `risk`     | `take_profit_r`           | `5.0`                       | TP distance = R × SL distance |
-| `risk`     | `use_atr`                 | `false`                     | Flip to true for ATR-based SL/TP |
+| `risk`     | `take_profit_r`           | `1.0`                       | R fallback before margin-profit cap |
+| `risk`     | `margin_profit_target_pct`| `15.0`                      | Cap TP to roughly this gross margin % |
+| `risk`     | `use_atr`                 | `true`                      | Widen SL in volatility expansion |
 | `strategy` | `min_confluence`          | `4`                         | Need 4 of 7 rules to agree |
 | `strategy` | `adx_min`                 | `22.0`                      | Trend-strength filter floor |
 | `strategy` | `supertrend_period`       | `10`                        | ATR period for supertrend |
@@ -132,7 +139,8 @@ run.py                    # Spawns the trading worker thread + Flask app on $POR
       ├── client.py       # REST client (place_order, account, klines, history, signing)
       ├── indicators.py   # EMA / RSI / MACD / Bollinger / ATR (pure numpy)
       ├── strategy.py     # 5-rule confluence signal
-      ├── risk.py         # Conservative SL, aggressive TP, leverage-aware sizing
+      ├── risk.py         # SL/TP, 15% margin target, leverage-aware sizing
+      ├── symbol_meta.py  # Dynamic symbol filters + risk multipliers
       ├── state.py        # Thread-safe shared state for the dashboard
       ├── dashboard.py    # Flask app + HTML — basic auth on every route
       └── bot.py          # Main trading loop
@@ -176,13 +184,26 @@ scripts/ask_reviewers.py --question "..." # custom prompt
 scripts/ask_reviewers.py --dry-run       # build the export, skip API calls
 ```
 
+### Backtesting the pump-fade filter
+
+The lightweight replay script uses recent Bitunix 1m klines, resamples them
+into 5m/15m context, runs the same pump-fade decision tree, and reports rough
+margin-PnL hit rates. It does not include live order-book or trade-tape data,
+so use it as a structural sanity check rather than a full execution simulator.
+
+```bash
+scripts/backtest_pump_fade.py --symbols BTCUSDT,ETHUSDT --limit 500
+```
+
+Set `TRADE_WEBHOOK_URL` to send each journaled entry/exit JSON payload to a
+Discord/Slack/custom webhook.
+
 ## Safety notes
 
 * **Always run in `paper` mode first.** The bot prints the exact order it
   would have sent. No credentials scope is needed for paper mode beyond Read.
 * Extremely high leverage + tight stop loss means full-size SL hits happen
-  often. The 5R target relies on asymmetric payoff, not hit rate. Track your
-  win rate over ~30 round-trips before deciding it's working.
+  often. Track your win rate over ~30 round-trips before deciding it's working.
 * The bot never places an order without `slPrice` attached. If you ever see
   one go out without it, that's a bug — stop trading and file it.
 * Start with `risk_per_trade_pct: 0.5` and `leverage: 25` until you've watched

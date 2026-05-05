@@ -242,6 +242,16 @@ def build_order(
     # in the hybrid path; remove from config to fully decommission.
     tp_dist = stop_dist * risk.take_profit_r
 
+    # Optional direct margin-profit target. For high-leverage pump-fade scalps,
+    # the desired hold is often "grab ~15% on margin", not "wait for a full
+    # arbitrary R multiple". Convert margin target to the equivalent price
+    # move and cap TP there.
+    margin_target_pct = float(getattr(risk, "margin_profit_target_pct", 0.0) or 0.0)
+    if margin_target_pct > 0 and leverage > 0:
+        target_dist = price * ((margin_target_pct / leverage) / 100.0)
+        if target_dist > 0:
+            tp_dist = min(tp_dist, target_dist)
+
     # Volume-profile TP anchor: when HVN exists in the trade direction,
     # use it as a TP target (resistance for long = where price is likely
     # to bounce off; support for short = where shorts typically cover).

@@ -39,6 +39,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+import requests
+
 log = logging.getLogger(__name__)
 
 
@@ -85,6 +87,7 @@ class TradeJournal:
         # Cap memory: if either set grows past this size, evict oldest
         # (simple FIFO via list; relies on dict-like ordering since 3.7).
         self._dedup_max_entries = 5000
+        self.webhook_url = os.environ.get("TRADE_WEBHOOK_URL", "").strip()
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
         except Exception as e:
@@ -127,6 +130,16 @@ class TradeJournal:
         except Exception as e:
             log.warning("TradeJournal: write failed for %s: %s",
                         self.path, e)
+            return
+        self._send_webhook(record)
+
+    def _send_webhook(self, record: dict[str, Any]) -> None:
+        if not self.webhook_url:
+            return
+        try:
+            requests.post(self.webhook_url, json=record, timeout=3.0)
+        except Exception as e:
+            log.debug("TradeJournal webhook failed: %s", e)
 
     def record_entry(
         self,

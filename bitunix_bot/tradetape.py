@@ -74,6 +74,7 @@ class TradeFeed:
     ):
         self.symbols = [s.upper() for s in symbols]
         self.history_secs = history_secs
+        self.max_trades_per_symbol = max_trades_per_symbol
         self._trades: dict[str, Deque[Trade]] = {
             s: deque(maxlen=max_trades_per_symbol) for s in self.symbols
         }
@@ -111,6 +112,25 @@ class TradeFeed:
 
     def stop(self) -> None:
         self._stop.set()
+        if self._ws:
+            try:
+                self._ws.close()
+            except Exception:
+                pass
+
+    def update_symbols(self, symbols: list[str]) -> None:
+        """Replace the subscription universe and reconnect if it changed."""
+        next_symbols = [s.upper() for s in symbols]
+        with self._lock:
+            if next_symbols == self.symbols:
+                return
+            old = set(self.symbols)
+            self.symbols = next_symbols
+            for sym in next_symbols:
+                self._trades.setdefault(sym, deque(maxlen=self.max_trades_per_symbol))
+            added = sorted(set(next_symbols) - old)
+            removed = sorted(old - set(next_symbols))
+        log.info("TradeFeed symbols updated: +%s -%s", added, removed)
         if self._ws:
             try:
                 self._ws.close()
