@@ -1,32 +1,328 @@
-/* All overlay CSS is namespaced under #bxm-overlay so we never collide
-   with Bitunix's own styles. */
-
 #bxm-overlay {
   position: fixed;
-  z-index: 2147483647;
   top: 80px;
-  right: 16px;
-  width: 320px;
-  min-width: 220px;
-  max-width: min(380px, calc(100vw - 24px));
-  min-height: 70px;
-  max-height: 82vh;
-  font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-  color: #e6edf3;
-  background: rgba(13, 17, 23, 0.92);
-  border: 1px solid #30363d;
-  border-radius: 10px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(6px);
-  user-select: none;
-  cursor: default;
+  right: 18px;
+  z-index: 2147483647;
+  width: 330px;
+  min-width: 230px;
+  max-width: min(430px, calc(100vw - 24px));
+  min-height: 68px;
+  max-height: 84vh;
+  resize: both;
+  overflow: auto;
   display: flex;
   flex-direction: column;
-  overflow: hidden;
-  resize: both;
+  color: #121821;
+  background: rgba(255, 255, 255, 0.96);
+  border: 1px solid #d9dee7;
+  border-radius: 8px;
+  box-shadow: 0 16px 40px rgba(10, 18, 30, 0.22);
+  font: 12px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+  letter-spacing: 0;
+  user-select: none;
 }
 
-#bxm-overlay.bxm-collapsed .bxm-body { display: none; }
-#bxm-overlay.bxm-collapsed { width: auto; }
+#bxm-overlay * { box-sizing: border-box; }
+#bxm-overlay button { font: inherit; }
+#bxm-overlay.bxm-collapsed .bxm-body,
+#bxm-overlay.bxm-collapsed .bxm-footer,
+#bxm-overlay.bxm-collapsed .bxm-banner { display: none; }
+#bxm-overlay.bxm-collapsed { width: auto; min-width: 190px; resize: none; }
 
-/* ... (full CSS content abbreviated for brevity - I will include full in actual call) */
+#bxm-overlay .bxm-header {
+  min-height: 42px;
+  padding: 9px 10px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  cursor: move;
+  border-bottom: 1px solid #e6e9ef;
+  background: #ffffff;
+}
+
+#bxm-overlay .bxm-title {
+  font-weight: 800;
+  font-size: 13px;
+  text-transform: uppercase;
+  color: #1b2430;
+  white-space: nowrap;
+}
+
+#bxm-overlay .bxm-actions { display: flex; gap: 6px; }
+#bxm-overlay .bxm-actions button,
+#bxm-overlay .bxm-tabs button,
+#bxm-overlay .bxm-error button {
+  border: 1px solid #d7dce5;
+  background: #ffffff;
+  color: #283241;
+  border-radius: 6px;
+  height: 26px;
+  min-width: 28px;
+  padding: 0 8px;
+  cursor: pointer;
+}
+
+#bxm-overlay .bxm-actions button:hover,
+#bxm-overlay .bxm-tabs button:hover,
+#bxm-overlay .bxm-error button:hover { background: #f3f6fa; }
+
+#bxm-overlay .bxm-banner {
+  display: none;
+  padding: 8px 12px;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  text-align: center;
+}
+
+#bxm-overlay.bxm-alert .bxm-banner {
+  display: block;
+  color: #8f1b13;
+  background: #ffe4df;
+  border-bottom: 1px solid #ffc2ba;
+}
+
+#bxm-overlay.bxm-building .bxm-banner {
+  display: block;
+  color: #6d3f00;
+  background: #fff3d6;
+  border-bottom: 1px solid #f7d58a;
+}
+
+#bxm-overlay .bxm-body { padding: 10px; overflow: auto; }
+#bxm-overlay .bxm-tabs {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  margin-bottom: 10px;
+}
+
+#bxm-overlay .bxm-tabs button {
+  height: 34px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+#bxm-overlay .bxm-tabs button.active {
+  border-color: #4a7dff;
+  box-shadow: inset 0 0 0 1px #4a7dff;
+}
+
+#bxm-overlay .bxm-tabs i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #8b95a5;
+  display: inline-block;
+}
+#bxm-overlay .bxm-tabs .short i { background: #e5484d; }
+#bxm-overlay .bxm-tabs .building i { background: #f59e0b; }
+#bxm-overlay .bxm-tabs .watch i { background: #3b82f6; }
+
+#bxm-overlay .bxm-symbol-row,
+#bxm-overlay .bxm-plan-head,
+#bxm-overlay .bxm-history-head,
+#bxm-overlay .bxm-countdown > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+#bxm-overlay .bxm-symbol-row {
+  margin-bottom: 8px;
+  font-size: 14px;
+  font-weight: 700;
+}
+#bxm-overlay .bxm-symbol-row em,
+#bxm-overlay .bxm-footer,
+#bxm-overlay .bxm-history-head span {
+  color: #657083;
+  font-style: normal;
+  font-weight: 500;
+}
+
+#bxm-overlay .bxm-card,
+#bxm-overlay .bxm-plan,
+#bxm-overlay .bxm-countdown,
+#bxm-overlay .bxm-history,
+#bxm-overlay .bxm-checks,
+#bxm-overlay .bxm-error {
+  border: 1px solid #dfe4eb;
+  border-radius: 8px;
+  background: #ffffff;
+  margin-bottom: 10px;
+  padding: 12px;
+}
+
+#bxm-overlay .bxm-card {
+  border-left: 6px solid #8b95a5;
+}
+#bxm-overlay .bxm-card.stage-short {
+  background: #fff4f1;
+  border-color: #ffc5bd;
+  border-left-color: #e5484d;
+}
+#bxm-overlay .bxm-card.stage-building {
+  background: #fffaf0;
+  border-color: #f3d78e;
+  border-left-color: #f59e0b;
+}
+#bxm-overlay .bxm-card.stage-watch {
+  background: #f3f7ff;
+  border-color: #c8d9ff;
+  border-left-color: #3b82f6;
+}
+
+#bxm-overlay .bxm-card-main {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 9px;
+}
+#bxm-overlay .bxm-card-main span {
+  font-size: 20px;
+  font-weight: 900;
+}
+#bxm-overlay .bxm-card-main strong {
+  font-size: 22px;
+  line-height: 1.1;
+  color: #111827;
+}
+#bxm-overlay .bxm-card-main b {
+  font-size: 16px;
+  color: #374151;
+}
+#bxm-overlay .bxm-card p,
+#bxm-overlay .bxm-note,
+#bxm-overlay .bxm-countdown p,
+#bxm-overlay .bxm-error p {
+  margin: 7px 0 0;
+  color: #5b6473;
+}
+
+#bxm-overlay .bxm-warning {
+  margin-bottom: 10px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  color: #6d3f00;
+  background: #fff3d6;
+  border: 1px solid #f7d58a;
+}
+#bxm-overlay .bxm-warning.bad {
+  color: #8f1b13;
+  background: #ffe4df;
+  border-color: #ffc2ba;
+}
+
+#bxm-overlay .bxm-plan-price {
+  margin: 4px 0 10px;
+  font-size: 26px;
+  font-weight: 800;
+  color: #111827;
+}
+#bxm-overlay .bxm-plan-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+#bxm-overlay .bxm-plan-grid div {
+  padding: 8px;
+  border-radius: 6px;
+  background: #f7f9fc;
+}
+#bxm-overlay .bxm-plan-grid span,
+#bxm-overlay .bxm-check span,
+#bxm-overlay .bxm-subrow em,
+#bxm-overlay .bxm-trade span {
+  display: block;
+  color: #687385;
+}
+
+#bxm-overlay .bxm-countdown {
+  border-left: 5px solid #3b82f6;
+  background: #f4f8ff;
+}
+#bxm-overlay .bxm-countdown.urgent {
+  border-left-color: #e5484d;
+  background: #fff4f1;
+}
+#bxm-overlay .bxm-countdown strong {
+  font-size: 24px;
+}
+
+#bxm-overlay .bxm-section-title {
+  color: #6b7280;
+  text-transform: uppercase;
+  font-weight: 800;
+  font-size: 11px;
+}
+
+#bxm-overlay .bxm-trade {
+  display: grid;
+  grid-template-columns: 80px 1fr;
+  gap: 8px;
+  padding: 7px 0;
+  border-top: 1px solid #edf0f4;
+}
+
+#bxm-overlay .bxm-subrows {
+  margin-bottom: 10px;
+  border: 1px solid #e3e7ee;
+  border-radius: 8px;
+  overflow: hidden;
+}
+#bxm-overlay .bxm-subrow {
+  display: grid;
+  grid-template-columns: 92px 58px 70px 1fr;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 9px;
+  background: #fff;
+  border-bottom: 1px solid #edf0f4;
+}
+#bxm-overlay .bxm-subrow:last-child { border-bottom: 0; }
+#bxm-overlay .bxm-subrow b {
+  height: 6px;
+  background: #e9edf3;
+  border-radius: 99px;
+  overflow: hidden;
+}
+#bxm-overlay .bxm-subrow i {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: #3b82f6;
+}
+
+#bxm-overlay .bxm-check {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 8px 0;
+  border-top: 1px solid #edf0f4;
+}
+#bxm-overlay .bxm-check em {
+  font-style: normal;
+  font-weight: 800;
+  color: #8b95a5;
+}
+#bxm-overlay .bxm-check.passed em { color: #157f3b; }
+
+#bxm-overlay .good { color: #157f3b !important; }
+#bxm-overlay .bad { color: #c02b25 !important; }
+
+#bxm-overlay .bxm-footer {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-top: 1px solid #e6e9ef;
+  background: #fafbfc;
+  font-size: 11px;
+}

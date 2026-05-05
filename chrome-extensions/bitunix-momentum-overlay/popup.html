@@ -1,1 +1,37 @@
-<!doctype html> ... full popup.html
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8">
+    <title>Bitunix Overlay</title>
+    <style>
+      body {
+        width: 260px;
+        margin: 0;
+        padding: 14px;
+        color: #111827;
+        background: #fff;
+        font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+      }
+      h1 { margin: 0 0 8px; font-size: 16px; }
+      p { margin: 0 0 12px; color: #5d6878; }
+      button {
+        width: 100%;
+        height: 36px;
+        margin-top: 8px;
+        border: 1px solid #d4dbe6;
+        border-radius: 6px;
+        background: #fff;
+        cursor: pointer;
+        font-weight: 700;
+      }
+      button.primary { color: #fff; background: #2563eb; border-color: #2563eb; }
+    </style>
+  </head>
+  <body>
+    <h1>Bitunix Overlay</h1>
+    <p id="status">Checking settings...</p>
+    <button class="primary" id="openBitunix">Open Bitunix</button>
+    <button id="options">Settings</button>
+    <script src="popup.js"></script>
+  </body>
+</html>
