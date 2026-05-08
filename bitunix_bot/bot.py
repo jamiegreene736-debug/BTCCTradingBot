@@ -1443,7 +1443,7 @@ class BitunixBot:
         warnings = ["waiting for parabolic pump + 1m entry rejection before shorting"]
         setup_stage = "hunting"
         if pump_watch:
-            warnings = ["pump detected; waiting for near-high 1m rejection before shorting"]
+            warnings = ["pump detected now; get ready for a fast fade-short entry"]
             setup_stage = "pump_watch"
         elif pre_pump:
             warnings = ["pump building; wait for blow-off high, then bearish rejection before shorting"]

@@ -15,6 +15,11 @@
   let panelEl = null;
   let lastAutoSwitchAt = 0;
   let manualHoldUntil = 0;
+  let titleFlashTimer = null;
+  let titleFlashKey = "";
+  let titleFlashPrefix = "";
+  let titleFlashOn = false;
+  let cleanPageTitle = document.title;
 
   function pick(obj, ...keys) {
     for (const key of keys) {
@@ -177,6 +182,10 @@
     return candidates.find((c) => !c.blocked && c.stage !== "hunting") || candidates[0] || null;
   }
 
+  function isPumpAlertStage(stage) {
+    return stage === "watch" || stage === "short";
+  }
+
   function candidateScoreText(c) {
     if (!c) return "";
     if (c.stage === "short") return `${Math.round(c.score)}/100`;
@@ -188,10 +197,14 @@
     const best = bestCandidate(candidates);
     if (!autoFollow || !best) return best;
     const now = Date.now();
-    if (manualHoldUntil > now || best.symbol === activeSymbol) return best;
+    if (best.symbol === activeSymbol) return best;
 
     const current = candidateFor(activeSymbol, latest?.symbols?.[activeSymbol] || {});
-    const urgent = best.stage === "short";
+    const currentIsAlert = isPumpAlertStage(current.stage);
+    const urgent = best.stage === "short" || (
+      best.stage === "watch" && (!currentIsAlert || best.rankScore - current.rankScore >= 15)
+    );
+    if (manualHoldUntil > now && !urgent) return best;
     const actionable = best.stage !== "hunting";
     const cooledDown = urgent || now - lastAutoSwitchAt >= (actionable ? 12000 : 30000);
     const stageUpgrade = best.priority > current.priority;
@@ -204,6 +217,40 @@
       lastAutoSwitchAt = now;
     }
     return best;
+  }
+
+  function stopTitleFlash() {
+    if (titleFlashTimer) clearInterval(titleFlashTimer);
+    titleFlashTimer = null;
+    titleFlashKey = "";
+    titleFlashPrefix = "";
+    titleFlashOn = false;
+    if (document.title.startsWith("[PUMP WATCH ") || document.title.startsWith("[FADE SHORT ")) {
+      document.title = cleanPageTitle;
+    }
+  }
+
+  function ensureTitleFlash(candidate) {
+    if (!candidate || !isPumpAlertStage(candidate.stage)) {
+      stopTitleFlash();
+      return;
+    }
+    const key = `${candidate.stage}:${candidate.symbol}`;
+    const label = candidate.stage === "short" ? "FADE SHORT" : "PUMP WATCH";
+    const symbol = candidate.symbol.replace("USDT", "");
+    titleFlashPrefix = `[${label} ${symbol}]`;
+    if (titleFlashKey !== key) {
+      cleanPageTitle = document.title
+        .replace(/^\[PUMP WATCH [^\]]+\] /, "")
+        .replace(/^\[FADE SHORT [^\]]+\] /, "");
+      titleFlashKey = key;
+      titleFlashOn = false;
+    }
+    if (titleFlashTimer) return;
+    titleFlashTimer = setInterval(() => {
+      titleFlashOn = !titleFlashOn;
+      document.title = titleFlashOn ? `${titleFlashPrefix} ${cleanPageTitle}` : cleanPageTitle;
+    }, 700);
   }
 
   function stageCopy(stage, score) {
@@ -221,8 +268,8 @@
     };
     if (stage === "watch") return {
       title: "PUMP WATCH",
-      kicker: "WAITING",
-      detail: "pump detected; waiting for near-high 1m fade entry",
+      kicker: "GET READY",
+      detail: "pump detected now; prepare for the fast fade-short entry",
       icon: "||",
     };
     return {
@@ -502,14 +549,19 @@
       ? `${best.symbol.replace("USDT", "")} - ${best.stage.toUpperCase()} - ${candidateScoreText(best)}`
       : "";
     const bestLabel = autoSelected ? "AUTO SELECTED" : (autoFollow ? "AUTO BEST" : "BEST NOW");
+    const alertCandidate = best && isPumpAlertStage(best.stage) ? best : null;
 
-    panelEl.classList.toggle("bxm-alert", stage === "short");
-    panelEl.classList.toggle("bxm-building", stage === "building");
-    banner.textContent = stage === "short"
-      ? `AUTO SHORT READY - ${score}/100 - ${decision?.suggested_lev || decision?.suggestedLev || 100}x`
-      : stage === "building"
-        ? `PUMP BUILDING - ${score}/100`
-        : "";
+    panelEl.classList.toggle("bxm-alert", alertCandidate?.stage === "short");
+    panelEl.classList.toggle("bxm-watch", alertCandidate?.stage === "watch");
+    panelEl.classList.toggle("bxm-building", !alertCandidate && stage === "building");
+    banner.textContent = alertCandidate?.stage === "short"
+      ? `FADE SHORT READY - ${alertCandidate.symbol.replace("USDT", "")} - ${candidateScoreText(alertCandidate)} - ${alertCandidate.decision?.suggested_lev || alertCandidate.decision?.suggestedLev || 100}x`
+      : alertCandidate?.stage === "watch"
+        ? `PUMP WATCH - ${alertCandidate.symbol.replace("USDT", "")} - ${candidateScoreText(alertCandidate)} - GET READY`
+        : stage === "building"
+          ? `PUMP BUILDING - ${score}/49`
+          : "";
+    ensureTitleFlash(alertCandidate);
 
     block.innerHTML = `
       ${best ? `<button id="bxm-best-pick" class="bxm-best stage-${escapeHtml(bestStage)} ${best.symbol === activeSymbol ? "active" : ""}" title="Select the strongest current candidate">

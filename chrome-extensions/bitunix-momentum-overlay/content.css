@@ -29,6 +29,33 @@
 #bxm-overlay.bxm-collapsed .bxm-banner { display: none; }
 #bxm-overlay.bxm-collapsed { width: auto; min-width: 190px; resize: none; }
 
+@keyframes bxm-pump-flash {
+  0%, 100% {
+    border-color: #d99a00;
+    box-shadow: 0 16px 40px rgba(10, 18, 30, 0.22), 0 0 0 4px rgba(255, 239, 82, 0.55);
+  }
+  50% {
+    border-color: #ffb300;
+    box-shadow: 0 16px 40px rgba(10, 18, 30, 0.22), 0 0 0 8px rgba(255, 214, 0, 0.9);
+  }
+}
+
+@keyframes bxm-banner-flash {
+  0%, 100% { background: #fff04a; }
+  50% { background: #ffb800; }
+}
+
+@keyframes bxm-short-flash {
+  0%, 100% {
+    border-color: #e5484d;
+    box-shadow: 0 16px 40px rgba(10, 18, 30, 0.22), 0 0 0 4px rgba(229, 72, 77, 0.42);
+  }
+  50% {
+    border-color: #b91c1c;
+    box-shadow: 0 16px 40px rgba(10, 18, 30, 0.22), 0 0 0 8px rgba(239, 68, 68, 0.7);
+  }
+}
+
 #bxm-overlay .bxm-header {
   min-height: 42px;
   padding: 9px 10px;
@@ -92,6 +119,14 @@
   border-bottom: 1px solid #ffc2ba;
 }
 
+#bxm-overlay.bxm-watch .bxm-banner {
+  display: block;
+  color: #111827;
+  background: #fff04a;
+  border-bottom: 1px solid #d99a00;
+  animation: bxm-banner-flash 0.65s ease-in-out infinite;
+}
+
 #bxm-overlay.bxm-building .bxm-banner {
   display: block;
   color: #6d3f00;
@@ -144,7 +179,7 @@
 }
 #bxm-overlay .bxm-tabs .short i { background: #e5484d; }
 #bxm-overlay .bxm-tabs .building i { background: #f59e0b; }
-#bxm-overlay .bxm-tabs .watch i { background: #3b82f6; }
+#bxm-overlay .bxm-tabs .watch i { background: #ffb800; }
 
 #bxm-overlay .bxm-best {
   width: 100%;
@@ -188,6 +223,16 @@
 #bxm-overlay.bxm-auto-selected {
   border-color: #d99a00;
   box-shadow: 0 16px 40px rgba(10, 18, 30, 0.22), 0 0 0 4px rgba(255, 239, 82, 0.55);
+}
+
+#bxm-overlay.bxm-watch {
+  border-color: #d99a00;
+  animation: bxm-pump-flash 0.85s ease-in-out infinite;
+}
+
+#bxm-overlay.bxm-alert {
+  border-color: #e5484d;
+  animation: bxm-short-flash 0.85s ease-in-out infinite;
 }
 
 #bxm-overlay .bxm-symbol-row,
@@ -240,9 +285,10 @@
   border-left-color: #f59e0b;
 }
 #bxm-overlay .bxm-card.stage-watch {
-  background: #f3f7ff;
-  border-color: #c8d9ff;
-  border-left-color: #3b82f6;
+  background: #fff9bf;
+  border-color: #f2c200;
+  border-left-color: #ffb800;
+  animation: bxm-banner-flash 0.85s ease-in-out infinite;
 }
 
 #bxm-overlay .bxm-card-main {
@@ -391,4 +437,12 @@
   border-top: 1px solid #e6e9ef;
   background: #fafbfc;
   font-size: 11px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #bxm-overlay,
+  #bxm-overlay .bxm-banner,
+  #bxm-overlay .bxm-card.stage-watch {
+    animation: none !important;
+  }
 }
