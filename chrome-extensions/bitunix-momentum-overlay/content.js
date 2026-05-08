@@ -9,7 +9,8 @@
   let latest = null;
   let fetchedAt = 0;
   let activeSymbol = localStorage.getItem("bxm-active-symbol") || "";
-  let autoFollow = localStorage.getItem("bxm-auto-follow") !== "0";
+  const AUTO_FOLLOW_KEY = "bxm-auto-follow-v2";
+  let autoFollow = localStorage.getItem(AUTO_FOLLOW_KEY) !== "0";
   let collapsed = localStorage.getItem("bxm-collapsed") === "1";
   let panelEl = null;
   let lastAutoSwitchAt = 0;
@@ -185,17 +186,19 @@
 
   function maybeAutoSelectBest(candidates) {
     const best = bestCandidate(candidates);
-    if (!autoFollow || !best || best.stage === "hunting") return best;
+    if (!autoFollow || !best) return best;
     const now = Date.now();
     if (manualHoldUntil > now || best.symbol === activeSymbol) return best;
 
     const current = candidateFor(activeSymbol, latest?.symbols?.[activeSymbol] || {});
     const urgent = best.stage === "short";
-    const cooledDown = urgent || now - lastAutoSwitchAt >= 15000;
+    const actionable = best.stage !== "hunting";
+    const cooledDown = urgent || now - lastAutoSwitchAt >= (actionable ? 12000 : 30000);
     const stageUpgrade = best.priority > current.priority;
     const scoreUpgrade = best.priority === current.priority && best.rankScore - current.rankScore >= 15;
-    const currentIsDead = !current.symbol || current.stage === "hunting";
-    if (cooledDown && (urgent || stageUpgrade || scoreUpgrade || currentIsDead)) {
+    const huntingUpgrade = !actionable && current.stage === "hunting" && best.score >= current.score + 20;
+    const currentIsDead = !current.symbol || !latest?.symbols?.[activeSymbol];
+    if (cooledDown && (urgent || stageUpgrade || scoreUpgrade || huntingUpgrade || currentIsDead)) {
       activeSymbol = best.symbol;
       localStorage.setItem("bxm-active-symbol", activeSymbol);
       lastAutoSwitchAt = now;
@@ -405,7 +408,7 @@
     autoBtn.classList.toggle("active", autoFollow);
     autoBtn.addEventListener("click", () => {
       autoFollow = !autoFollow;
-      localStorage.setItem("bxm-auto-follow", autoFollow ? "1" : "0");
+      localStorage.setItem(AUTO_FOLLOW_KEY, autoFollow ? "1" : "0");
       manualHoldUntil = 0;
       autoBtn.classList.toggle("active", autoFollow);
       render();
@@ -468,10 +471,12 @@
     const best = maybeAutoSelectBest(candidates);
     const orderedSymbols = candidates.map((c) => c.symbol);
     panelEl.querySelector("#bxm-auto")?.classList.toggle("active", autoFollow);
+    const autoSelected = Boolean(autoFollow && best && best.symbol === activeSymbol);
+    panelEl.classList.toggle("bxm-auto-selected", autoSelected);
 
     tabs.innerHTML = orderedSymbols.map((s) => {
       const c = candidateFor(s, latest.symbols[s]);
-      return `<button class="${s === activeSymbol ? "active" : ""} ${c.stage}" data-sym="${escapeHtml(s)}" title="${escapeHtml(c.stage.toUpperCase())} ${escapeHtml(candidateScoreText(c))}">
+      return `<button class="${s === activeSymbol ? "active" : ""} ${best && s === best.symbol ? "best" : ""} ${c.stage}" data-sym="${escapeHtml(s)}" title="${escapeHtml(c.stage.toUpperCase())} ${escapeHtml(candidateScoreText(c))}">
         <i></i>${escapeHtml(s.replace("USDT", ""))}
       </button>`;
     }).join("");
@@ -496,6 +501,7 @@
     const bestText = best
       ? `${best.symbol.replace("USDT", "")} - ${best.stage.toUpperCase()} - ${candidateScoreText(best)}`
       : "";
+    const bestLabel = autoSelected ? "AUTO SELECTED" : (autoFollow ? "AUTO BEST" : "BEST NOW");
 
     panelEl.classList.toggle("bxm-alert", stage === "short");
     panelEl.classList.toggle("bxm-building", stage === "building");
@@ -507,7 +513,7 @@
 
     block.innerHTML = `
       ${best ? `<button id="bxm-best-pick" class="bxm-best stage-${escapeHtml(bestStage)} ${best.symbol === activeSymbol ? "active" : ""}" title="Select the strongest current candidate">
-        <span>${autoFollow ? "Auto-best" : "Best now"}</span>
+        <span>${escapeHtml(bestLabel)}</span>
         <strong>${escapeHtml(bestText)}</strong>
       </button>` : ""}
       <div class="bxm-symbol-row">

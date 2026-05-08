@@ -21,9 +21,9 @@ dashboard.
 - `FADE SHORT`: the backend has a confirmed pump-fade short setup.
 - Per-symbol closed trade history and net P&L.
 - Open-position display. Timed auto-close is currently disabled.
-- `AUTO` mode ranks all scanned coins, keeps the strongest non-hunting
-  pump-fade candidate selected, and pauses for 60 seconds when you manually
-  click a coin.
+- `AUTO` mode ranks all scanned coins, keeps the strongest pump-fade candidate
+  selected, and highlights the chosen coin in bright yellow. It pauses for
+  60 seconds when you manually click a coin.
 
 The extension does not compute signals locally. The backend is the source of
 truth; this folder only renders the overlay and relays admin actions.
