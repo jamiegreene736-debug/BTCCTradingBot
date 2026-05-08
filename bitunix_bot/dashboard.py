@@ -64,6 +64,88 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
     def _symbol(value: Any) -> str:
         return str(value or "").strip().upper()
 
+    def _overlay_decision(row: dict[str, Any]) -> dict[str, Any]:
+        decision = (
+            row.get("decision")
+            or row.get("recommendation")
+            or row.get("next_1h")
+            or row.get("next1h")
+            or row.get("next_15m")
+            or row.get("next15m")
+            or {}
+        )
+        return decision if isinstance(decision, dict) else {}
+
+    def _pump_stage(decision: dict[str, Any]) -> str:
+        action = str(decision.get("action") or "wait").lower()
+        setup = str(decision.get("setup") or "")
+        stage = str(decision.get("setup_stage") or decision.get("setupStage") or "").lower()
+        if action == "short" and setup == "parabolic_pump_fade":
+            return "short"
+        if stage == "pump_building" or decision.get("pre_pump_building") or decision.get("prePumpBuilding"):
+            return "building"
+        if stage == "pump_watch":
+            return "watch"
+        return "hunting"
+
+    def _pump_stage_score(decision: dict[str, Any], stage: str) -> int:
+        if stage == "short":
+            return int(max(0, min(100, _float(
+                decision.get("confidence_score") or decision.get("confidenceScore")
+            ))))
+        if stage == "building":
+            return int(max(0, min(49, _float(
+                decision.get("pre_pump_score")
+                or decision.get("prePumpScore")
+                or decision.get("checklist_score")
+                or decision.get("checklistScore")
+            ))))
+        if stage == "watch":
+            return int(max(0, min(49, _float(
+                decision.get("checklist_score") or decision.get("checklistScore")
+            ))))
+        return int(max(0, min(49, _float(
+            decision.get("checklist_score") or decision.get("checklistScore")
+        ))))
+
+    def _pump_candidate(sym: str, row: dict[str, Any]) -> dict[str, Any]:
+        decision = _overlay_decision(row)
+        stage = _pump_stage(decision)
+        score = _pump_stage_score(decision, stage)
+        priority = {"short": 4, "watch": 3, "building": 2, "hunting": 1}.get(stage, 0)
+        blocked = bool(
+            row.get("symbol_trade_quality_gate")
+            or row.get("symbolTradeQualityGate")
+            or decision.get("blocked_by")
+            or decision.get("blockedBy")
+        )
+        # Rank by stage first, score second. Blocked symbols remain visible but
+        # never win the "best coin" race.
+        rank_score = priority * 100 + score - (1000 if blocked else 0)
+        warnings = decision.get("warnings") if isinstance(decision.get("warnings"), list) else []
+        return {
+            "symbol": sym,
+            "stage": stage,
+            "score": score,
+            "rank_score": rank_score,
+            "rankScore": rank_score,
+            "priority": priority,
+            "blocked": blocked,
+            "price": row.get("price"),
+            "action": decision.get("action") or "wait",
+            "setup": decision.get("setup"),
+            "warning": warnings[0] if warnings else "",
+        }
+
+    def _best_pump_candidates(symbols_payload: dict[str, Any]) -> list[dict[str, Any]]:
+        candidates: list[dict[str, Any]] = []
+        for sym, row in symbols_payload.items():
+            if not isinstance(row, dict):
+                continue
+            candidates.append(_pump_candidate(sym, row))
+        candidates.sort(key=lambda c: (c["rank_score"], c["score"], c["symbol"]), reverse=True)
+        return candidates
+
     def _position_ctime_ms(p: dict[str, Any]) -> int:
         raw = (
             p.get("ctime")
@@ -844,6 +926,12 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
                 row["closedTradeStats"] = stats
                 _apply_symbol_history_gate(row, sym, trades)
 
+        best_candidates = _best_pump_candidates(symbols_payload)
+        best_candidate = next(
+            (c for c in best_candidates if not c["blocked"] and c["stage"] != "hunting"),
+            best_candidates[0] if best_candidates else None,
+        )
+
         return jsonify({
             "now": int(time.time()),
             "tick_seconds": cfg.loop.tick_seconds,
@@ -861,6 +949,12 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
             "closed_positions_error": closed_positions_error,
             "closed_trade_stats": _closed_trade_stats(closed_positions),
             "closedTradeStats": _closed_trade_stats(closed_positions),
+            "best_symbol": best_candidate.get("symbol") if best_candidate else None,
+            "bestSymbol": best_candidate.get("symbol") if best_candidate else None,
+            "best_candidate": best_candidate,
+            "bestCandidate": best_candidate,
+            "best_candidates": best_candidates[:10],
+            "bestCandidates": best_candidates[:10],
             "status": {
                 "ready": bool(snap),
                 "symbols_count": len(symbols_payload),

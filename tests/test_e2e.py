@@ -654,6 +654,63 @@ def test_momentum_endpoint_lazily_warms_empty_overlay():
     assert "BTCUSDT" in j["symbols"]
 
 
+def test_momentum_endpoint_ranks_best_pump_fade_candidate():
+    reset_state()
+    cfg = fresh_cfg()
+    client = make_mock_client()
+    now_s = int(time.time())
+
+    def overlay(symbol: str, decision: dict[str, Any], price: float = 1.0) -> dict[str, Any]:
+        return {
+            "symbol": symbol,
+            "price": price,
+            "horizons": {},
+            "horizon_order": [],
+            "alignment": {"dominant": "mixed"},
+            "decision": decision,
+            "next_1h": decision,
+            "next_15m": decision,
+            "as_of": now_s,
+        }
+
+    get_state().record_overlay("BTCUSDT", overlay("BTCUSDT", {
+        "action": "wait",
+        "setup_stage": "hunting",
+        "checklist_score": 20,
+    }, 60000.0))
+    get_state().record_overlay("DOGEUSDT", overlay("DOGEUSDT", {
+        "action": "wait",
+        "setup_stage": "pump_building",
+        "pre_pump_building": True,
+        "pre_pump_score": 40,
+    }, 0.11))
+    get_state().record_overlay("ETHUSDT", overlay("ETHUSDT", {
+        "action": "wait",
+        "setup_stage": "pump_watch",
+        "checklist_score": 49,
+    }, 2300.0))
+    get_state().record_overlay("XRPUSDT", overlay("XRPUSDT", {
+        "action": "short",
+        "setup": "parabolic_pump_fade",
+        "confidence_score": 92,
+        "confidenceScore": 92,
+    }, 1.4))
+
+    app = create_app(cfg, client)
+    c = app.test_client()
+    good = base64.b64encode(b"admin:test_pass").decode()
+
+    r = c.get("/api/momentum", headers={"Authorization": f"Basic {good}"})
+    assert r.status_code == 200
+    j = r.get_json()
+    assert j["best_symbol"] == "XRPUSDT"
+    assert j["best_candidate"]["stage"] == "short"
+    assert j["best_candidate"]["score"] == 92
+    assert [c["symbol"] for c in j["best_candidates"][:4]] == [
+        "XRPUSDT", "ETHUSDT", "DOGEUSDT", "BTCUSDT",
+    ]
+
+
 def test_momentum_endpoint_omits_position_countdown_when_disabled():
     reset_state()
     cfg = fresh_cfg()
@@ -6395,7 +6452,9 @@ def main() -> int:
         test_live_mode_actually_calls_place_order,
         test_dashboard_routes_and_auth,
         test_momentum_endpoint_lazily_warms_empty_overlay,
-        test_momentum_endpoint_includes_position_countdown,
+        test_momentum_endpoint_ranks_best_pump_fade_candidate,
+        test_momentum_endpoint_omits_position_countdown_when_disabled,
+        test_momentum_endpoint_includes_position_countdown_when_enabled,
         test_momentum_endpoint_includes_per_symbol_closed_trade_history,
         test_momentum_endpoint_blocks_symbol_after_losing_pump_fade_shorts,
         test_close_symbol_endpoint_market_closes_full_matching_position,

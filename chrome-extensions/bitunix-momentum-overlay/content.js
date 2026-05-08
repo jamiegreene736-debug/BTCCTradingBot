@@ -9,8 +9,11 @@
   let latest = null;
   let fetchedAt = 0;
   let activeSymbol = localStorage.getItem("bxm-active-symbol") || "";
+  let autoFollow = localStorage.getItem("bxm-auto-follow") !== "0";
   let collapsed = localStorage.getItem("bxm-collapsed") === "1";
   let panelEl = null;
+  let lastAutoSwitchAt = 0;
+  let manualHoldUntil = 0;
 
   function pick(obj, ...keys) {
     for (const key of keys) {
@@ -131,6 +134,73 @@
     if (stage === "building") return num(pick(decision, "pre_pump_score", "prePumpScore", "checklist_score", "checklistScore"), 0);
     if (stage === "watch") return num(pick(decision, "checklist_score", "checklistScore"), 0);
     return num(pick(decision, "checklist_score", "checklistScore"), 0);
+  }
+
+  function stagePriority(stage) {
+    return { short: 4, watch: 3, building: 2, hunting: 1 }[stage] || 0;
+  }
+
+  function candidateFor(symbol, symData) {
+    const decision = decisionFor(symData);
+    const stage = stageFor(decision);
+    const score = scoreFor(decision);
+    const priority = stagePriority(stage);
+    const blocked = Boolean(
+      symData?.symbol_trade_quality_gate ||
+      symData?.symbolTradeQualityGate ||
+      pick(decision, "blocked_by", "blockedBy")
+    );
+    const rankScore = (priority * 100) + score - (blocked ? 1000 : 0);
+    return {
+      symbol,
+      decision,
+      stage,
+      score,
+      priority,
+      rankScore,
+      blocked,
+    };
+  }
+
+  function rankedCandidates(symbols) {
+    return symbols
+      .map((s) => candidateFor(s, latest?.symbols?.[s] || {}))
+      .sort((a, b) => {
+        if (b.rankScore !== a.rankScore) return b.rankScore - a.rankScore;
+        if (b.score !== a.score) return b.score - a.score;
+        return a.symbol.localeCompare(b.symbol);
+      });
+  }
+
+  function bestCandidate(candidates) {
+    return candidates.find((c) => !c.blocked && c.stage !== "hunting") || candidates[0] || null;
+  }
+
+  function candidateScoreText(c) {
+    if (!c) return "";
+    if (c.stage === "short") return `${Math.round(c.score)}/100`;
+    if (c.stage === "watch" || c.stage === "building") return `${Math.round(c.score)}/49`;
+    return c.score ? `${Math.round(c.score)}/49` : "0/49";
+  }
+
+  function maybeAutoSelectBest(candidates) {
+    const best = bestCandidate(candidates);
+    if (!autoFollow || !best || best.stage === "hunting") return best;
+    const now = Date.now();
+    if (manualHoldUntil > now || best.symbol === activeSymbol) return best;
+
+    const current = candidateFor(activeSymbol, latest?.symbols?.[activeSymbol] || {});
+    const urgent = best.stage === "short";
+    const cooledDown = urgent || now - lastAutoSwitchAt >= 15000;
+    const stageUpgrade = best.priority > current.priority;
+    const scoreUpgrade = best.priority === current.priority && best.rankScore - current.rankScore >= 15;
+    const currentIsDead = !current.symbol || current.stage === "hunting";
+    if (cooledDown && (urgent || stageUpgrade || scoreUpgrade || currentIsDead)) {
+      activeSymbol = best.symbol;
+      localStorage.setItem("bxm-active-symbol", activeSymbol);
+      lastAutoSwitchAt = now;
+    }
+    return best;
   }
 
   function stageCopy(stage, score) {
@@ -275,6 +345,7 @@
       <div class="bxm-header" id="bxm-drag">
         <span class="bxm-title">Pump Fade Radar</span>
         <span class="bxm-actions">
+          <button id="bxm-auto" title="Auto-select strongest pump-fade candidate">AUTO</button>
           <button id="bxm-refresh" title="Refresh now">R</button>
           <button id="bxm-settings" title="Settings">S</button>
           <button id="bxm-toggle" title="Collapse / expand">${collapsed ? "+" : "-"}</button>
@@ -330,6 +401,15 @@
     root.querySelector("#bxm-settings").addEventListener("click", () => {
       chrome.runtime.sendMessage({ type: "open-options" }).catch(() => {});
     });
+    const autoBtn = root.querySelector("#bxm-auto");
+    autoBtn.classList.toggle("active", autoFollow);
+    autoBtn.addEventListener("click", () => {
+      autoFollow = !autoFollow;
+      localStorage.setItem("bxm-auto-follow", autoFollow ? "1" : "0");
+      manualHoldUntil = 0;
+      autoBtn.classList.toggle("active", autoFollow);
+      render();
+    });
     root.querySelector("#bxm-refresh").addEventListener("click", () => {
       chrome.runtime.sendMessage({ type: "force-refresh" }, (resp) => {
         if (resp) {
@@ -384,10 +464,14 @@
       localStorage.setItem("bxm-active-symbol", activeSymbol);
     }
 
-    tabs.innerHTML = symbols.map((s) => {
-      const d = decisionFor(latest.symbols[s]);
-      const stage = stageFor(d);
-      return `<button class="${s === activeSymbol ? "active" : ""} ${stage}" data-sym="${escapeHtml(s)}">
+    const candidates = rankedCandidates(symbols);
+    const best = maybeAutoSelectBest(candidates);
+    const orderedSymbols = candidates.map((c) => c.symbol);
+    panelEl.querySelector("#bxm-auto")?.classList.toggle("active", autoFollow);
+
+    tabs.innerHTML = orderedSymbols.map((s) => {
+      const c = candidateFor(s, latest.symbols[s]);
+      return `<button class="${s === activeSymbol ? "active" : ""} ${c.stage}" data-sym="${escapeHtml(s)}" title="${escapeHtml(c.stage.toUpperCase())} ${escapeHtml(candidateScoreText(c))}">
         <i></i>${escapeHtml(s.replace("USDT", ""))}
       </button>`;
     }).join("");
@@ -395,6 +479,7 @@
       btn.addEventListener("click", () => {
         activeSymbol = btn.dataset.sym;
         localStorage.setItem("bxm-active-symbol", activeSymbol);
+        manualHoldUntil = Date.now() + 60000;
         render();
       });
     });
@@ -407,6 +492,10 @@
     const ageSecs = Math.max(0, Math.floor(Date.now() / 1000 - num(symData.as_of)));
     const warnings = decision?.warnings || [];
     const gate = symData?.symbol_trade_quality_gate || symData?.symbolTradeQualityGate;
+    const bestStage = best?.stage || "";
+    const bestText = best
+      ? `${best.symbol.replace("USDT", "")} - ${best.stage.toUpperCase()} - ${candidateScoreText(best)}`
+      : "";
 
     panelEl.classList.toggle("bxm-alert", stage === "short");
     panelEl.classList.toggle("bxm-building", stage === "building");
@@ -417,6 +506,10 @@
         : "";
 
     block.innerHTML = `
+      ${best ? `<button id="bxm-best-pick" class="bxm-best stage-${escapeHtml(bestStage)} ${best.symbol === activeSymbol ? "active" : ""}" title="Select the strongest current candidate">
+        <span>${autoFollow ? "Auto-best" : "Best now"}</span>
+        <strong>${escapeHtml(bestText)}</strong>
+      </button>` : ""}
       <div class="bxm-symbol-row">
         <span>${escapeHtml(activeSymbol)} @ ${fmtPrice(symData.price)}</span>
         <em>${fmtAge(ageSecs)}</em>
@@ -437,8 +530,17 @@
       ${subRowsHtml(symData)}
       ${checkRows(decision)}
     `;
+    const bestBtn = block.querySelector("#bxm-best-pick");
+    if (bestBtn && best) {
+      bestBtn.addEventListener("click", () => {
+        activeSymbol = best.symbol;
+        localStorage.setItem("bxm-active-symbol", activeSymbol);
+        manualHoldUntil = 0;
+        render();
+      });
+    }
 
-    status.textContent = `${symbols.length} symbols - pump-fade shorts - poll ${latest.tick_seconds || 5}s`;
+    status.textContent = `${symbols.length} symbols - ${autoFollow ? "auto-best on" : "manual select"} - poll ${latest.tick_seconds || 5}s`;
     fresh.textContent = fetchedAt ? `Fetched ${fmtAge(Math.floor((Date.now() - fetchedAt) / 1000))}` : "";
   }
 
