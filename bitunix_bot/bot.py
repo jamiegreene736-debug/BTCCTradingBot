@@ -754,25 +754,25 @@ class BitunixBot:
 
     # ------------------------------------------------------------------ tick
 
-    # Multi-horizon overlay configuration. Each entry is:
+    # Pump-fade overlay configuration. Each entry is:
     #   (key, klines_tf, cache_ttl_seconds, display_label)
-    # The kline timeframe was chosen so that 4-15 bars cover the user-facing
-    # horizon. For pump-fade mode, the first row is a 1m entry/tape window
-    # kept under the h_15m key for extension compatibility. TTL is roughly
-    # bar_duration / 4 so we never
-    # show stale data and never refetch faster than necessary.
+    # The current strategy is single-purpose: find pump-fade shorts. The
+    # decision only uses:
+    #   h_15m -> 1m entry/rejection timing
+    #   h_30m -> 5m pump structure
+    #   h_1h  -> 15m trend/chop context
+    # Older long-horizon rows are intentionally omitted here so the expanded
+    # symbol scanner stays fresh instead of spending time computing unused
+    # 1h/2h/4h overlays.
     _OVERLAY_HORIZONS: tuple[tuple[str, str, int, str], ...] = (
-        ("h_15m", "1m",  15,   "1m entry"),
-        ("h_30m", "5m",  60,   "5m pump"),
-        ("h_1h",  "15m", 180,  "trend context"),
-        ("h_4h",  "1h",  600,  "Next 4h"),
-        ("h_8h",  "2h",  1200, "Next 8h"),
-        ("h_24h", "4h",  1800, "Next 24h"),
+        ("h_15m", "1m",  10, "1m entry"),
+        ("h_30m", "5m",  30, "5m pump"),
+        ("h_1h",  "15m", 90, "trend context"),
     )
 
     # Persistence window — how many recent ticks of dominant scores per
-    # (symbol, horizon) we keep. 3 ticks at 10s = 30s of history, enough
-    # to require 2-tick confirmation without over-smoothing.
+    # (symbol, horizon) we keep. With the live 5s tick this is ~15s of
+    # history: enough to require 2-tick confirmation without over-smoothing.
     _PERSISTENCE_WINDOW = 3
     # Score threshold that mirrors the frontend's ALARM_AT — kept here so
     # the backend "stable" flag uses the same gate.

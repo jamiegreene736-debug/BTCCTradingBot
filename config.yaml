@@ -290,7 +290,7 @@ strategy:
   invert_signals: false
 
 loop:
-  tick_seconds: 10
+  tick_seconds: 5
   kline_lookback: 200
 
 logging:
