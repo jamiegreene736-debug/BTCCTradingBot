@@ -4374,6 +4374,57 @@ def test_micro_pump_fade_publishes_high_confidence_short():
     assert checks["exhaustion"]["passed"] is True
 
 
+def test_pump_fade_blocks_buyer_control_despite_negative_cvd():
+    """DOGS live check: big pump + negative CVD is not enough for 98/100.
+
+    If the 1m row is still buyer-led and 10s aggression is positive, the bot
+    should keep it on watch instead of publishing an ultra-confident short.
+    """
+    horizons = {
+        "h_15m": {
+            "label": "1m entry",
+            "long_score": 0.565,
+            "short_score": 0.1183,
+            "real_cvd": -12_491_087.0,
+            "aggression_10s": 0.4111,
+            "move_3_atr": 0.101,
+            "move_10_atr": 1.8178,
+            "up_closes_5": 3,
+            "down_closes_5": 2,
+            "last_bar_body_atr": -0.404,
+            "last_bar_close_position": 0.6364,
+            "last_bar_upper_wick_atr": 0.0,
+            "short_reasons": ["cvd_real-"],
+        },
+        "h_30m": {
+            "label": "5m pump",
+            "long_score": 0.5217,
+            "short_score": 0.0933,
+            "move_3_atr": 0.5199,
+            "move_5_atr": 1.0665,
+            "move_12_atr": 3.3993,
+            "position_in_recent_range_15": 0.9763,
+            "distance_from_recent_high_atr": 0.12,
+            "up_closes_5": 2,
+            "up_candles_5": 2,
+            "up_closes_12": 8,
+        },
+        "h_1h": {"label": "Trend context", "long_score": 0.0779, "short_score": 0.1113, "adx": 14.5},
+    }
+
+    decision = BitunixBot._build_pump_fade_only_decision(horizons)
+
+    assert decision["action"] == "wait"
+    assert decision["confidence_score"] == 0
+    assert decision["setup_stage"] == "pump_watch"
+    checks = {row["key"]: row for row in decision["pump_fade_checks"]}
+    assert checks["pump"]["passed"] is True
+    assert checks["high"]["passed"] is True
+    assert checks["exhaustion"]["passed"] is True
+    assert checks["entry_window"]["passed"] is False
+    assert "buyer control yes" in checks["entry_window"]["detail"]
+
+
 def test_auto_pump_fade_places_market_sell_at_100x():
     reset_state()
     cfg = fresh_cfg()
@@ -6567,6 +6618,7 @@ def main() -> int:
         test_pump_fade_watch_flags_broad_session_pump_after_last_bars_cool,
         test_micro_pump_watch_flags_small_fast_pop,
         test_micro_pump_fade_publishes_high_confidence_short,
+        test_pump_fade_blocks_buyer_control_despite_negative_cvd,
         test_auto_pump_fade_places_market_sell_at_100x,
         test_auto_pump_fade_only_skips_legacy_strategy_without_strong_match,
         test_next_hour_smoothing_requires_confirmed_side_flip,

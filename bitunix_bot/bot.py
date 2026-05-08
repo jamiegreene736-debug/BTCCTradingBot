@@ -1237,6 +1237,14 @@ class BitunixBot:
                 or h15_cvd > 0.0
             )
         )
+        buyer_still_in_control = (
+            h15_long_score >= h15_short_score + 0.20
+            and h15_long_score >= 0.35
+            and (
+                h15_aggression >= 0.25
+                or (h15_move_3_atr >= 0 and h15_up_closes >= 3)
+            )
+        )
         pre_pump_building = (
             pre_pump_votes >= 4
             and not pump_watch
@@ -1247,7 +1255,7 @@ class BitunixBot:
             and h15_long_score > h15_short_score
         )
         entry_window = (near_blowoff_high or lower_high_rejection or micro_rejection) and not (
-            cooled_off_recovery or still_squeezing_up
+            cooled_off_recovery or still_squeezing_up or buyer_still_in_control
         )
         if any(k in h15 for k in (
             "last_bar_body_atr",
@@ -1293,7 +1301,8 @@ class BitunixBot:
                 "detail": (
                     f"1m move {h15_move_3_atr:+.2f} ATR, "
                     f"up {h15_up_closes}/5, down {h15_down_closes}/5, "
-                    f"wick {h15_upper_wick_atr:.2f} ATR"
+                    f"wick {h15_upper_wick_atr:.2f} ATR, "
+                    f"buyer control {'yes' if buyer_still_in_control else 'no'}"
                 ),
             },
             {
@@ -1357,6 +1366,7 @@ class BitunixBot:
             "prePumpScore": int(min(49, max(0, pre_pump_votes * 10))),
             "cooled_off_recovery": bool(cooled_off_recovery),
             "still_squeezing_up": bool(still_squeezing_up),
+            "buyer_still_in_control": bool(buyer_still_in_control),
             "checks": checks,
         }
 
@@ -2354,8 +2364,8 @@ class BitunixBot:
                 last_low = lows[-1]
                 last_range = max(0.0, last_high - last_low)
                 last_body = last_close - last_open
-                last_upper_wick = last_high - max(last_open, last_close)
-                last_lower_wick = min(last_open, last_close) - last_low
+                last_upper_wick = max(0.0, last_high - max(last_open, last_close))
+                last_lower_wick = max(0.0, min(last_open, last_close) - last_low)
                 last_close_pos = ((last_close - last_low) / last_range) if last_range > 0 else 0.5
                 vol_ma_values = volumes[-21:-1] if len(volumes) >= 21 else volumes[:-1]
                 vol_ma = (sum(vol_ma_values) / len(vol_ma_values)) if vol_ma_values else 0.0
