@@ -183,7 +183,7 @@
   }
 
   function isPumpAlertStage(stage) {
-    return stage === "watch" || stage === "short";
+    return stage === "building" || stage === "watch" || stage === "short";
   }
 
   function candidateScoreText(c) {
@@ -203,6 +203,8 @@
     const currentIsAlert = isPumpAlertStage(current.stage);
     const urgent = best.stage === "short" || (
       best.stage === "watch" && (!currentIsAlert || best.rankScore - current.rankScore >= 15)
+    ) || (
+      best.stage === "building" && best.score >= 35 && (!currentIsAlert || best.rankScore - current.rankScore >= 15)
     );
     if (manualHoldUntil > now && !urgent) return best;
     const actionable = best.stage !== "hunting";
@@ -225,7 +227,11 @@
     titleFlashKey = "";
     titleFlashPrefix = "";
     titleFlashOn = false;
-    if (document.title.startsWith("[PUMP WATCH ") || document.title.startsWith("[FADE SHORT ")) {
+    if (
+      document.title.startsWith("[PUMP BUILDING ")
+      || document.title.startsWith("[PUMP WATCH ")
+      || document.title.startsWith("[FADE SHORT ")
+    ) {
       document.title = cleanPageTitle;
     }
   }
@@ -236,11 +242,16 @@
       return;
     }
     const key = `${candidate.stage}:${candidate.symbol}`;
-    const label = candidate.stage === "short" ? "FADE SHORT" : "PUMP WATCH";
+    const label = candidate.stage === "short"
+      ? "FADE SHORT"
+      : candidate.stage === "watch"
+        ? "PUMP WATCH"
+        : "PUMP BUILDING";
     const symbol = candidate.symbol.replace("USDT", "");
     titleFlashPrefix = `[${label} ${symbol}]`;
     if (titleFlashKey !== key) {
       cleanPageTitle = document.title
+        .replace(/^\[PUMP BUILDING [^\]]+\] /, "")
         .replace(/^\[PUMP WATCH [^\]]+\] /, "")
         .replace(/^\[FADE SHORT [^\]]+\] /, "");
       titleFlashKey = key;
@@ -262,8 +273,8 @@
     };
     if (stage === "building") return {
       title: "PUMP BUILDING",
-      kicker: "HEADS UP",
-      detail: "buyers are pressing; wait for blow-off high and rejection",
+      kicker: "WATCH NOW",
+      detail: "buyers are pressing before the fade; no short until rejection",
       icon: "^",
     };
     if (stage === "watch") return {
@@ -553,11 +564,13 @@
 
     panelEl.classList.toggle("bxm-alert", alertCandidate?.stage === "short");
     panelEl.classList.toggle("bxm-watch", alertCandidate?.stage === "watch");
-    panelEl.classList.toggle("bxm-building", !alertCandidate && stage === "building");
+    panelEl.classList.toggle("bxm-building", alertCandidate?.stage === "building" || (!alertCandidate && stage === "building"));
     banner.textContent = alertCandidate?.stage === "short"
       ? `FADE SHORT READY - ${alertCandidate.symbol.replace("USDT", "")} - ${candidateScoreText(alertCandidate)} - ${alertCandidate.decision?.suggested_lev || alertCandidate.decision?.suggestedLev || 100}x`
       : alertCandidate?.stage === "watch"
         ? `PUMP WATCH - ${alertCandidate.symbol.replace("USDT", "")} - ${candidateScoreText(alertCandidate)} - GET READY`
+        : alertCandidate?.stage === "building"
+          ? `PUMP BUILDING - ${alertCandidate.symbol.replace("USDT", "")} - ${candidateScoreText(alertCandidate)} - WATCH NOW`
         : stage === "building"
           ? `PUMP BUILDING - ${score}/49`
           : "";

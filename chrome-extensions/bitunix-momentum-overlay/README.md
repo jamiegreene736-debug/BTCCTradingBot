@@ -16,7 +16,8 @@ dashboard.
 
 ## What It Shows
 
-- `PUMP BUILDING`: early buy pressure before the short setup is ready.
+- `PUMP BUILDING`: earliest pump-ignition alert. The overlay auto-selects it,
+  flashes yellow, and flashes the browser tab title before the selloff confirms.
 - `PUMP WATCH`: pump is active now; the overlay auto-selects the coin, flashes
   bright yellow, and flashes the browser tab title so you can get ready before
   the fade entry confirms.
@@ -24,9 +25,9 @@ dashboard.
 - Per-symbol closed trade history and net P&L.
 - Open-position display. Timed auto-close is currently disabled.
 - `AUTO` mode ranks all scanned coins, keeps the strongest pump-fade candidate
-  selected, and highlights the chosen coin in bright yellow. Urgent `PUMP WATCH`
-  and `FADE SHORT` alerts can override a manual click hold so the best coin does
-  not stay buried.
+  selected, and highlights the chosen coin in bright yellow. Urgent `PUMP
+  BUILDING`, `PUMP WATCH`, and `FADE SHORT` alerts can override a manual click
+  hold so the best coin does not stay buried.
 
 The extension does not compute signals locally. The backend is the source of
 truth; this folder only renders the overlay and relays admin actions.

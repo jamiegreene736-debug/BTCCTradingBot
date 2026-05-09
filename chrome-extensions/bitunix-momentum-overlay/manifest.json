@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Bitunix Momentum Overlay",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "description": "Pump-fade short scanner on bitunix.com, fed by your private trading-bot dashboard.",
   "permissions": ["storage", "tabs"],
   "host_permissions": [

@@ -129,9 +129,10 @@
 
 #bxm-overlay.bxm-building .bxm-banner {
   display: block;
-  color: #6d3f00;
-  background: #fff3d6;
-  border-bottom: 1px solid #f7d58a;
+  color: #111827;
+  background: #fff04a;
+  border-bottom: 1px solid #d99a00;
+  animation: bxm-banner-flash 0.8s ease-in-out infinite;
 }
 
 #bxm-overlay .bxm-body { padding: 10px; overflow: auto; }
@@ -230,6 +231,11 @@
   animation: bxm-pump-flash 0.85s ease-in-out infinite;
 }
 
+#bxm-overlay.bxm-building {
+  border-color: #d99a00;
+  animation: bxm-pump-flash 1.05s ease-in-out infinite;
+}
+
 #bxm-overlay.bxm-alert {
   border-color: #e5484d;
   animation: bxm-short-flash 0.85s ease-in-out infinite;
@@ -280,9 +286,10 @@
   border-left-color: #e5484d;
 }
 #bxm-overlay .bxm-card.stage-building {
-  background: #fffaf0;
-  border-color: #f3d78e;
-  border-left-color: #f59e0b;
+  background: #fff9bf;
+  border-color: #f2c200;
+  border-left-color: #ffb800;
+  animation: bxm-banner-flash 1.05s ease-in-out infinite;
 }
 #bxm-overlay .bxm-card.stage-watch {
   background: #fff9bf;
@@ -442,6 +449,7 @@
 @media (prefers-reduced-motion: reduce) {
   #bxm-overlay,
   #bxm-overlay .bxm-banner,
+  #bxm-overlay .bxm-card.stage-building,
   #bxm-overlay .bxm-card.stage-watch {
     animation: none !important;
   }

@@ -1147,7 +1147,7 @@ class BitunixBot:
             )
         )
         micro_pump_watch = (
-            range_pos >= 0.62
+            range_pos >= 0.55
             and (
                 (move_3_atr >= 0.35 and up_closes >= 2)
                 or (move_5_atr >= 0.50 and up_closes >= 2)
@@ -1169,12 +1169,25 @@ class BitunixBot:
             or h15_move_10_atr >= 0.45
         )
         not_blown_off_yet = range_pos < 0.78 and high_dist > 0.45
+        directional_lift = (
+            h15_long_score >= h15_short_score + 0.10
+            or h30_long_score >= h30_short_score + 0.10
+        )
+        early_pump_ignition = (
+            bool(early_lift)
+            and bool(positive_tape or momentum_tags)
+            and bool(directional_lift)
+            and (
+                range_pos >= 0.35
+                or move_3_atr >= 0.25
+                or h15_move_10_atr >= 0.45
+            )
+        )
         pre_pump_votes = sum((
             range_pos >= 0.45,
             bool(early_lift),
             bool(positive_tape or momentum_tags),
-            h15_long_score >= h15_short_score + 0.10
-                or h30_long_score >= h30_short_score + 0.10,
+            bool(directional_lift),
             bool(not_blown_off_yet),
         ))
         session_pump = (
@@ -1187,7 +1200,7 @@ class BitunixBot:
             )
         )
         pump_watch = (
-            range_pos >= 0.62
+            range_pos >= 0.55
             and (
                 micro_pump_watch
                 or session_pump
@@ -1246,7 +1259,7 @@ class BitunixBot:
             )
         )
         pre_pump_building = (
-            pre_pump_votes >= 4
+            (pre_pump_votes >= 4 or (pre_pump_votes >= 3 and early_pump_ignition))
             and not pump_watch
         )
         still_squeezing_up = (
@@ -1362,11 +1375,12 @@ class BitunixBot:
             "pump_watch": bool(pump_watch),
             "pre_pump_building": bool(pre_pump_building),
             "prePumpBuilding": bool(pre_pump_building),
-            "pre_pump_score": int(min(49, max(0, pre_pump_votes * 10))),
-            "prePumpScore": int(min(49, max(0, pre_pump_votes * 10))),
+            "pre_pump_score": int(min(49, max(35 if early_pump_ignition else 0, pre_pump_votes * 10))),
+            "prePumpScore": int(min(49, max(35 if early_pump_ignition else 0, pre_pump_votes * 10))),
             "cooled_off_recovery": bool(cooled_off_recovery),
             "still_squeezing_up": bool(still_squeezing_up),
             "buyer_still_in_control": bool(buyer_still_in_control),
+            "early_pump_ignition": bool(early_pump_ignition),
             "checks": checks,
         }
 
@@ -1446,7 +1460,7 @@ class BitunixBot:
             warnings = ["pump detected now; get ready for a fast fade-short entry"]
             setup_stage = "pump_watch"
         elif pre_pump:
-            warnings = ["pump building; wait for blow-off high, then bearish rejection before shorting"]
+            warnings = ["pump building; watch now before fade-ready rejection"]
             setup_stage = "pump_building"
             checklist_score = max(checklist_score, int(status.get("pre_pump_score") or 0))
         return {
@@ -1463,6 +1477,8 @@ class BitunixBot:
             "prePumpBuilding": pre_pump,
             "pre_pump_score": int(status.get("pre_pump_score") or 0),
             "prePumpScore": int(status.get("pre_pump_score") or 0),
+            "early_pump_ignition": bool(status.get("early_pump_ignition")),
+            "earlyPumpIgnition": bool(status.get("early_pump_ignition")),
             "bias": 0.0,
             "weighted_long_score": 0.0,
             "weighted_short_score": 0.0,
