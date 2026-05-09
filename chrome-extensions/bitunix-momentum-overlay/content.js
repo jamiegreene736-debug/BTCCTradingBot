@@ -319,17 +319,22 @@
     const stop = Number(pick(plan, "stop_loss", "stopLoss"));
     const rewardPct = pick(plan, "reward_pct", "rewardPct");
     const riskPct = pick(plan, "risk_pct", "riskPct");
+    const entryLabel = preview ? "Suggested short entry trigger" : "Suggested short entry";
+    const targetLabel = preview ? "Preview take profit" : "Take profit / suggested exit";
+    const stopLabel = preview ? "Preview stop loss" : "Stop loss";
+    const rewardLabel = preview ? "Target profit" : "Target profit";
+    const riskLabel = preview ? "Max loss" : "Max loss";
     return `<div class="bxm-plan ${preview ? "preview" : ""}">
       <div class="bxm-plan-head">
-        <span>${preview ? "Entry trigger" : "Pump fade entry"}</span>
+        <span>${entryLabel}</span>
         <strong>${escapeHtml(orderType)}</strong>
       </div>
       <div class="bxm-plan-price">${fmtPrice(entry)}</div>
       <div class="bxm-plan-grid">
-        <div><span>Max exit</span><strong class="good">${fmtPrice(target)}</strong></div>
-        <div><span>Stop</span><strong class="bad">${fmtPrice(stop)}</strong></div>
-        <div><span>Reward</span><strong>${fmtPct(rewardPct)}</strong></div>
-        <div><span>Risk</span><strong>${fmtPct(riskPct)}</strong></div>
+        <div><span>${targetLabel}</span><strong class="good">${fmtPrice(target)}</strong></div>
+        <div><span>${stopLabel}</span><strong class="bad">${fmtPrice(stop)}</strong></div>
+        <div><span>${rewardLabel}</span><strong>${fmtPct(rewardPct)}</strong></div>
+        <div><span>${riskLabel}</span><strong>${fmtPct(riskPct)}</strong></div>
       </div>
       ${plan.rationale ? `<div class="bxm-note">${escapeHtml(plan.rationale)}</div>` : ""}
     </div>`;

@@ -2241,7 +2241,7 @@ class BitunixBot:
                     order_type = "MARKET"
                     entry_price = taker_price
                     rationale = (
-                        "pump-fade scalp; market entry only if taking it immediately"
+                        "suggested short now; take profit is the suggested exit and stop loss is the invalidation price"
                         if pump_fade_scalp
                         else "high confidence with tight spread; market entry is acceptable"
                     )
@@ -2267,9 +2267,9 @@ class BitunixBot:
             entry_price = round(float(entry_price), meta.price_precision)
             order_type = "WAIT_FOR_REJECTION"
             rationale = (
-                "preview only: enter short after 1m rejection/CVD flip confirms"
+                "preview only: suggested short entry trigger; wait for 1m rejection/CVD flip to confirm"
                 if setup_stage == "pump_watch"
-                else "preview only: pump is building; wait for high tag and rejection"
+                else "preview only: pump is building; wait for high tag and rejection before shorting"
             )
         reasons = list(dict.fromkeys(
             list(plan_horizon.get(f"{action}_reasons") or [])

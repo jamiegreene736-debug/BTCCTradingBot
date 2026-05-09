@@ -25,9 +25,11 @@ dashboard.
 - `Fade ETA`: rough timing window (`NOW`, `10-30s`, `30-90s`, etc.) estimated
   from pump speed, range position, 1m rejection, CVD/tape, and whether buyers
   are still in control. This is a timing aid, not a guaranteed countdown.
-- `Entry trigger`: preview entry/exit/stop plan shown for `PUMP BUILDING` and
-  `PUMP WATCH`; it becomes `Pump fade entry` only when the short is actually
-  ready.
+- `Suggested short entry trigger`: preview price to watch during `PUMP BUILDING`
+  and `PUMP WATCH`. It includes preview take-profit and stop-loss prices, but it
+  is not an entry until the rejection confirms.
+- `Suggested short entry`: confirmed short entry price. The card also shows
+  `Take profit / suggested exit`, `Stop loss`, target profit, and max loss.
 - Per-symbol closed trade history and net P&L.
 - Open-position display. Timed auto-close is currently disabled.
 - `AUTO` mode ranks all scanned coins, keeps the strongest pump-fade candidate
