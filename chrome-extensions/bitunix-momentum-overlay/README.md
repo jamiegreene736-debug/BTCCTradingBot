@@ -36,10 +36,10 @@ dashboard.
 - Per-symbol closed trade history and net P&L.
 - Open-position display. Timed auto-close is currently disabled.
 - `AUTO` mode ranks all scanned coins, keeps the strongest pump-fade candidate
-  selected, and highlights the chosen coin in bright yellow. Urgent `PUMP
-  BUILDING`, `PUMP WATCH`, and `FADE SHORT` alerts can override a manual click
-  hold so the best coin does not stay buried.
-- The extension polls every 5s normally and speeds up to about 2s while a
+  selected, and highlights the chosen coin in bright yellow. `PUMP BUILDING`,
+  `PUMP WATCH`, and `FADE SHORT` alerts switch immediately in AUTO mode so the
+  panel does not wait until rejection confirmation.
+- The extension polls every 3s normally and speeds up to about 1s while a
   building, watch, or short-ready candidate exists. The backend 1m overlay
   cache refreshes every bot tick so active pumps do not sit on stale data.
 

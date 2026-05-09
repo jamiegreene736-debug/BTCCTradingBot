@@ -271,21 +271,26 @@
     const now = Date.now();
     if (best.symbol === activeSymbol) return best;
 
+    // Pump-fade scalps are time-sensitive. In AUTO mode, any live
+    // building/watch/ready candidate should take over the panel immediately;
+    // the old cooldown/manual-hold behavior was too slow for the pump phase.
+    if (isPumpAlertStage(best.stage) && !best.blocked) {
+      activeSymbol = best.symbol;
+      localStorage.setItem("bxm-active-symbol", activeSymbol);
+      manualHoldUntil = 0;
+      lastAutoSwitchAt = now;
+      return best;
+    }
+
     const current = candidateFor(activeSymbol, latest?.symbols?.[activeSymbol] || {});
-    const currentIsAlert = isPumpAlertStage(current.stage);
-    const urgent = best.stage === "short" || (
-      best.stage === "watch" && (!currentIsAlert || best.rankScore - current.rankScore >= 15)
-    ) || (
-      best.stage === "building" && best.score >= 35 && (!currentIsAlert || best.rankScore - current.rankScore >= 15)
-    );
-    if (manualHoldUntil > now && !urgent) return best;
+    if (manualHoldUntil > now) return best;
     const actionable = best.stage !== "hunting";
-    const cooledDown = urgent || now - lastAutoSwitchAt >= (actionable ? 12000 : 30000);
+    const cooledDown = now - lastAutoSwitchAt >= (actionable ? 5000 : 15000);
     const stageUpgrade = best.priority > current.priority;
     const scoreUpgrade = best.priority === current.priority && best.rankScore - current.rankScore >= 15;
     const huntingUpgrade = !actionable && current.stage === "hunting" && best.score >= current.score + 20;
     const currentIsDead = !current.symbol || !latest?.symbols?.[activeSymbol];
-    if (cooledDown && (urgent || stageUpgrade || scoreUpgrade || huntingUpgrade || currentIsDead)) {
+    if (cooledDown && (stageUpgrade || scoreUpgrade || huntingUpgrade || currentIsDead)) {
       activeSymbol = best.symbol;
       localStorage.setItem("bxm-active-symbol", activeSymbol);
       lastAutoSwitchAt = now;

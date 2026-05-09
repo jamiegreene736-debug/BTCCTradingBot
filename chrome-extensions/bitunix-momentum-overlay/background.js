@@ -5,9 +5,9 @@
 //   2. one polling loop is shared across all open Bitunix tabs
 //   3. settings live here in chrome.storage and are read once at startup
 
-const NORMAL_POLL_INTERVAL_MS = 5000;
-const FAST_POLL_INTERVAL_MS = 2000;
-const FETCH_TIMEOUT_MS = 5000;
+const NORMAL_POLL_INTERVAL_MS = 3000;
+const FAST_POLL_INTERVAL_MS = 1000;
+const FETCH_TIMEOUT_MS = 4000;
 
 let latest = null;          // most recent /api/momentum payload, or { error }
 let lastFetchAt = 0;
