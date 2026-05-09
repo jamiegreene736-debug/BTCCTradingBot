@@ -4368,6 +4368,7 @@ def test_pre_pump_building_flags_early_ignition_before_range_high():
     assert decision["pre_pump_building"] is True
     assert decision["early_pump_ignition"] is True
     assert decision["pre_pump_score"] >= 35
+    assert decision["fade_eta"]["label"] in {"45-150s", "60-180s"}
     checks = {row["key"]: row for row in decision["pump_fade_checks"]}
     assert checks["watch"]["passed"] is False
     assert checks["entry_window"]["passed"] is False
@@ -4705,6 +4706,48 @@ def test_suggested_trade_plan_waits_without_action():
     )
     assert plan["status"] == "wait"
     assert plan["order_type"] == "WAIT"
+
+
+def test_suggested_trade_plan_previews_entry_for_pump_watch():
+    cfg = fresh_cfg()
+    cfg.trading.symbols = ["BTCUSDT"]
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.ob_feed = _FakeOBFeed(bid=60_000.0, ask=60_002.0, spread_pct=0.003)
+    bot._resolve_symbol_meta()
+
+    decision = {
+        "action": "wait",
+        "setup_stage": "pump_watch",
+        "checklist_score": 49,
+        "mode": "pump_fade_only",
+    }
+    horizons = {
+        "h_15m": {
+            "label": "1m entry",
+            "price": 60_001.0,
+            "atr": 100.0,
+            "last_bar_high": 60_050.0,
+            "last_bar_low": 59_950.0,
+            "short_reasons": ["watching for CVD flip"],
+        },
+        "h_30m": {
+            "label": "5m pump",
+            "price": 60_001.0,
+            "atr": 150.0,
+            "short_reasons": [],
+        },
+    }
+
+    plan = bot._build_suggested_trade_plan("BTCUSDT", decision, horizons, 60_001.0)
+
+    assert plan["status"] == "preview"
+    assert plan["preview"] is True
+    assert plan["order_type"] == "WAIT_FOR_REJECTION"
+    assert plan["direction"] == "short"
+    assert plan["entry_price"] < 60_002.0
+    assert plan["take_profit"] < plan["entry_price"] < plan["stop_loss"]
+    assert "preview only" in plan["rationale"]
 
 
 def test_signal_records_factor_breakdown():

@@ -5,12 +5,15 @@
 //   2. one polling loop is shared across all open Bitunix tabs
 //   3. settings live here in chrome.storage and are read once at startup
 
-const POLL_INTERVAL_MS = 5000;
-const FETCH_TIMEOUT_MS = 7000;
+const NORMAL_POLL_INTERVAL_MS = 5000;
+const FAST_POLL_INTERVAL_MS = 2000;
+const FETCH_TIMEOUT_MS = 5000;
 
 let latest = null;          // most recent /api/momentum payload, or { error }
 let lastFetchAt = 0;
 let pollTimer = null;
+let currentPollIntervalMs = NORMAL_POLL_INTERVAL_MS;
+let fetchInFlight = null;
 let settings = { dashboardUrl: '', password: '' };
 
 async function loadSettings() {
@@ -24,9 +27,44 @@ function basicAuthHeader(password) {
   return 'Basic ' + btoa('admin:' + password);
 }
 
-async function fetchOnce() {
+function stageFromDecision(decision) {
+  const action = String(decision?.action || '').toLowerCase();
+  const setup = String(decision?.setup || '').toLowerCase();
+  const stage = String(decision?.setup_stage || decision?.setupStage || '').toLowerCase();
+  if (action === 'short' && setup === 'parabolic_pump_fade') return 'short';
+  if (stage === 'pump_watch') return 'watch';
+  if (stage === 'pump_building') return 'building';
+  return 'hunting';
+}
+
+function payloadNeedsFastPoll(payload) {
+  if (!payload || payload.error) return false;
+  const best = payload.best_candidate || payload.bestCandidate;
+  if (['short', 'watch', 'building'].includes(String(best?.stage || '').toLowerCase())) return true;
+  const symbols = payload.symbols || {};
+  return Object.values(symbols).some((row) => (
+    ['short', 'watch', 'building'].includes(stageFromDecision(row?.decision || row?.recommendation || row?.next_1h || row?.next1h))
+  ));
+}
+
+function desiredPollIntervalMs() {
+  return payloadNeedsFastPoll(latest) ? FAST_POLL_INTERVAL_MS : NORMAL_POLL_INTERVAL_MS;
+}
+
+function ensurePollInterval() {
+  const desired = desiredPollIntervalMs();
+  if (pollTimer && desired === currentPollIntervalMs) return;
+  if (pollTimer) clearInterval(pollTimer);
+  currentPollIntervalMs = desired;
+  pollTimer = setInterval(fetchOnce, currentPollIntervalMs);
+}
+
+async function doFetchOnce() {
   if (!settings.dashboardUrl || !settings.password) {
     latest = { error: 'not_configured', message: 'Open the extension settings and add your dashboard URL + password.' };
+    lastFetchAt = Date.now();
+    broadcast();
+    ensurePollInterval();
     return;
   }
   const url = settings.dashboardUrl + '/api/momentum';
@@ -56,6 +94,15 @@ async function fetchOnce() {
   }
   // Push to any listening content scripts so the UI updates instantly.
   broadcast();
+  ensurePollInterval();
+}
+
+async function fetchOnce() {
+  if (fetchInFlight) return fetchInFlight;
+  fetchInFlight = doFetchOnce().finally(() => {
+    fetchInFlight = null;
+  });
+  return fetchInFlight;
 }
 
 async function postDashboardJson(path, body) {
@@ -97,7 +144,12 @@ async function postDashboardJson(path, body) {
 function broadcast() {
   chrome.tabs.query({ url: 'https://*.bitunix.com/*' }, (tabs) => {
     for (const tab of tabs) {
-      chrome.tabs.sendMessage(tab.id, { type: 'momentum-update', payload: latest, fetchedAt: lastFetchAt })
+      chrome.tabs.sendMessage(tab.id, {
+        type: 'momentum-update',
+        payload: latest,
+        fetchedAt: lastFetchAt,
+        pollMs: currentPollIntervalMs,
+      })
         .catch(() => { /* tab may not have content script ready yet */ });
     }
   });
@@ -105,7 +157,8 @@ function broadcast() {
 
 function startPolling() {
   if (pollTimer) clearInterval(pollTimer);
-  pollTimer = setInterval(fetchOnce, POLL_INTERVAL_MS);
+  pollTimer = null;
+  ensurePollInterval();
   fetchOnce();
 }
 
@@ -128,11 +181,16 @@ chrome.storage.onChanged.addListener(async (changes, area) => {
 // Content scripts ask for the latest snapshot when they mount.
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg?.type === 'request-latest') {
-    sendResponse({ payload: latest, fetchedAt: lastFetchAt });
+    const stale = !latest || (Date.now() - lastFetchAt) > Math.max(1500, desiredPollIntervalMs() * 1.25);
+    if (stale) {
+      fetchOnce().then(() => sendResponse({ payload: latest, fetchedAt: lastFetchAt, pollMs: currentPollIntervalMs }));
+      return true;
+    }
+    sendResponse({ payload: latest, fetchedAt: lastFetchAt, pollMs: currentPollIntervalMs });
     return false;
   }
   if (msg?.type === 'force-refresh') {
-    fetchOnce().then(() => sendResponse({ payload: latest, fetchedAt: lastFetchAt }));
+    fetchOnce().then(() => sendResponse({ payload: latest, fetchedAt: lastFetchAt, pollMs: currentPollIntervalMs }));
     return true; // async response
   }
   if (msg?.type === 'close-symbol') {

@@ -765,9 +765,9 @@ class BitunixBot:
     # symbol scanner stays fresh instead of spending time computing unused
     # 1h/2h/4h overlays.
     _OVERLAY_HORIZONS: tuple[tuple[str, str, int, str], ...] = (
-        ("h_15m", "1m",  10, "1m entry"),
-        ("h_30m", "5m",  30, "5m pump"),
-        ("h_1h",  "15m", 90, "trend context"),
+        ("h_15m", "1m",  5, "1m entry"),
+        ("h_30m", "5m",  15, "5m pump"),
+        ("h_1h",  "15m", 60, "trend context"),
     )
 
     # Persistence window — how many recent ticks of dominant scores per
@@ -1021,6 +1021,8 @@ class BitunixBot:
             "reasons": reasons[:8],
             "move_5_atr": round(move_5_atr, 4),
             "range_pos": round(range_pos, 4),
+            "fade_eta": status.get("fade_eta"),
+            "fadeEta": status.get("fade_eta"),
             "checks": status["checks"],
         }
 
@@ -1334,6 +1336,97 @@ class BitunixBot:
                 "detail": f"1h ADX {h1_adx:.1f}; needs tape rollover if >=30",
             },
         ]
+        if entry_window and exhaustion:
+            fade_eta = {
+                "status": "live",
+                "label": "NOW",
+                "seconds_min": 0,
+                "secondsMin": 0,
+                "seconds_max": 10,
+                "secondsMax": 10,
+                "reason": "fade trigger is live: rejection window and exhaustion are both confirmed",
+            }
+        elif entry_window:
+            fade_eta = {
+                "status": "starting",
+                "label": "5-20s",
+                "seconds_min": 5,
+                "secondsMin": 5,
+                "seconds_max": 20,
+                "secondsMax": 20,
+                "reason": "1m rejection is starting; waiting for exhaustion/tape confirmation",
+            }
+        elif pump_watch:
+            if still_squeezing_up or buyer_still_in_control:
+                fade_eta = {
+                    "status": "squeezing",
+                    "label": "30-90s",
+                    "seconds_min": 30,
+                    "secondsMin": 30,
+                    "seconds_max": 90,
+                    "secondsMax": 90,
+                    "reason": "pump is active but buyers still control the tape; wait for wick/CVD flip",
+                }
+            elif h15_move_3_atr < -0.05 or h15_down_closes >= 1 or h15_cvd < 0:
+                fade_eta = {
+                    "status": "starting",
+                    "label": "10-30s",
+                    "seconds_min": 10,
+                    "secondsMin": 10,
+                    "seconds_max": 30,
+                    "secondsMax": 30,
+                    "reason": "pump is near the fade window and the first selloff ticks are appearing",
+                }
+            elif high_dist <= 0.45 or range_pos >= 0.90:
+                fade_eta = {
+                    "status": "near",
+                    "label": "15-45s",
+                    "seconds_min": 15,
+                    "secondsMin": 15,
+                    "seconds_max": 45,
+                    "secondsMax": 45,
+                    "reason": "pump is close to the blow-off zone; watch for the first failed 1m candle",
+                }
+            else:
+                fade_eta = {
+                    "status": "watch",
+                    "label": "30-90s",
+                    "seconds_min": 30,
+                    "secondsMin": 30,
+                    "seconds_max": 90,
+                    "secondsMax": 90,
+                    "reason": "pump is active but has not reached the fade trigger zone yet",
+                }
+        elif pre_pump_building:
+            fade_eta = {
+                "status": "building",
+                "label": "45-150s",
+                "seconds_min": 45,
+                "secondsMin": 45,
+                "seconds_max": 150,
+                "secondsMax": 150,
+                "reason": "pump ignition is building; no short until price tags the upper range and rejects",
+            }
+        elif early_pump_ignition:
+            fade_eta = {
+                "status": "early",
+                "label": "60-180s",
+                "seconds_min": 60,
+                "secondsMin": 60,
+                "seconds_max": 180,
+                "secondsMax": 180,
+                "reason": "early lift detected but the pump is not mature enough for a fade setup",
+            }
+        else:
+            fade_eta = {
+                "status": "unknown",
+                "label": "--",
+                "seconds_min": None,
+                "secondsMin": None,
+                "seconds_max": None,
+                "secondsMax": None,
+                "reason": "no active pump timing edge",
+            }
         score = sum(1 for row in checks if row["passed"]) * 25
         return {
             "usable": True,
@@ -1381,6 +1474,8 @@ class BitunixBot:
             "still_squeezing_up": bool(still_squeezing_up),
             "buyer_still_in_control": bool(buyer_still_in_control),
             "early_pump_ignition": bool(early_pump_ignition),
+            "fade_eta": fade_eta,
+            "fadeEta": fade_eta,
             "checks": checks,
         }
 
@@ -1446,6 +1541,8 @@ class BitunixBot:
                 "planHorizonKey": "h_15m",
                 "primary_signal": primary_signal,
                 "primarySignal": primary_signal,
+                "fade_eta": pump_fade.get("fade_eta"),
+                "fadeEta": pump_fade.get("fade_eta"),
                 "pump_fade_checks": pump_fade["checks"],
                 "pumpFadeChecks": pump_fade["checks"],
                 "horizons": details,
@@ -1479,6 +1576,8 @@ class BitunixBot:
             "prePumpScore": int(status.get("pre_pump_score") or 0),
             "early_pump_ignition": bool(status.get("early_pump_ignition")),
             "earlyPumpIgnition": bool(status.get("early_pump_ignition")),
+            "fade_eta": status.get("fade_eta"),
+            "fadeEta": status.get("fade_eta"),
             "bias": 0.0,
             "weighted_long_score": 0.0,
             "weighted_short_score": 0.0,
@@ -1625,6 +1724,8 @@ class BitunixBot:
                 "planHorizonKey": "h_15m",
                 "primary_signal": primary_signal,
                 "primarySignal": primary_signal,
+                "fade_eta": pump_fade.get("fade_eta"),
+                "fadeEta": pump_fade.get("fade_eta"),
                 "horizons": details,
             }
         if lean != "mixed":
@@ -2055,13 +2156,26 @@ class BitunixBot:
         sym_u = symbol.upper()
         action = str(decision.get("action") or "wait").lower()
         confidence_score = int(decision.get("confidence_score") or 0)
+        setup_stage = str(decision.get("setup_stage") or decision.get("setupStage") or "").lower()
+        preview_only = False
         if action not in ("long", "short"):
-            return {
-                "status": "wait",
-                "order_type": "WAIT",
-                "orderType": "WAIT",
-                "reason": "no parabolic pump-fade short setup",
-            }
+            if setup_stage in ("pump_watch", "pump_building"):
+                # Display-only short plan so the overlay can show the user
+                # where the trade will likely be taken once rejection confirms.
+                # This is NOT an executable-ready state.
+                action = "short"
+                preview_only = True
+                confidence_score = max(
+                    confidence_score,
+                    int(decision.get("checklist_score") or decision.get("checklistScore") or 55),
+                )
+            else:
+                return {
+                    "status": "wait",
+                    "order_type": "WAIT",
+                    "orderType": "WAIT",
+                    "reason": "no parabolic pump-fade short setup",
+                }
 
         meta = self.metas.get(sym_u, _DEFAULT_META)
         side = "BUY" if action == "long" else "SELL"
@@ -2070,6 +2184,7 @@ class BitunixBot:
         )
         plan_horizon_key = (
             preferred_horizon if preferred_horizon in horizons
+            else "h_15m" if preview_only and "h_15m" in horizons
             else next((key for key in ("h_1h", "h_30m", "h_15m") if key in horizons), None)
         )
         plan_horizon = horizons.get(plan_horizon_key or "", {})
@@ -2118,7 +2233,7 @@ class BitunixBot:
                 )
                 pump_fade_scalp = decision.get("setup") == "parabolic_pump_fade"
                 urgent_market = (
-                    pump_fade_scalp
+                    pump_fade_scalp and not preview_only
                     or (confidence_score >= 85 and tight_spread and tape_aligned)
                 )
 
@@ -2139,6 +2254,23 @@ class BitunixBot:
             plan_horizon.get("atr"),
             reference_price * self._first_float(plan_horizon.get("atr_pct")) / 100.0,
         )
+        if preview_only:
+            tick_size = 10 ** -meta.price_precision if meta.price_precision >= 0 else 0.0
+            trigger_offset = max(
+                tick_size,
+                atr * (0.08 if setup_stage == "pump_watch" else 0.15),
+            )
+            if action == "short":
+                entry_price = max(tick_size, entry_price - trigger_offset)
+            else:
+                entry_price = entry_price + trigger_offset
+            entry_price = round(float(entry_price), meta.price_precision)
+            order_type = "WAIT_FOR_REJECTION"
+            rationale = (
+                "preview only: enter short after 1m rejection/CVD flip confirms"
+                if setup_stage == "pump_watch"
+                else "preview only: pump is building; wait for high tag and rejection"
+            )
         reasons = list(dict.fromkeys(
             list(plan_horizon.get(f"{action}_reasons") or [])
             + list(horizons.get("h_30m", {}).get(f"{action}_reasons") or [])
@@ -2179,7 +2311,9 @@ class BitunixBot:
         reward_pct = abs(order_plan.take_profit - order_plan.price) / order_plan.price * 100.0
         timeout_secs = self.cfg.trading.post_only_timeout_secs
         return {
-            "status": "ready",
+            "status": "preview" if preview_only else "ready",
+            "ready": not preview_only,
+            "preview": preview_only,
             "side": side,
             "direction": action,
             "order_type": order_type,

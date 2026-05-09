@@ -864,7 +864,7 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
                     newest = max(newest, int(row.get("as_of") or 0))
                 except (TypeError, ValueError):
                     continue
-            max_age = max(60, cfg.loop.tick_seconds * 6)
+            max_age = max(15, cfg.loop.tick_seconds * 3)
             return newest <= 0 or (int(time.time()) - newest) > max_age
 
         snap = state.overlay_snapshot()

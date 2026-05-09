@@ -20,6 +20,7 @@
   let titleFlashPrefix = "";
   let titleFlashOn = false;
   let cleanPageTitle = document.title;
+  let pollMs = 0;
 
   function pick(obj, ...keys) {
     for (const key of keys) {
@@ -310,16 +311,17 @@
 
   function tradePlanHtml(decision, symData) {
     const plan = decision?.trade_plan || decision?.tradePlan || symData?.trade_plan || symData?.tradePlan;
-    if (!plan || plan.status !== "ready") return "";
+    if (!plan || !["ready", "preview"].includes(String(plan.status || ""))) return "";
+    const preview = plan.status === "preview" || plan.preview === true;
     const orderType = String(pick(plan, "order_type", "orderType") || "MARKET").replace(/_/g, " ");
     const entry = Number(pick(plan, "entry_price", "entryPrice"));
     const target = Number(pick(plan, "target_exit_price", "targetExitPrice", "max_exit_price", "maxExitPrice", "take_profit", "takeProfit"));
     const stop = Number(pick(plan, "stop_loss", "stopLoss"));
     const rewardPct = pick(plan, "reward_pct", "rewardPct");
     const riskPct = pick(plan, "risk_pct", "riskPct");
-    return `<div class="bxm-plan">
+    return `<div class="bxm-plan ${preview ? "preview" : ""}">
       <div class="bxm-plan-head">
-        <span>Pump fade entry</span>
+        <span>${preview ? "Entry trigger" : "Pump fade entry"}</span>
         <strong>${escapeHtml(orderType)}</strong>
       </div>
       <div class="bxm-plan-price">${fmtPrice(entry)}</div>
@@ -330,6 +332,18 @@
         <div><span>Risk</span><strong>${fmtPct(riskPct)}</strong></div>
       </div>
       ${plan.rationale ? `<div class="bxm-note">${escapeHtml(plan.rationale)}</div>` : ""}
+    </div>`;
+  }
+
+  function fadeEtaHtml(decision) {
+    const eta = decision?.fade_eta || decision?.fadeEta;
+    if (!eta || !eta.label || eta.label === "--") return "";
+    const status = String(eta.status || "watch");
+    const reason = eta.reason || "rough timing estimate from pump speed and tape";
+    return `<div class="bxm-eta status-${escapeHtml(status)}">
+      <span>Fade ETA</span>
+      <strong>${escapeHtml(eta.label)}</strong>
+      <em>${escapeHtml(reason)}</em>
     </div>`;
   }
 
@@ -476,6 +490,7 @@
         if (resp) {
           latest = resp.payload;
           fetchedAt = resp.fetchedAt || Date.now();
+          pollMs = resp.pollMs || pollMs;
           render();
         }
       });
@@ -593,6 +608,7 @@
         </div>
         <p><strong>${escapeHtml(copy.kicker)}</strong> - ${escapeHtml(copy.detail)}</p>
       </div>
+      ${fadeEtaHtml(decision)}
       ${warnings.length ? `<div class="bxm-warning">${escapeHtml(warnings[0])}</div>` : ""}
       ${gate?.reason ? `<div class="bxm-warning bad">${escapeHtml(gate.reason)}</div>` : ""}
       ${tradePlanHtml(decision, symData)}
@@ -611,7 +627,8 @@
       });
     }
 
-    status.textContent = `${symbols.length} symbols - ${autoFollow ? "auto-best on" : "manual select"} - poll ${latest.tick_seconds || 5}s`;
+    const refreshText = pollMs ? `refresh ${(pollMs / 1000).toFixed(pollMs < 2000 ? 1 : 0)}s` : "refresh --";
+    status.textContent = `${symbols.length} symbols - ${autoFollow ? "auto-best on" : "manual select"} - ${refreshText} - bot ${latest.tick_seconds || 5}s`;
     fresh.textContent = fetchedAt ? `Fetched ${fmtAge(Math.floor((Date.now() - fetchedAt) / 1000))}` : "";
   }
 
@@ -622,6 +639,7 @@
     if (msg?.type !== "momentum-update") return;
     latest = msg.payload;
     fetchedAt = msg.fetchedAt || Date.now();
+    pollMs = msg.pollMs || pollMs;
     render();
   });
 
@@ -629,6 +647,7 @@
     if (!resp) return;
     latest = resp.payload;
     fetchedAt = resp.fetchedAt || 0;
+    pollMs = resp.pollMs || pollMs;
     render();
   });
 

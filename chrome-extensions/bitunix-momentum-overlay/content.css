@@ -266,6 +266,7 @@
 
 #bxm-overlay .bxm-card,
 #bxm-overlay .bxm-plan,
+#bxm-overlay .bxm-eta,
 #bxm-overlay .bxm-countdown,
 #bxm-overlay .bxm-history,
 #bxm-overlay .bxm-checks,
@@ -339,11 +340,47 @@
   border-color: #ffc2ba;
 }
 
+#bxm-overlay .bxm-eta {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 3px 10px;
+  border-color: #f2c200;
+  background: #fff9bf;
+}
+#bxm-overlay .bxm-eta span {
+  color: #6d3f00;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+}
+#bxm-overlay .bxm-eta strong {
+  color: #111827;
+  font-size: 16px;
+  font-weight: 900;
+}
+#bxm-overlay .bxm-eta em {
+  grid-column: 1 / -1;
+  color: #5b6473;
+  font-style: normal;
+}
+#bxm-overlay .bxm-eta.status-live,
+#bxm-overlay .bxm-eta.status-starting {
+  border-color: #ffc2ba;
+  background: #fff4f1;
+}
+
 #bxm-overlay .bxm-plan-price {
   margin: 4px 0 10px;
   font-size: 26px;
   font-weight: 800;
   color: #111827;
+}
+#bxm-overlay .bxm-plan.preview {
+  border-color: #f2c200;
+  background: #fffdf0;
+}
+#bxm-overlay .bxm-plan.preview .bxm-plan-head strong {
+  color: #6d3f00;
 }
 #bxm-overlay .bxm-plan-grid {
   display: grid;
