@@ -113,6 +113,10 @@ risk:
   # math actually works at this account size.
   take_profit_r: 1.0     # was 2.5
   margin_profit_target_pct: 15.0
+  # Front-run the ideal TP a little so market/manual closes hit before the
+  # exact wick bottom snaps back. 15% means use 85% of the target distance
+  # unless the fee floor would make the trade too small.
+  take_profit_fill_buffer_pct: 15.0
   # ATR-aware SL hybrid. When use_atr=true, SL distance is the MAX of the
   # fixed `stop_loss_pct` floor and `atr_multiplier_sl × ATR%`. In calm
   # markets the floor binds (tight SL); in vol expansion ATR binds and

@@ -268,6 +268,7 @@ def test_margin_profit_target_caps_take_profit_distance():
     cfg.risk.stop_loss_pct = 0.25
     cfg.risk.take_profit_r = 1.0
     cfg.risk.margin_profit_target_pct = 15.0
+    cfg.risk.take_profit_fill_buffer_pct = 0.0
     sig = Signal(
         direction="short",
         score=1.0,
@@ -292,6 +293,42 @@ def test_margin_profit_target_caps_take_profit_distance():
 
     assert plan is not None
     assert plan.take_profit == 99.85
+
+
+def test_take_profit_fill_buffer_front_runs_short_exit():
+    cfg = fresh_cfg()
+    cfg.trading.symbols = ["BTCUSDT"]
+    cfg.trading.leverage = 100
+    cfg.risk.use_atr = False
+    cfg.risk.stop_loss_pct = 0.25
+    cfg.risk.take_profit_r = 1.0
+    cfg.risk.margin_profit_target_pct = 0.0
+    cfg.risk.take_profit_fill_buffer_pct = 20.0
+    cfg.risk.round_trip_fee_pct = 0.0
+    sig = Signal(
+        direction="short",
+        score=1.0,
+        indicator_score=1,
+        pattern_score=0.0,
+        reasons=["test"],
+        price=100.0,
+        atr=0.0,
+    )
+
+    plan = build_order(
+        sig,
+        free_margin=1000.0,
+        trading=cfg.trading,
+        risk=cfg.risk,
+        min_volume=0.001,
+        volume_step=0.001,
+        digits=4,
+        effective_leverage=100,
+        symbol="BTCUSDT",
+    )
+
+    assert plan is not None
+    assert plan.take_profit == 99.8
 
 
 def test_uptrend_produces_long_signal_with_paper_order():

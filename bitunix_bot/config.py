@@ -148,6 +148,11 @@ class RiskCfg:
     # Optional gross margin-profit target. 15 at 100x targets roughly a 0.15%
     # favorable price move before fees; if 0, TP uses only take_profit_r.
     margin_profit_target_pct: float = 0.0
+    # Pull the displayed/placed TP slightly closer than the ideal model target
+    # so fast manual/market closes have a better chance to fill before the
+    # wick bottom snaps back. 15 means use 85% of the target distance, subject
+    # to the fee floor.
+    take_profit_fill_buffer_pct: float = 0.0
     # Stale-trade early exit. If a position has been alive for stale_exit_min
     # minutes AND has never reached more than stale_exit_max_favor_r favorable,
     # flash-close it. Pro-desk rule: a 1m scalp signal that hasn't moved in 6
@@ -405,6 +410,8 @@ def _validate(cfg: Config) -> None:
         errs.append(f"risk.take_profit_r must be 0..20, got {r.take_profit_r}")
     if r.margin_profit_target_pct < 0:
         errs.append("risk.margin_profit_target_pct must be >=0")
+    if not (0 <= r.take_profit_fill_buffer_pct <= 80):
+        errs.append("risk.take_profit_fill_buffer_pct must be 0..80")
     if r.breakeven_at_r < 0 or r.trailing_activate_r < 0 or r.trailing_distance_r < 0:
         errs.append("risk.breakeven_at_r / trailing_* must be >=0")
     if s.fire_threshold < 0 or s.fire_threshold > 1:

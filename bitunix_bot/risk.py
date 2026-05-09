@@ -269,6 +269,20 @@ def build_order(
         if hvn_tp_dist > 0:
             tp_dist = min(tp_dist, hvn_tp_dist)
 
+    # Fillability/front-run buffer: the analytical bottom can be accurate but
+    # hard to close at in a fast wick. Pull TP closer to entry so the trader
+    # exits before the exact projected low. Keep at least a small fee-clearing
+    # gross move when the original target has enough room for that floor.
+    fill_buffer_pct = float(getattr(risk, "take_profit_fill_buffer_pct", 0.0) or 0.0)
+    if fill_buffer_pct > 0 and tp_dist > 0:
+        fill_factor = max(0.0, 1.0 - min(fill_buffer_pct, 80.0) / 100.0)
+        fee_floor_pct = max(0.0, float(getattr(risk, "round_trip_fee_pct", 0.0) or 0.0) * 1.15)
+        fee_floor_dist = price * (fee_floor_pct / 100.0)
+        if fee_floor_dist > 0 and tp_dist > fee_floor_dist:
+            tp_dist = max(tp_dist * fill_factor, fee_floor_dist)
+        else:
+            tp_dist = tp_dist * fill_factor
+
     if stop_dist <= 0:
         return None
 

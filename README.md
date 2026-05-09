@@ -23,7 +23,9 @@ fundamentals — only price action and indicators.
   SL still fires even if the bot crashes.
 * Stop loss is a tight % of entry price (default 0.25%). Take profit can be
   capped by `margin_profit_target_pct`; the current pump-fade profile targets
-  roughly 15% gross margin profit before fees.
+  roughly 15% gross margin profit before fees, then front-runs the displayed
+  exit slightly with `take_profit_fill_buffer_pct` so quick closes are more
+  fillable before the wick snaps back.
 * **Multi-symbol, multi-position**: trades a list of symbols simultaneously
   with a global position cap, per-symbol cap, and per-symbol cooldown.
 * **Position exit**: timed auto-close is disabled by default. Positions stay
@@ -91,6 +93,7 @@ Logs stream to stdout and `logs/bot.log`.
 | `risk`     | `stop_loss_pct`           | `0.25`                      | Tight SL as % of entry price |
 | `risk`     | `take_profit_r`           | `1.0`                       | R fallback before margin-profit cap |
 | `risk`     | `margin_profit_target_pct`| `15.0`                      | Cap TP to roughly this gross margin % |
+| `risk`     | `take_profit_fill_buffer_pct`| `15.0`                   | Pull TP closer so exits fill before exact bottom |
 | `risk`     | `use_atr`                 | `true`                      | Widen SL in volatility expansion |
 | `strategy` | `min_confluence`          | `4`                         | Need 4 of 7 rules to agree |
 | `strategy` | `adx_min`                 | `22.0`                      | Trend-strength filter floor |
