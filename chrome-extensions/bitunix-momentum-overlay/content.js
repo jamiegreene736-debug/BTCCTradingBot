@@ -21,6 +21,10 @@
   let titleFlashOn = false;
   let cleanPageTitle = document.title;
   let pollMs = 0;
+  const ALERT_HISTORY_KEY = "bxm-pump-alert-history-v1";
+  let alertHistory = loadAlertHistory();
+  let activeAlertStages = {};
+  let lastAlertScanAt = 0;
 
   function pick(obj, ...keys) {
     for (const key of keys) {
@@ -79,6 +83,24 @@
   function fmtCountdown(secs) {
     const s = Math.max(0, Math.floor(Number(secs) || 0));
     return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  }
+
+  function fmtClock(ts) {
+    const d = new Date(Number(ts) || Date.now());
+    return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
+  }
+
+  function loadAlertHistory() {
+    try {
+      const rows = JSON.parse(localStorage.getItem(ALERT_HISTORY_KEY) || "[]");
+      return Array.isArray(rows) ? rows.slice(0, 5) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function saveAlertHistory() {
+    localStorage.setItem(ALERT_HISTORY_KEY, JSON.stringify(alertHistory.slice(0, 5)));
   }
 
   function positionCountdown(pos) {
@@ -192,6 +214,55 @@
     if (c.stage === "short") return `${Math.round(c.score)}/100`;
     if (c.stage === "watch" || c.stage === "building") return `${Math.round(c.score)}/49`;
     return c.score ? `${Math.round(c.score)}/49` : "0/49";
+  }
+
+  function alertStageLabel(stage) {
+    if (stage === "short") return "FADE SHORT";
+    if (stage === "watch") return "PUMP WATCH";
+    if (stage === "building") return "PUMP BUILDING";
+    return "HUNTING";
+  }
+
+  function rememberPumpAlerts(candidates) {
+    if (!latest || !fetchedAt || lastAlertScanAt === fetchedAt) return;
+    lastAlertScanAt = fetchedAt;
+    const now = Date.now();
+    const currentAlerts = new Set();
+    let changed = false;
+
+    for (const c of candidates) {
+      if (!c || !isPumpAlertStage(c.stage)) continue;
+      currentAlerts.add(c.symbol);
+      if (activeAlertStages[c.symbol] === c.stage) continue;
+
+      const recentDuplicate = alertHistory.some((row) =>
+        row.symbol === c.symbol && row.stage === c.stage && now - Number(row.ts || 0) < 120000
+      );
+      activeAlertStages[c.symbol] = c.stage;
+      if (recentDuplicate) continue;
+
+      const symData = latest.symbols?.[c.symbol] || {};
+      const eta = c.decision?.fade_eta || c.decision?.fadeEta || {};
+      alertHistory.unshift({
+        ts: now,
+        symbol: c.symbol,
+        stage: c.stage,
+        label: alertStageLabel(c.stage),
+        scoreText: candidateScoreText(c),
+        price: symData.price,
+        eta: eta.label || "",
+      });
+      changed = true;
+    }
+
+    for (const symbol of Object.keys(activeAlertStages)) {
+      if (!currentAlerts.has(symbol)) delete activeAlertStages[symbol];
+    }
+
+    if (changed) {
+      alertHistory = alertHistory.slice(0, 5);
+      saveAlertHistory();
+    }
   }
 
   function maybeAutoSelectBest(candidates) {
@@ -396,6 +467,24 @@
     </div>`;
   }
 
+  function alertHistoryHtml() {
+    return `<div class="bxm-alert-history">
+      <div class="bxm-alert-history-head">
+        <div class="bxm-section-title">Recent pump warnings</div>
+        <span>last 5</span>
+      </div>
+      ${alertHistory.length ? alertHistory.map((row) => `
+        <div class="bxm-alert-event stage-${escapeHtml(row.stage || "")}">
+          <time>${escapeHtml(fmtClock(row.ts))}</time>
+          <div>
+            <strong>${escapeHtml((row.symbol || "").replace("USDT", ""))} ${escapeHtml(row.label || alertStageLabel(row.stage))}</strong>
+            <span>${escapeHtml(row.scoreText || "")}${row.eta ? ` - ETA ${escapeHtml(row.eta)}` : ""}${row.price ? ` - @ ${fmtPrice(row.price)}` : ""}</span>
+          </div>
+        </div>
+      `).join("") : `<div class="bxm-alert-empty">No pump warnings logged yet.</div>`}
+    </div>`;
+  }
+
   function subRowsHtml(symData) {
     const h = symData?.horizons || {};
     const keys = ["h_15m", "h_30m", "h_1h"];
@@ -546,6 +635,7 @@
     }
 
     const candidates = rankedCandidates(symbols);
+    rememberPumpAlerts(candidates);
     const best = maybeAutoSelectBest(candidates);
     const orderedSymbols = candidates.map((c) => c.symbol);
     panelEl.querySelector("#bxm-auto")?.classList.toggle("active", autoFollow);
@@ -617,6 +707,7 @@
       ${warnings.length ? `<div class="bxm-warning">${escapeHtml(warnings[0])}</div>` : ""}
       ${gate?.reason ? `<div class="bxm-warning bad">${escapeHtml(gate.reason)}</div>` : ""}
       ${tradePlanHtml(decision, symData)}
+      ${alertHistoryHtml()}
       ${countdownHtml(symData, activeSymbol)}
       ${closedTradesHtml(symData)}
       ${subRowsHtml(symData)}
