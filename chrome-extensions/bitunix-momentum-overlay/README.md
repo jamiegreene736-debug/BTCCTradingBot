@@ -29,13 +29,12 @@ dashboard.
   and `PUMP WATCH`. It includes preview take-profit and stop-loss prices, but it
   is not an entry until the rejection confirms.
 - `Suggested short entry`: confirmed short entry price. The card also shows
-  `Take profit / suggested exit`, `Stop loss`, target profit, and max loss.
-- `Signal history - not closed trades`: local overlay history of the last five
+  `Take profit / suggested exit`, `Stop loss`, target move, and stop distance.
+- `Signal history - no P&L`: local overlay history of the last five
   `PUMP BUILDING`, `PUMP WATCH`, and `FADE SHORT` alerts, with the time, symbol,
-  score, ETA, price, max-leverage limit-entry simulation, hypothetical net
-  return if take profit hits after fees, and the recommended stop-loss outcome.
-  These are watchlist estimates, not realized/closed-trade results.
-- Per-symbol closed trade history and net P&L.
+  score, ETA, price, and the suggested entry/TP/stop levels. It intentionally
+  does not show estimated P&L because these are alerts, not closed trades.
+- Per-symbol closed trade history and closed P&L.
 - Open-position display. Timed auto-close is currently disabled.
 - `AUTO` mode ranks all scanned coins, keeps the strongest pump-fade candidate
   selected, and highlights the chosen coin in bright yellow. `PUMP BUILDING`,

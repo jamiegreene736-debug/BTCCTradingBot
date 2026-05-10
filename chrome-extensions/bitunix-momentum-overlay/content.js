@@ -74,25 +74,6 @@
     return `${n.toFixed(2)}%`;
   }
 
-  function fmtSignedPct(value) {
-    if (value === null || value === undefined || value === "") return "--";
-    const n = Number(value);
-    if (!Number.isFinite(n)) return "--";
-    const sign = n > 0 ? "+" : "";
-    return `${sign}${n.toFixed(1)}%`;
-  }
-
-  function numberOrNull(value) {
-    const n = Number(value);
-    return Number.isFinite(n) ? n : null;
-  }
-
-  function pnlClass(value) {
-    const n = numberOrNull(value);
-    if (n === null) return "";
-    return n >= 0 ? "good" : "bad";
-  }
-
   function fmtAge(secs) {
     const s = Math.max(0, Math.floor(Number(secs) || 0));
     if (s < 60) return `${s}s ago`;
@@ -174,10 +155,6 @@
   function simulationFromPlan(plan) {
     return plan?.max_leverage_simulation || plan?.maxLeverageSimulation ||
       plan?.estimated_pnl || plan?.estimatedPnl || plan?.simulation || null;
-  }
-
-  function maxLeverageSimulation(decision, symData) {
-    return simulationFromPlan(tradePlanFor(decision, symData));
   }
 
   function stageFor(decision) {
@@ -289,10 +266,6 @@
         simEntryPrice: pick(sim, "entry_price", "entryPrice", "limit_price", "limitPrice") || pick(plan, "entry_price", "entryPrice"),
         simTakeProfit: pick(sim, "take_profit", "takeProfit", "target_exit_price", "targetExitPrice") || pick(plan, "take_profit", "takeProfit", "target_exit_price", "targetExitPrice"),
         simStopLoss: pick(sim, "recommended_stop_loss", "recommendedStopLoss", "stop_loss", "stopLoss") || pick(plan, "stop_loss", "stopLoss"),
-        simLeverage: pick(sim, "max_leverage", "maxLeverage", "leverage") || pick(symData, "max_leverage", "maxLeverage"),
-        estimatedPnlPct: pick(sim, "estimated_net_profit_margin_pct", "estimatedNetProfitMarginPct", "estimated_pnl_pct", "estimatedPnlPct"),
-        estimatedLossPct: pick(sim, "estimated_net_loss_margin_pct", "estimatedNetLossMarginPct", "estimated_loss_pct", "estimatedLossPct"),
-        feeMarginPct: pick(sim, "estimated_fee_margin_pct", "estimatedFeeMarginPct"),
       });
       changed = true;
     }
@@ -440,30 +413,8 @@
     const entryLabel = preview ? "Suggested short entry trigger" : "Suggested short entry";
     const targetLabel = preview ? "Preview take profit" : "Take profit / suggested exit";
     const stopLabel = preview ? "Preview stop loss" : "Stop loss";
-    const rewardLabel = preview ? "Target profit" : "Target profit";
-    const riskLabel = preview ? "Max loss" : "Max loss";
-    const sim = maxLeverageSimulation(decision, symData);
-    const simNet = numberOrNull(pick(sim, "estimated_net_profit_margin_pct", "estimatedNetProfitMarginPct", "estimated_pnl_pct", "estimatedPnlPct"));
-    const simLoss = numberOrNull(pick(sim, "estimated_net_loss_margin_pct", "estimatedNetLossMarginPct", "estimated_loss_pct", "estimatedLossPct"));
-    const simFee = numberOrNull(pick(sim, "estimated_fee_margin_pct", "estimatedFeeMarginPct"));
-    const simLev = pick(sim, "max_leverage", "maxLeverage", "leverage");
-    const simEntry = Number(pick(sim, "entry_price", "entryPrice", "limit_price", "limitPrice"));
-    const simTarget = Number(pick(sim, "take_profit", "takeProfit", "target_exit_price", "targetExitPrice"));
-    const simStop = Number(pick(sim, "recommended_stop_loss", "recommendedStopLoss", "stop_loss", "stopLoss"));
-    const simHtml = sim ? `<div class="bxm-sim">
-        <div class="bxm-sim-head">
-          <span>Max leverage limit-order simulation</span>
-          <strong>${escapeHtml(simLev || "--")}x</strong>
-        </div>
-        <div class="bxm-sim-grid">
-          <div><span>If TP hits (est.)</span><strong class="${pnlClass(simNet)}">${fmtSignedPct(simNet)}</strong></div>
-          <div><span>If stop hits</span><strong class="bad">${fmtSignedPct(simLoss)}</strong></div>
-          <div><span>Limit entry</span><strong>${fmtPrice(simEntry)}</strong></div>
-          <div><span>Take profit</span><strong class="good">${fmtPrice(simTarget)}</strong></div>
-          <div><span>Recommended stop</span><strong class="bad">${fmtPrice(simStop)}</strong></div>
-          <div><span>Fee drag</span><strong>${fmtPct(simFee)}</strong></div>
-        </div>
-      </div>` : "";
+    const rewardLabel = "Target move";
+    const riskLabel = "Stop distance";
     return `<div class="bxm-plan ${preview ? "preview" : ""}">
       <div class="bxm-plan-head">
         <span>${entryLabel}</span>
@@ -477,7 +428,6 @@
         <div><span>${riskLabel}</span><strong>${fmtPct(riskPct)}</strong></div>
       </div>
       ${plan.rationale ? `<div class="bxm-note">${escapeHtml(plan.rationale)}</div>` : ""}
-      ${simHtml}
     </div>`;
   }
 
@@ -526,7 +476,7 @@
           <div class="bxm-section-title">Closed trades</div>
           <span>${total || 0} trades${winRate !== null && winRate !== undefined ? ` - ${Number(winRate).toFixed(1)}% win` : ""}</span>
         </div>
-        <strong class="${num(net) >= 0 ? "good" : "bad"}">${fmtMoney(net)}</strong>
+        <strong class="${num(net) >= 0 ? "good" : "bad"}">P&L ${fmtMoney(net)}</strong>
       </div>
       ${rows.slice(0, 4).map((r) => `
         <div class="bxm-trade">
@@ -540,10 +490,10 @@
   function alertHistoryHtml() {
     return `<div class="bxm-alert-history">
       <div class="bxm-alert-history-head">
-        <div class="bxm-section-title">Signal history - not closed trades</div>
-        <span>If TP hits</span>
+        <div class="bxm-section-title">Signal history - no P&L</div>
+        <span>last 5</span>
       </div>
-      <p class="bxm-alert-disclaimer">Watchlist estimates only. Actual closed-trade P&L is in the Closed trades section.</p>
+      <p class="bxm-alert-disclaimer">Alerts only. Estimated or actual P&L is shown only after a trade is closed.</p>
       ${alertHistory.length ? alertHistory.map((row) => `
         <div class="bxm-alert-event stage-${escapeHtml(row.stage || "")}">
           <time>${escapeHtml(fmtClock(row.ts))}</time>
@@ -551,13 +501,8 @@
             <strong>${escapeHtml((row.symbol || "").replace("USDT", ""))} ${escapeHtml(row.label || alertStageLabel(row.stage))}</strong>
             <span>${escapeHtml(row.scoreText || "")}${row.eta ? ` - ETA ${escapeHtml(row.eta)}` : ""}${row.price ? ` - @ ${fmtPrice(row.price)}` : ""}</span>
             ${(row.simEntryPrice || row.simTakeProfit || row.simStopLoss) ? `<small>
-              Sim limit ${fmtPrice(row.simEntryPrice)} - TP ${fmtPrice(row.simTakeProfit)} - Stop ${fmtPrice(row.simStopLoss)}
+              Levels: entry ${fmtPrice(row.simEntryPrice)} - TP ${fmtPrice(row.simTakeProfit)} - stop ${fmtPrice(row.simStopLoss)}
             </small>` : ""}
-          </div>
-          <div class="bxm-alert-pnl">
-            <em>${row.simLeverage ? `${escapeHtml(row.simLeverage)}x` : "max lev"}</em>
-            <strong class="${pnlClass(row.estimatedPnlPct)}">TP ${fmtSignedPct(row.estimatedPnlPct)}</strong>
-            ${row.estimatedLossPct !== undefined && row.estimatedLossPct !== null ? `<span>Stop risk ${fmtSignedPct(row.estimatedLossPct)}</span>` : ""}
           </div>
         </div>
       `).join("") : `<div class="bxm-alert-empty">No pump warnings logged yet.</div>`}

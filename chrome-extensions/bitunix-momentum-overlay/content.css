@@ -396,48 +396,11 @@
   background: #f7f9fc;
 }
 #bxm-overlay .bxm-plan-grid span,
-#bxm-overlay .bxm-sim-grid span,
 #bxm-overlay .bxm-check span,
 #bxm-overlay .bxm-subrow em,
 #bxm-overlay .bxm-trade span {
   display: block;
   color: #687385;
-}
-
-#bxm-overlay .bxm-sim {
-  margin-top: 10px;
-  padding-top: 10px;
-  border-top: 1px solid #edf0f4;
-}
-
-#bxm-overlay .bxm-sim-head {
-  display: flex;
-  justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 7px;
-  color: #374151;
-  font-size: 11px;
-  font-weight: 800;
-  text-transform: uppercase;
-}
-
-#bxm-overlay .bxm-sim-grid {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 6px;
-}
-
-#bxm-overlay .bxm-sim-grid div {
-  min-width: 0;
-  padding: 7px;
-  border-radius: 6px;
-  background: #ffffff;
-  border: 1px solid #edf0f4;
-}
-
-#bxm-overlay .bxm-sim-grid strong {
-  display: block;
-  overflow-wrap: anywhere;
 }
 
 #bxm-overlay .bxm-countdown {
@@ -477,7 +440,7 @@
 
 #bxm-overlay .bxm-alert-event {
   display: grid;
-  grid-template-columns: 58px minmax(0, 1fr) 72px;
+  grid-template-columns: 58px minmax(0, 1fr);
   gap: 8px;
   padding: 7px 0;
   border-top: 1px solid #edf0f4;
@@ -511,22 +474,6 @@
 }
 #bxm-overlay .bxm-alert-event small {
   margin-top: 2px;
-}
-
-#bxm-overlay .bxm-alert-pnl {
-  text-align: right;
-  min-width: 0;
-}
-#bxm-overlay .bxm-alert-pnl em,
-#bxm-overlay .bxm-alert-pnl span {
-  color: #687385;
-  display: block;
-  font-size: 10px;
-  font-style: normal;
-}
-#bxm-overlay .bxm-alert-pnl strong {
-  display: block;
-  font-size: 12px;
 }
 
 #bxm-overlay .bxm-alert-event.stage-short strong { color: #c02b25; }
