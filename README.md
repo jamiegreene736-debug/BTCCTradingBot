@@ -28,6 +28,11 @@ fundamentals — only price action and indicators.
   fillable before the wick snaps back.
 * **Multi-symbol, multi-position**: trades a list of symbols simultaneously
   with a global position cap, per-symbol cap, and per-symbol cooldown.
+* **Paper realism**: paper orders now attach a live-friction audit to the
+  dashboard event: spread, visible top-5 entry/exit depth versus order size,
+  partial-fill risk, estimated impact, round-trip fee drag, net TP/SL return on
+  margin, and rough liquidation-buffer pressure. This keeps paper results from
+  looking clean when the live book is too thin to actually fill that cleanly.
 * **Position exit**: timed auto-close is disabled by default. Positions stay
   open until TP/SL, manual close, or a future explicit exit rule handles them.
 * **Bar-dedupe**: within the same candle, a symbol is only evaluated once —

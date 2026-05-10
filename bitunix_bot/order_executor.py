@@ -15,6 +15,7 @@ just manages that state through the bot reference.
 from __future__ import annotations
 
 import logging
+import math
 import time
 from typing import TYPE_CHECKING, Any
 
@@ -71,7 +72,11 @@ class OrderExecutor:
                       f"lev={plan.leverage}x")
         log.info("ORDER %s [%s]", order_text, plan.notes)
         if not bot.cfg.is_live:
-            bot.state.record_order(order_text + " (paper)")
+            realism = self._paper_realism_report(symbol, plan, force_market=force_market)
+            bot.state.record_order(
+                order_text + " (paper) | " + realism["summary"],
+                extra={"paper_realism": realism},
+            )
             return True
 
         # Try post-only maker entry first. If the OB feed isn't ready
@@ -85,6 +90,217 @@ class OrderExecutor:
             log.info("Post-only path failed/skipped for %s; using market", symbol)
 
         return self._place_market(symbol, plan, order_text)
+
+    # ------------------------------------------------------------------
+    # Paper realism
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _ratio(value: float | None, denom: float) -> float | None:
+        if value is None or denom <= 0:
+            return None
+        return value / denom
+
+    @staticmethod
+    def _impact_pct(spread_pct: float | None, depth_ratio: float | None) -> float:
+        """Conservative top-of-book impact model for paper-mode scoring."""
+        if spread_pct is None:
+            return 0.0
+        spread = max(0.0, float(spread_pct))
+        if depth_ratio is None:
+            return spread
+        if depth_ratio >= 10:
+            return spread * 0.25
+        if depth_ratio >= 3:
+            return spread * 0.50
+        if depth_ratio >= 1:
+            return spread
+        # If visible depth cannot cover the order, model a punitive partial
+        # sweep. This is not a price forecast; it is a "paper is too rosy"
+        # penalty for comparing setups.
+        return spread * min(5.0, 1.0 / max(depth_ratio, 0.05))
+
+    @staticmethod
+    def _fmt_ratio(value: float | None) -> str:
+        return "--" if value is None or not math.isfinite(value) else f"{value:.1f}x"
+
+    def _paper_realism_report(
+        self,
+        symbol: str,
+        plan: OrderPlan,
+        *,
+        force_market: bool = False,
+    ) -> dict[str, Any]:
+        """Score a paper entry against live-execution frictions.
+
+        Paper mode still does not send orders, but this report keeps it honest:
+        spread, top-of-book depth, partial-fill risk, exit liquidity, fee drag,
+        estimated impact, and rough isolated-liquidation pressure are included
+        in the event payload and summary text.
+        """
+        bot = self._bot
+        sym_u = symbol.upper()
+        entry_style = (
+            "MARKET"
+            if force_market or not bot.cfg.trading.use_post_only_entries
+            else "POST_ONLY_LIMIT"
+        )
+        notional = max(0.0, float(plan.volume or 0.0) * float(plan.price or 0.0))
+        reward_price_pct = (
+            abs(float(plan.take_profit) - float(plan.price)) / float(plan.price) * 100.0
+            if plan.price else 0.0
+        )
+        risk_price_pct = (
+            abs(float(plan.stop_loss) - float(plan.price)) / float(plan.price) * 100.0
+            if plan.price else 0.0
+        )
+        fee_pct = max(0.0, float(getattr(bot.cfg.risk, "round_trip_fee_pct", 0.0) or 0.0))
+        warnings: list[str] = []
+
+        bid = ask = spread_pct = None
+        bid_depth = ask_depth = None
+        ob_connected = bool(bot.ob_feed and bot.ob_feed.is_connected())
+        if not ob_connected:
+            warnings.append("order book feed unavailable; fill/slippage unknown")
+        elif bot.ob_feed is not None:
+            tob = bot.ob_feed.get_top_of_book(sym_u)
+            if tob:
+                bid, ask = float(tob[0]), float(tob[1])
+            else:
+                warnings.append("top-of-book unavailable")
+            spread_pct = bot.ob_feed.get_spread_pct(sym_u)
+            depth = bot.ob_feed.get_depth(sym_u, top_n=5)
+            if depth:
+                bid_depth, ask_depth = float(depth[0]), float(depth[1])
+            else:
+                warnings.append("top-5 depth unavailable")
+
+        max_spread_pct = None
+        try:
+            meta = bot.metas.get(sym_u, _DEFAULT_META)
+            max_spread_pct = bot._max_entry_spread_pct_for_symbol(sym_u, meta)
+        except Exception:
+            max_spread_pct = float(getattr(bot.cfg.trading, "max_entry_spread_pct", 0.0) or 0.0)
+        if spread_pct is not None and max_spread_pct and spread_pct > max_spread_pct:
+            warnings.append(f"spread {spread_pct:.3f}% above {max_spread_pct:.3f}% entry threshold")
+
+        market_entry_depth = ask_depth if plan.side == "BUY" else bid_depth
+        passive_queue_depth = bid_depth if plan.side == "BUY" else ask_depth
+        exit_depth = bid_depth if plan.side == "BUY" else ask_depth
+        entry_depth_ratio = (
+            self._ratio(market_entry_depth, plan.volume)
+            if entry_style == "MARKET"
+            else self._ratio(passive_queue_depth, plan.volume)
+        )
+        exit_depth_ratio = self._ratio(exit_depth, plan.volume)
+
+        if entry_depth_ratio is not None:
+            if entry_depth_ratio < 1:
+                warnings.append("entry size exceeds visible top-5 depth; partial fill likely")
+            elif entry_depth_ratio < 3:
+                warnings.append("entry depth cushion below 3x size")
+        if exit_depth_ratio is not None:
+            if exit_depth_ratio < 1:
+                warnings.append("exit size exceeds visible top-5 depth; TP/SL may slip")
+            elif exit_depth_ratio < 3:
+                warnings.append("exit depth cushion below 3x size")
+        if entry_style == "POST_ONLY_LIMIT" and entry_depth_ratio is not None and entry_depth_ratio < 4:
+            warnings.append("post-only queue is large versus size; maker fill may be late or missed")
+
+        entry_impact_pct = (
+            self._impact_pct(spread_pct, entry_depth_ratio)
+            if entry_style == "MARKET"
+            else 0.0
+        )
+        # Native TP/SL on perps usually acts like trigger liquidity when it
+        # fires. Paper assumes the exit has to cross the book.
+        exit_impact_pct = self._impact_pct(spread_pct, exit_depth_ratio)
+        round_trip_cost_pct = fee_pct + entry_impact_pct + exit_impact_pct
+        fee_usdt = notional * fee_pct / 100.0
+        impact_usdt = notional * (entry_impact_pct + exit_impact_pct) / 100.0
+        gross_tp_usdt = notional * reward_price_pct / 100.0
+        gross_sl_usdt = notional * risk_price_pct / 100.0
+        net_tp_usdt = gross_tp_usdt - fee_usdt - impact_usdt
+        net_sl_usdt = -(gross_sl_usdt + fee_usdt + impact_usdt)
+        net_tp_margin_pct = (reward_price_pct - round_trip_cost_pct) * plan.leverage
+        net_sl_margin_pct = -(risk_price_pct + round_trip_cost_pct) * plan.leverage
+
+        if net_tp_margin_pct <= 0:
+            warnings.append("TP target does not clear estimated fees/impact")
+        fee_drag_margin_pct = fee_pct * plan.leverage
+        if fee_drag_margin_pct >= 15:
+            warnings.append(f"fee drag is high at {fee_drag_margin_pct:.1f}% of margin")
+        liquidation_move_pct = 100.0 / max(1, int(plan.leverage or 1))
+        sl_liq_ratio = risk_price_pct / liquidation_move_pct if liquidation_move_pct > 0 else None
+        if sl_liq_ratio is not None and sl_liq_ratio >= 0.65:
+            warnings.append("stop is close to rough isolated liquidation buffer")
+
+        if any("exceeds visible" in w or "does not clear" in w for w in warnings):
+            status = "fail"
+        elif warnings:
+            status = "warn"
+        else:
+            status = "ok"
+
+        summary = (
+            f"realism={status} {entry_style} "
+            f"netTP={net_tp_margin_pct:+.1f}%m netSL={net_sl_margin_pct:+.1f}%m "
+            f"liq entry={self._fmt_ratio(entry_depth_ratio)} exit={self._fmt_ratio(exit_depth_ratio)} "
+            f"fees={fee_drag_margin_pct:.1f}%m"
+        )
+        if warnings:
+            summary += " warnings=" + "; ".join(warnings[:3])
+
+        return {
+            "status": status,
+            "symbol": sym_u,
+            "entry_style": entry_style,
+            "entryStyle": entry_style,
+            "side": plan.side,
+            "qty": plan.volume,
+            "notional": round(notional, 6),
+            "leverage": plan.leverage,
+            "bid": bid,
+            "ask": ask,
+            "spread_pct": round(spread_pct, 6) if spread_pct is not None else None,
+            "spreadPct": round(spread_pct, 6) if spread_pct is not None else None,
+            "bid_depth_top5": bid_depth,
+            "bidDepthTop5": bid_depth,
+            "ask_depth_top5": ask_depth,
+            "askDepthTop5": ask_depth,
+            "entry_depth_ratio": round(entry_depth_ratio, 4) if entry_depth_ratio is not None else None,
+            "entryDepthRatio": round(entry_depth_ratio, 4) if entry_depth_ratio is not None else None,
+            "exit_depth_ratio": round(exit_depth_ratio, 4) if exit_depth_ratio is not None else None,
+            "exitDepthRatio": round(exit_depth_ratio, 4) if exit_depth_ratio is not None else None,
+            "fee_pct_notional": round(fee_pct, 6),
+            "feePctNotional": round(fee_pct, 6),
+            "fee_drag_margin_pct": round(fee_drag_margin_pct, 4),
+            "feeDragMarginPct": round(fee_drag_margin_pct, 4),
+            "entry_impact_pct": round(entry_impact_pct, 6),
+            "entryImpactPct": round(entry_impact_pct, 6),
+            "exit_impact_pct": round(exit_impact_pct, 6),
+            "exitImpactPct": round(exit_impact_pct, 6),
+            "round_trip_cost_pct": round(round_trip_cost_pct, 6),
+            "roundTripCostPct": round(round_trip_cost_pct, 6),
+            "reward_price_pct": round(reward_price_pct, 6),
+            "rewardPricePct": round(reward_price_pct, 6),
+            "risk_price_pct": round(risk_price_pct, 6),
+            "riskPricePct": round(risk_price_pct, 6),
+            "estimated_net_tp_usdt": round(net_tp_usdt, 6),
+            "estimatedNetTpUsdt": round(net_tp_usdt, 6),
+            "estimated_net_sl_usdt": round(net_sl_usdt, 6),
+            "estimatedNetSlUsdt": round(net_sl_usdt, 6),
+            "estimated_net_tp_margin_pct": round(net_tp_margin_pct, 4),
+            "estimatedNetTpMarginPct": round(net_tp_margin_pct, 4),
+            "estimated_net_sl_margin_pct": round(net_sl_margin_pct, 4),
+            "estimatedNetSlMarginPct": round(net_sl_margin_pct, 4),
+            "liquidation_move_pct_rough": round(liquidation_move_pct, 6),
+            "liquidationMovePctRough": round(liquidation_move_pct, 6),
+            "sl_to_liquidation_buffer_ratio": round(sl_liq_ratio, 4) if sl_liq_ratio is not None else None,
+            "slToLiquidationBufferRatio": round(sl_liq_ratio, 4) if sl_liq_ratio is not None else None,
+            "warnings": warnings,
+            "summary": summary,
+        }
 
     def check_pending_limits(self, all_open_positions: list[dict[str, Any]]) -> None:
         """Sweep pending post-only limit entries.

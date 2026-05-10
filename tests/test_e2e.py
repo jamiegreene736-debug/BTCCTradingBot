@@ -39,7 +39,7 @@ from bitunix_bot.bot import BitunixBot                        # noqa: E402
 from bitunix_bot.client import BitunixClient                  # noqa: E402
 from bitunix_bot.config import load                           # noqa: E402
 from bitunix_bot.dashboard import create_app                  # noqa: E402
-from bitunix_bot.risk import build_order                      # noqa: E402
+from bitunix_bot.risk import OrderPlan, build_order           # noqa: E402
 from bitunix_bot.strategy import Signal                       # noqa: E402
 from bitunix_bot.symbol_meta import auto_symbol_risk_mult     # noqa: E402
 from bitunix_bot.symbol_meta import select_dynamic_symbols    # noqa: E402
@@ -5690,6 +5690,83 @@ def test_depth_filter_unknown_symbol_no_filter():
         f"unknown symbol shouldn't trigger depth filter: {skips}"
 
 
+def test_paper_market_order_records_liquidity_realism_fail():
+    """Paper mode should expose live-fill problems instead of pretending a
+    thin book can absorb the trade cleanly."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "paper"
+    cfg.trading.symbols = ["BTCUSDT"]
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.ob_feed = _FakeOBFeed(
+        bid=100.00,
+        ask=100.10,
+        spread_pct=0.10,
+        bid_depth=0.5,
+        ask_depth=0.5,
+    )
+    plan = OrderPlan(
+        side="SELL",
+        volume=2.0,
+        price=100.0,
+        stop_loss=100.25,
+        take_profit=99.80,
+        leverage=100,
+        notes="paper realism test",
+    )
+
+    assert bot._execute("BTCUSDT", plan, force_market=True) is True
+    orders = [e for e in bot.state.snapshot()["events"] if e["kind"] == "order"]
+    assert orders
+    realism = orders[0]["extra"]["paper_realism"]
+    assert realism["status"] == "fail"
+    assert realism["entry_style"] == "MARKET"
+    assert realism["entry_depth_ratio"] == 0.25
+    assert realism["exit_depth_ratio"] == 0.25
+    assert realism["estimated_net_tp_margin_pct"] < 0
+    assert any("partial fill" in w or "exceeds visible" in w for w in realism["warnings"])
+    assert "realism=fail" in orders[0]["text"]
+
+
+def test_paper_post_only_order_records_realism_ok_on_deep_book():
+    """A deep/tight book should produce an OK paper-realism event with fee
+    and depth assumptions attached for later audit."""
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "paper"
+    cfg.trading.symbols = ["BTCUSDT"]
+    cfg.trading.use_post_only_entries = True
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.ob_feed = _FakeOBFeed(
+        bid=100.00,
+        ask=100.01,
+        spread_pct=0.01,
+        bid_depth=30.0,
+        ask_depth=30.0,
+    )
+    plan = OrderPlan(
+        side="SELL",
+        volume=1.0,
+        price=100.0,
+        stop_loss=100.25,
+        take_profit=99.50,
+        leverage=100,
+        notes="paper realism ok",
+    )
+
+    assert bot._execute("BTCUSDT", plan) is True
+    orders = [e for e in bot.state.snapshot()["events"] if e["kind"] == "order"]
+    realism = orders[0]["extra"]["paper_realism"]
+    assert realism["status"] == "ok"
+    assert realism["entry_style"] == "POST_ONLY_LIMIT"
+    assert realism["entry_depth_ratio"] == 30.0
+    assert realism["exit_depth_ratio"] == 30.0
+    assert realism["estimated_net_tp_margin_pct"] > 0
+    assert realism["fee_drag_margin_pct"] == round(cfg.risk.round_trip_fee_pct * 100, 4)
+
+
 def test_dynamic_post_only_timeout_shortens_with_high_activity():
     """High activity multiplier (busy market) → shorter timeout. Inverted
     scaling so frantic markets either fill fast or skip."""
@@ -6791,6 +6868,8 @@ def main() -> int:
         test_depth_filter_blocks_thin_book,
         test_depth_filter_allows_normal_book,
         test_depth_filter_unknown_symbol_no_filter,
+        test_paper_market_order_records_liquidity_realism_fail,
+        test_paper_post_only_order_records_realism_ok_on_deep_book,
         test_dynamic_post_only_timeout_shortens_with_high_activity,
         test_dynamic_post_only_timeout_lengthens_in_dead_market,
         test_dynamic_post_only_timeout_clamps_to_4_12,
