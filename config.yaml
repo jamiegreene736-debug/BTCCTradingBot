@@ -44,9 +44,12 @@ trading:
     ETHUSDT: 0.75
     DOGEUSDT: 0.35
     XRPUSDT: 0.35
-  # Timed auto-close is disabled. Positions stay open until an exchange TP/SL,
-  # manual close, or a future explicit exit rule handles them.
-  max_position_age_seconds: 0
+  # Pump-fade shorts are seconds-to-2-min scalps, not "hold and hope" trades.
+  # Academic pump/dump case studies show the dump usually starts within seconds
+  # to a few minutes after the peak; anything still open after this clock has
+  # lost the original timing edge. The manager shortens this cap automatically
+  # when the live tape activity multiplier is high.
+  max_position_age_seconds: 120
   time_exit_only_if_losing: false
   auto_execute_pump_fade_shorts: true
   auto_execute_pump_fade_only: true
@@ -161,21 +164,19 @@ risk:
   partial_tp_enabled: true
   partial_tp_at_r: 0.75       # was 0.5 — let winners run a bit further before partial close
   partial_tp_close_pct: 50.0  # was 60.0 — half off at 0.5R, trail remainder
-  # Stale-trade exit (Grok v9 — relaxed from 6 min / 0.5R). The old aggressive
-  # cutoff was killing trades before they could develop favor. Live ETH 0.65-
-  # score trade hit max_favor=0.012R then got stale-killed at 6 min — never
-  # had a chance. 12 min gives signals time to actually unfold; 0.2R floor
-  # only kills genuinely dead trades that drifted sideways with zero conviction.
-  # 15m timeframe: stale_exit_min 18 min ≈ 1.2 bars. A trade that hasn't
-  # put on 0.25R within roughly one full bar after entry has clearly missed
-  # the move; kill cheaply. Threshold 0.25R unchanged — pairs with BE at
-  # 0.20R so anything hitting BE-protect survives the stale gate.
+  # Stale-trade exit for pump fades. If the short has not produced at least
+  # modest favorable movement inside ~45s, the fade likely started late or the
+  # pump is still squeezing. Kill it instead of letting the average hold creep
+  # into lottery-ticket territory.
   stale_exit_enabled: true
-  # Grok health-check: 20 min was killing undeveloped 15m trades too early.
-  # 30 min = 2 full bars, gives signals proper time to play out.
-  stale_exit_min: 60.0          # was 45.0 — more breathing room, avoid premature stale exits
-  # Grok health-check: 0.25 → 0.30, only kill truly dead trades.
-  stale_exit_max_favor_r: 0.30  # was 0.25 — loosened per Grok health-check
+  stale_exit_min: 0.75          # minutes; 45s dead-trade kill switch
+  stale_exit_max_favor_r: 0.20  # less than +0.20R by 45s = no real dump edge
+  # For shorts, close if buyer aggression returns hard after the entry has had
+  # a few seconds to work. This prevents "pump resumed" losers from waiting for
+  # the hard clock.
+  tape_exit_enabled: true
+  tape_exit_threshold: 0.60
+  tape_exit_min_hold_secs: 20
 
 strategy:
   # 23 indicator votes + 30 patterns + 5 combo recipes. The combined score

@@ -282,6 +282,12 @@ def build_order(
             tp_dist = max(tp_dist * fill_factor, fee_floor_dist)
         else:
             tp_dist = tp_dist * fill_factor
+        # Never turn a technically correct price move into a net loser. If the
+        # front-run buffer pulls TP inside estimated fees/slippage, push it back
+        # out to the fee-clearing floor. Live history showed several shorts
+        # moved the right way but still lost after fees.
+        if fee_floor_dist > 0:
+            tp_dist = max(tp_dist, fee_floor_dist)
 
     if stop_dist <= 0:
         return None

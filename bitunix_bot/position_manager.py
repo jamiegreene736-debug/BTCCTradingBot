@@ -61,6 +61,39 @@ class PositionManager:
         self.position_max_favor.pop(pid, None)
         self.partial_tp_done.discard(pid)
 
+    def hard_time_exit_seconds(self, symbol: str, base_seconds: int | None = None) -> int:
+        """Return the hard max hold time for the current tape regime.
+
+        Pump-fade shorts are short-lived reversal scalps. When live print
+        activity is unusually high, the post-pump dump window compresses, so a
+        fixed two-minute hold is still too generous. Use the trade-tape
+        activity multiplier as a volume/activity proxy:
+
+          activity <= 1.0  -> keep the configured cap
+          activity 1.5x    -> close around 2/3 of the cap
+          activity >= 2.0  -> close around 1/2 of the cap
+
+        This keeps the strategy anchored to the user's desired fast-in/fast-out
+        pump-fade behavior without requiring a new data store per position.
+        """
+        bot = self._bot
+        base = int(base_seconds if base_seconds is not None
+                   else (bot.cfg.trading.max_position_age_seconds or 0))
+        if base <= 0:
+            return 0
+        activity = None
+        if bot.tape_feed is not None:
+            try:
+                activity = bot.tape_feed.get_activity_multiplier(
+                    symbol.upper(), clamp_min=0.75, clamp_max=2.0
+                )
+            except Exception:
+                activity = None
+        if activity is None or activity <= 1.0:
+            return base
+        min_cap = max(30, base // 2)
+        return int(max(min_cap, min(base, round(base / activity))))
+
     # ------------------------------------------------------------------
     # Public entry point
     # ------------------------------------------------------------------
@@ -118,12 +151,6 @@ class PositionManager:
                 price_delta = upnl / qty if qty else 0.0
                 current_price = entry + price_delta if is_long else entry - price_delta
 
-                sl_order = sl_orders.get(pid)
-                if not sl_order:
-                    continue  # no SL trigger order; can't safely manage
-                current_sl = float(sl_order["slPrice"])
-                sl_order_id = str(sl_order["id"])
-
                 # Symbol meta needed early for both partial-TP qty quantization
                 # and SL price rounding.
                 meta = bot.metas.get(symbol, _DEFAULT_META)
@@ -144,15 +171,40 @@ class PositionManager:
                 if r_favor > prev_max:
                     self.position_max_favor[pid] = r_favor
 
+                # Hard time exit. This is deliberately before SL/TP trigger-order
+                # management: if Bitunix did not return an SL row, the position is
+                # less protected, so the time cap should still flatten it.
+                ctime_ms = int(p.get("ctime") or 0)
+                age_s = (time.time() * 1000 - ctime_ms) / 1000.0 if ctime_ms else 0.0
+                max_age_s = self.hard_time_exit_seconds(symbol)
+                if max_age_s > 0 and age_s >= max_age_s:
+                    try:
+                        bot.client.flash_close_position(pid)
+                        log.info("TIME EXIT %s: age=%.0fs cap=%ss r=%.2f",
+                                 symbol, age_s, max_age_s, r_favor)
+                        bot.state.record_order(
+                            f"{symbol} TIME_EXIT positionId={pid} "
+                            f"age={age_s:.0f}s cap={max_age_s}s r={r_favor:+.2f}"
+                        )
+                        continue
+                    except BitunixError as e:
+                        log.warning("Time exit failed for %s: %s", symbol, e)
+                        # Fall through to normal management; native TP/SL may
+                        # still protect the position.
+
+                sl_order = sl_orders.get(pid)
+                if not sl_order:
+                    continue  # no SL trigger order; can't safely ratchet stops
+                current_sl = float(sl_order["slPrice"])
+                sl_order_id = str(sl_order["id"])
+
                 # Stale-trade early exit — if a position has aged past
                 # stale_exit_min without ever reaching stale_exit_max_favor_r,
                 # flash-close it. Distinct from time_exit_only_if_losing
                 # (long-window profit-aware) and from tape-driven exit
                 # (immediate, flow-flip based).
                 if rk.stale_exit_enabled:
-                    ctime_ms_se = int(p.get("ctime") or 0)
-                    age_min_se = (time.time() * 1000 - ctime_ms_se) / 60000.0 \
-                                 if ctime_ms_se else 0
+                    age_min_se = age_s / 60.0
                     max_seen = self.position_max_favor.get(pid, r_favor)
                     if (age_min_se >= rk.stale_exit_min
                             and max_seen < rk.stale_exit_max_favor_r):

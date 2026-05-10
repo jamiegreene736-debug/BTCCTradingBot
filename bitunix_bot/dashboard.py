@@ -167,15 +167,24 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
         now_s = now_s or int(time.time())
         ctime_ms = _position_ctime_ms(p)
         opened_at = int(ctime_ms // 1000) if ctime_ms else None
-        close_at = (
-            opened_at + manual_close_after_seconds
-            if opened_at and manual_close_after_seconds > 0
-            else None
-        )
-        remaining = max(0, close_at - now_s) if close_at else None
         side = str(p.get("side") or p.get("positionSide") or "").upper()
         symbol = _symbol(p.get("symbol"))
         qty = _float(p.get("qty") or p.get("size") or p.get("volume"))
+        close_after_seconds = manual_close_after_seconds
+        pm = getattr(bot, "position_manager", None)
+        if pm is not None and hasattr(pm, "hard_time_exit_seconds"):
+            try:
+                close_after_seconds = int(pm.hard_time_exit_seconds(
+                    symbol, manual_close_after_seconds
+                ))
+            except Exception:
+                close_after_seconds = manual_close_after_seconds
+        close_at = (
+            opened_at + close_after_seconds
+            if opened_at and close_after_seconds > 0
+            else None
+        )
+        remaining = max(0, close_at - now_s) if close_at else None
         return {
             "position_id": str(p.get("positionId") or p.get("position_id") or ""),
             "positionId": str(p.get("positionId") or p.get("position_id") or ""),
@@ -188,8 +197,8 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
             "unrealizedPNL": _float(p.get("unrealizedPNL") or p.get("unrealizedPnl")),
             "opened_at": opened_at,
             "openedAt": opened_at,
-            "auto_close_after_seconds": manual_close_after_seconds,
-            "autoCloseAfterSeconds": manual_close_after_seconds,
+            "auto_close_after_seconds": close_after_seconds,
+            "autoCloseAfterSeconds": close_after_seconds,
             "auto_close_at": close_at,
             "autoCloseAt": close_at,
             "seconds_remaining": remaining,

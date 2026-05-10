@@ -153,6 +153,9 @@ def fresh_cfg():
     cfg.trading.max_position_age_seconds = 0
     cfg.trading.time_exit_only_if_losing = True
     cfg.risk.partial_tp_enabled = True
+    cfg.risk.tape_exit_enabled = False
+    cfg.risk.tape_exit_threshold = 0.50
+    cfg.risk.tape_exit_min_hold_secs = 30
     cfg.risk.take_profit_r = 2.5
     # Disable fee reserve in fixture so size-sensitive tests assert volumes
     # against the pre-Grok-holistic budget. Specific fee-reserve tests
@@ -329,6 +332,43 @@ def test_take_profit_fill_buffer_front_runs_short_exit():
 
     assert plan is not None
     assert plan.take_profit == 99.8
+
+
+def test_take_profit_fill_buffer_never_creates_fee_negative_target():
+    cfg = fresh_cfg()
+    cfg.trading.symbols = ["BTCUSDT"]
+    cfg.trading.leverage = 100
+    cfg.risk.use_atr = False
+    cfg.risk.stop_loss_pct = 0.25
+    cfg.risk.take_profit_r = 1.0
+    cfg.risk.margin_profit_target_pct = 15.0
+    cfg.risk.take_profit_fill_buffer_pct = 60.0
+    cfg.risk.round_trip_fee_pct = 0.14
+    sig = Signal(
+        direction="short",
+        score=1.0,
+        indicator_score=1,
+        pattern_score=0.0,
+        reasons=["test"],
+        price=100.0,
+        atr=0.0,
+    )
+
+    plan = build_order(
+        sig,
+        free_margin=1000.0,
+        trading=cfg.trading,
+        risk=cfg.risk,
+        min_volume=0.001,
+        volume_step=0.001,
+        digits=4,
+        effective_leverage=100,
+        symbol="BTCUSDT",
+    )
+
+    assert plan is not None
+    # 0.14% estimated round trip cost × 1.15 safety floor = 0.161%.
+    assert plan.take_profit == 99.839
 
 
 def test_uptrend_produces_long_signal_with_paper_order():
@@ -551,6 +591,35 @@ def test_time_based_exit_closes_winner_when_loss_only_disabled():
     bot._resolve_symbol_meta()
     bot._tick()
     bot.client.flash_close_position.assert_called_once_with("WINNER2")
+
+
+def test_activity_compresses_pump_fade_hard_exit_window():
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.trading.max_position_age_seconds = 120
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot.client.pending_tpsl.return_value = []
+
+    class HotTape:
+        def get_activity_multiplier(self, *_args, **_kwargs):
+            return 2.0
+
+    bot.tape_feed = HotTape()
+    pos = {
+        "positionId": "HOT1",
+        "symbol": "BTCUSDT",
+        "qty": "0.01",
+        "side": "SHORT",
+        "avgOpenPrice": "100.0",
+        "ctime": int(time.time() * 1000) - 70_000,
+        "unrealizedPNL": "0.01",
+    }
+
+    assert bot.position_manager.hard_time_exit_seconds("BTCUSDT") == 60
+    bot.position_manager.manage([pos])
+    bot.client.flash_close_position.assert_called_once_with("HOT1")
 
 
 def test_live_mode_with_zero_margin_skips_orders():
@@ -6697,6 +6766,7 @@ def test_tradetape_lifecycle_in_bot():
 def main() -> int:
     tests = [
         test_signing_matches_bitunix_spec_example,
+        test_take_profit_fill_buffer_never_creates_fee_negative_target,
         test_uptrend_produces_long_signal_with_paper_order,
         test_no_hard_gates_only_combined_threshold,
         test_global_max_open_positions_cap,
@@ -6707,6 +6777,7 @@ def main() -> int:
         test_time_based_exit_closes_stale_LOSING_position,
         test_time_based_exit_LETS_WINNER_RUN,
         test_time_based_exit_closes_winner_when_loss_only_disabled,
+        test_activity_compresses_pump_fade_hard_exit_window,
         test_live_mode_with_zero_margin_skips_orders,
         test_paper_mode_with_zero_margin_simulates_anyway,
         test_live_mode_actually_calls_place_order,

@@ -22,10 +22,9 @@ fundamentals — only price action and indicators.
   `tpPrice` / `slPrice` attached — Bitunix enforces both server-side, so your
   SL still fires even if the bot crashes.
 * Stop loss is a tight % of entry price (default 0.25%). Take profit can be
-  capped by `margin_profit_target_pct`; the current pump-fade profile targets
-  roughly 15% gross margin profit before fees, then front-runs the displayed
-  exit slightly with `take_profit_fill_buffer_pct` so quick closes are more
-  fillable before the wick snaps back.
+  capped by `margin_profit_target_pct`; the TP engine now refuses to place
+  fee-negative targets even when `take_profit_fill_buffer_pct` pulls the exit
+  closer so it can fill before the wick snaps back.
 * **Multi-symbol, multi-position**: trades a list of symbols simultaneously
   with a global position cap, per-symbol cap, and per-symbol cooldown.
 * **Paper realism**: paper orders now attach a live-friction audit to the
@@ -33,8 +32,9 @@ fundamentals — only price action and indicators.
   partial-fill risk, estimated impact, round-trip fee drag, net TP/SL return on
   margin, and rough liquidation-buffer pressure. This keeps paper results from
   looking clean when the live book is too thin to actually fill that cleanly.
-* **Position exit**: timed auto-close is disabled by default. Positions stay
-  open until TP/SL, manual close, or a future explicit exit rule handles them.
+* **Position exit**: pump-fade positions are capped at roughly two minutes, and
+  high tape activity compresses that cap toward one minute. Trades that have not
+  moved favorably by ~45 seconds are flash-closed as stale.
 * **Bar-dedupe**: within the same candle, a symbol is only evaluated once —
   no double-firing on the same bar.
 * **Web dashboard** at `/` with live balance, open positions, closed-position
@@ -92,13 +92,15 @@ Logs stream to stdout and `logs/bot.log`.
 | `trading`  | `max_open_positions`      | `2`                         | Global cap across all symbols |
 | `trading`  | `max_positions_per_symbol`| `1`                         | Never pyramid into the same trade |
 | `trading`  | `cooldown_seconds`        | `60`                        | Min seconds between trades on same symbol |
-| `trading`  | `max_position_age_seconds`| `0`                         | Timed auto-close disabled; set >0 to enable |
+| `trading`  | `max_position_age_seconds`| `120`                       | Hard market-close cap; high tape activity can shorten it |
 | `trading`  | `pump_fade_auto_min_confidence` | `96`                  | Ultra-confidence gate before auto market short |
 | `trading`  | `pump_fade_auto_leverage` | `200`                       | BTC/ETH may use 200x; alts are capped lower |
 | `risk`     | `stop_loss_pct`           | `0.25`                      | Tight SL as % of entry price |
 | `risk`     | `take_profit_r`           | `1.0`                       | R fallback before margin-profit cap |
 | `risk`     | `margin_profit_target_pct`| `15.0`                      | Cap TP to roughly this gross margin % |
 | `risk`     | `take_profit_fill_buffer_pct`| `15.0`                   | Pull TP closer so exits fill before exact bottom |
+| `risk`     | `stale_exit_min`          | `0.75`                      | Minutes before a non-working pump fade is flash-closed |
+| `risk`     | `tape_exit_enabled`       | `true`                      | Close early when post-entry tape flips hard against the short |
 | `risk`     | `use_atr`                 | `true`                      | Widen SL in volatility expansion |
 | `strategy` | `min_confluence`          | `4`                         | Need 4 of 7 rules to agree |
 | `strategy` | `adx_min`                 | `22.0`                      | Trend-strength filter floor |
