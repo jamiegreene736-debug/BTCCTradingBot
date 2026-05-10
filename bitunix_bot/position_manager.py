@@ -190,6 +190,7 @@ class PositionManager:
                     progress_trigger = float(getattr(rk, "profit_capture_tp_progress", 0.85) or 0.85)
                     if current_tp > 0 and favor_dist > 0 and progress >= progress_trigger:
                         try:
+                            bot.position_close_reasons[pid] = "profit_capture"
                             bot.client.flash_close_position(pid)
                             log.info(
                                 "PROFIT CAPTURE %s: progress=%.0f%% to TP "
@@ -208,6 +209,7 @@ class PositionManager:
                 max_age_s = self.hard_time_exit_seconds(symbol)
                 if max_age_s > 0 and age_s >= max_age_s:
                     try:
+                        bot.position_close_reasons[pid] = "time_exit"
                         bot.client.flash_close_position(pid)
                         log.info("TIME EXIT %s: age=%.0fs cap=%ss r=%.2f",
                                  symbol, age_s, max_age_s, r_favor)
@@ -238,6 +240,7 @@ class PositionManager:
                     if (age_min_se >= rk.stale_exit_min
                             and max_seen < rk.stale_exit_max_favor_r):
                         try:
+                            bot.position_close_reasons[pid] = "stale_exit"
                             bot.client.flash_close_position(pid)
                             log.info("STALE EXIT %s: age=%.1fm max_favor=%.2fR "
                                      "current=%.2fR", symbol, age_min_se,
@@ -270,6 +273,7 @@ class PositionManager:
                                        or (not is_long and agg >= threshold))
                             if flipped:
                                 try:
+                                    bot.position_close_reasons[pid] = "tape_exit"
                                     bot.client.flash_close_position(pid)
                                     log.info("TAPE EXIT %s %s: flow flipped "
                                              "(agg=%+.2f, r=%.2f, age=%.0fs)",

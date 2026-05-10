@@ -352,8 +352,10 @@ def build_export(state: dict, feeds: dict, journal: dict) -> str:
     w(f"- connects/disconnects/errors: {lc.get('connect_count')}/"
       f"{lc.get('disconnect_count')}/{lc.get('error_count')}")
     for sym, b in (ob.get("books") or {}).items():
+        age = b.get("age_secs")
+        age_text = f"{age:.1f}s" if isinstance(age, (int, float)) else "?"
         w(f"  - {sym}: top_bid={b.get('top_bid')} "
-          f"top_ask={b.get('top_ask')} age={b.get('age_secs', 0):.1f}s")
+          f"top_ask={b.get('top_ask')} age={age_text}")
     w("")
     w("### Tape feed (`trade`)")
     w(f"- connected: {tape.get('connected')}")

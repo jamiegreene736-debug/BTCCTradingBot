@@ -35,6 +35,14 @@ class TradingCfg:
     auto_execute_pump_fade_only: bool = True
     pump_fade_auto_min_confidence: int = 95
     pump_fade_auto_leverage: int = 100
+    # Auto pump-fade market entries must pass live execution-friction checks.
+    # UI confidence alone is not enough: on tiny, high-leverage scalps, spread,
+    # depth, and fees can turn a correct directional call into a net loser.
+    pump_fade_auto_require_order_book: bool = True
+    pump_fade_auto_max_spread_pct: float = 0.10
+    pump_fade_auto_min_depth_ratio: float = 2.0
+    pump_fade_auto_min_net_tp_margin_pct: float = 2.5
+    pump_fade_auto_max_atr_pct: float = 1.50
     # Streak protection — pause a symbol after N consecutive losses there.
     # Catches "wrong about this symbol's regime" without manual intervention.
     streak_loss_limit: int = 3
@@ -410,6 +418,14 @@ def _validate(cfg: Config) -> None:
         errs.append("trading.pump_fade_auto_min_confidence must be 0..100")
     if not (1 <= t.pump_fade_auto_leverage <= 200):
         errs.append("trading.pump_fade_auto_leverage must be 1..200")
+    if t.pump_fade_auto_max_spread_pct < 0:
+        errs.append("trading.pump_fade_auto_max_spread_pct must be >=0")
+    if t.pump_fade_auto_min_depth_ratio < 0:
+        errs.append("trading.pump_fade_auto_min_depth_ratio must be >=0")
+    if t.pump_fade_auto_min_net_tp_margin_pct < 0:
+        errs.append("trading.pump_fade_auto_min_net_tp_margin_pct must be >=0")
+    if t.pump_fade_auto_max_atr_pct < 0:
+        errs.append("trading.pump_fade_auto_max_atr_pct must be >=0")
     if not (0 < r.stop_loss_pct < 5):
         errs.append(f"risk.stop_loss_pct must be 0..5%, got {r.stop_loss_pct}")
     if not (0 < r.take_profit_r < 20):

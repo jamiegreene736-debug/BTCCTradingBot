@@ -55,6 +55,15 @@ trading:
   auto_execute_pump_fade_only: true
   pump_fade_auto_min_confidence: 96
   pump_fade_auto_leverage: 200
+  # Grok/xAI review 2026-05-10: a 98/100 UI signal still must clear live
+  # execution friction. The last-20 fills showed 8 right-direction fee losers,
+  # so auto MARKET shorts now require a fresh order book, tight spread, enough
+  # bid/ask depth for entry and exit, and a positive net TP after fees/impact.
+  pump_fade_auto_require_order_book: true
+  pump_fade_auto_max_spread_pct: 0.10
+  pump_fade_auto_min_depth_ratio: 2.0
+  pump_fade_auto_min_net_tp_margin_pct: 2.5
+  pump_fade_auto_max_atr_pct: 1.50
   # Streak protection: pause a symbol for streak_loss_pause_seconds after
   # N consecutive losses. Live data showed 6 XRP SHORTs in a row losing —
   # bot kept doubling down on a wrong-regime call. This catches it.
@@ -125,7 +134,7 @@ risk:
   # market. This makes live exits behave closer to the widget's "if TP hits"
   # estimates while avoiding missed fills at the absolute bottom.
   profit_capture_enabled: true
-  profit_capture_tp_progress: 0.85
+  profit_capture_tp_progress: 0.80
   profit_capture_min_hold_secs: 3.0
   # ATR-aware SL hybrid. When use_atr=true, SL distance is the MAX of the
   # fixed `stop_loss_pct` floor and `atr_multiplier_sl × ATR%`. In calm

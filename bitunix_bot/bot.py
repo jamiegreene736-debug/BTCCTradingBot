@@ -133,6 +133,10 @@ class BitunixBot:
         # timeout expires without a fill, the limit is cancelled and a market
         # fallback is placed.
         self.pending_limits: dict[str, dict[str, Any]] = {}
+        # Best-effort close reason map. Bitunix closed-position rows do not
+        # reliably say whether our local time/profit/tape/stale rule fired, so
+        # PositionManager stores the reason here before flash-closing.
+        self.position_close_reasons: dict[str, str] = {}
         # Live order-book feed (WebSocket). Started in start() / run_forever().
         self.ob_feed: OrderBookFeed | None = None
         # Live trade-tape feed (WebSocket). Companion to ob_feed — where the
@@ -545,7 +549,10 @@ class BitunixBot:
             hold_sec = (mtime_ms - ctime_ms) / 1000.0 if (ctime_ms and mtime_ms) else 0.0
             entry_px = position_entry_price(p)
             exit_px = position_exit_price(p) or None
-            exit_reason = "win" if net > 0 else ("loss" if net < 0 else "flat")
+            exit_reason = self.position_close_reasons.pop(
+                pid_closed,
+                "win" if net > 0 else ("loss" if net < 0 else "flat"),
+            )
             self.journal.record_exit(
                 symbol=sym,
                 position_id=pid_closed,
@@ -3033,11 +3040,37 @@ class BitunixBot:
 
             meta = self.metas.get(sym_u, _DEFAULT_META)
             max_spread_pct = self._max_entry_spread_pct_for_symbol(sym_u, meta)
+            auto_max_spread_pct = float(
+                getattr(trading, "pump_fade_auto_max_spread_pct", 0.0) or 0.0
+            )
+            if auto_max_spread_pct > 0:
+                max_spread_pct = min(max_spread_pct, auto_max_spread_pct)
+            require_ob = bool(getattr(trading, "pump_fade_auto_require_order_book", True))
+            if require_ob and not (self.ob_feed and self.ob_feed.is_connected()):
+                self.state.record_skip(f"{sym_u}: auto pump-fade needs live order book")
+                continue
             spread_pct = self.ob_feed.get_spread_pct(sym_u) if self.ob_feed else None
+            if require_ob and spread_pct is None:
+                self.state.record_skip(f"{sym_u}: auto pump-fade spread unavailable")
+                continue
             if spread_pct is not None and spread_pct > max_spread_pct:
                 self.state.record_skip(
                     f"{sym_u}: spread {spread_pct:.3f}% > "
                     f"{max_spread_pct:.3f}% threshold"
+                )
+                continue
+
+            horizons = overlay.get("horizons") or {}
+            h15 = horizons.get("h_15m") or {}
+            h30 = horizons.get("h_30m") or {}
+            atr_pct = self._first_float(h15.get("atr_pct"), h30.get("atr_pct"))
+            max_auto_atr_pct = float(
+                getattr(trading, "pump_fade_auto_max_atr_pct", 0.0) or 0.0
+            )
+            if max_auto_atr_pct > 0 and atr_pct > max_auto_atr_pct:
+                self.state.record_skip(
+                    f"{sym_u}: ATR {atr_pct:.2f}% > {max_auto_atr_pct:.2f}% "
+                    "auto pump-fade ceiling"
                 )
                 continue
 
@@ -3077,6 +3110,47 @@ class BitunixBot:
                 )
                 continue
 
+            realism = self.order_executor.execution_realism_report(
+                sym_u, plan, force_market=True
+            )
+            min_depth_ratio = float(
+                getattr(trading, "pump_fade_auto_min_depth_ratio", 0.0) or 0.0
+            )
+            entry_depth_ratio = realism.get("entry_depth_ratio")
+            exit_depth_ratio = realism.get("exit_depth_ratio")
+            if min_depth_ratio > 0:
+                depth_values = [
+                    float(v) for v in (entry_depth_ratio, exit_depth_ratio)
+                    if isinstance(v, (int, float))
+                ]
+                if require_ob and len(depth_values) < 2:
+                    self.state.record_skip(
+                        f"{sym_u}: auto pump-fade depth unavailable"
+                    )
+                    continue
+                if depth_values and min(depth_values) < min_depth_ratio:
+                    self.state.record_skip(
+                        f"{sym_u}: depth cushion {min(depth_values):.2f}x < "
+                        f"{min_depth_ratio:.2f}x auto threshold"
+                    )
+                    continue
+            min_net_tp_margin = float(
+                getattr(trading, "pump_fade_auto_min_net_tp_margin_pct", 0.0) or 0.0
+            )
+            net_tp_margin = realism.get("estimated_net_tp_margin_pct")
+            if isinstance(net_tp_margin, (int, float)) and net_tp_margin < min_net_tp_margin:
+                self.state.record_skip(
+                    f"{sym_u}: market netTP {net_tp_margin:+.1f}%m < "
+                    f"{min_net_tp_margin:.1f}%m after fees/impact"
+                )
+                continue
+            if realism.get("status") == "fail":
+                self.state.record_skip(
+                    f"{sym_u}: execution realism failed — "
+                    f"{realism.get('summary', 'spread/depth/fee issue')}"
+                )
+                continue
+
             if self.cfg.is_live:
                 try:
                     self.client.set_leverage(sym_u, eff_lev)
@@ -3091,10 +3165,59 @@ class BitunixBot:
 
             self.state.record_signal(
                 f"{sym_u} AUTO PUMP-FADE SHORT conf={conf}/100 "
-                f"lev={eff_lev}x market @ {plan.price}"
+                f"lev={eff_lev}x market @ {plan.price} "
+                f"netTP={realism.get('estimated_net_tp_margin_pct')}%m"
             )
             if not self._execute(sym_u, plan, force_market=True):
                 continue
+
+            minute_bucket = int(time.time()) // 60
+            fade_eta = decision.get("fade_eta") or decision.get("fadeEta") or {}
+            if not isinstance(fade_eta, dict):
+                fade_eta = {}
+            self.journal.record_entry(
+                symbol=sym_u,
+                side=plan.side,
+                client_id=f"bot-{sym_u}-{minute_bucket}-{plan.side}",
+                order_type="MARKET",
+                score=conf / 100.0,
+                threshold_used=min_conf / 100.0,
+                conviction_mult=max(0.7, min(1.5, conf / max(min_conf, 1))),
+                indicator_count=len((decision.get("primary_signal") or {}).get("reasons") or []),
+                pattern_score=0.0,
+                reasons=list((decision.get("primary_signal") or {}).get("reasons") or []),
+                atr_pct=atr_pct if atr_pct > 0 else None,
+                adx=self._first_float((horizons.get("h_1h") or {}).get("adx")) or None,
+                spread_pct=realism.get("spread_pct"),
+                bid_depth=realism.get("bid_depth_top5"),
+                ask_depth=realism.get("ask_depth_top5"),
+                aggression_10s=self._first_float(h15.get("aggression_10s")) or None,
+                real_cvd=self._first_float(h15.get("real_cvd")) or None,
+                activity_mult=(
+                    self.tape_feed.get_activity_multiplier(sym_u)
+                    if self.tape_feed is not None else None
+                ),
+                session_weight=None,
+                adaptive_adj=None,
+                recent_trade_r_sum=(sum(self.recent_trade_r)
+                                    if len(self.recent_trade_r) > 0 else None),
+                entry_mechanism="MARKET",
+                limit_price=None,
+                tob_bid=realism.get("bid"),
+                tob_ask=realism.get("ask"),
+                dynamic_timeout_secs=None,
+                pump_fade_confidence=conf,
+                pump_fade_stage=str(decision.get("setup_stage") or decision.get("setupStage") or "ready"),
+                fade_eta_status=str(fade_eta.get("status") or ""),
+                execution_realism_status=str(realism.get("status") or ""),
+                estimated_net_tp_margin_pct=realism.get("estimated_net_tp_margin_pct"),
+                estimated_net_sl_margin_pct=realism.get("estimated_net_sl_margin_pct"),
+                entry_price=plan.price,
+                stop_loss=plan.stop_loss,
+                take_profit=plan.take_profit,
+                notional=plan.volume * plan.price,
+                leverage=plan.leverage,
+            )
 
             self.last_action_at[sym_u] = now
             per_sym_count[sym_u] = per_sym_count.get(sym_u, 0) + 1

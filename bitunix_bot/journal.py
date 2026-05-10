@@ -179,6 +179,12 @@ class TradeJournal:
         tob_bid: float | None = None,
         tob_ask: float | None = None,
         dynamic_timeout_secs: int | None = None,
+        pump_fade_confidence: int | None = None,
+        pump_fade_stage: str | None = None,
+        fade_eta_status: str | None = None,
+        execution_realism_status: str | None = None,
+        estimated_net_tp_margin_pct: float | None = None,
+        estimated_net_sl_margin_pct: float | None = None,
     ) -> None:
         """Log all available signal + execution context at entry time.
 
@@ -227,6 +233,14 @@ class TradeJournal:
             "tob_bid": tob_bid,
             "tob_ask": tob_ask,
             "dynamic_timeout_secs": dynamic_timeout_secs,
+            # Pump-fade auto-trade audit fields. These let us separate
+            # "the setup was right" from "live execution friction killed it".
+            "pump_fade_confidence": pump_fade_confidence,
+            "pump_fade_stage": pump_fade_stage,
+            "fade_eta_status": fade_eta_status,
+            "execution_realism_status": execution_realism_status,
+            "estimated_net_tp_margin_pct": estimated_net_tp_margin_pct,
+            "estimated_net_sl_margin_pct": estimated_net_sl_margin_pct,
             "entry_price": entry_price,
             "stop_loss": stop_loss,
             "take_profit": take_profit,

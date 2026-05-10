@@ -4630,8 +4630,19 @@ def test_auto_pump_fade_places_market_sell_at_100x():
     cfg.trading.time_exit_only_if_losing = False
     bot = BitunixBot(cfg)
     bot.client = make_mock_client()
+    import tempfile
+    from bitunix_bot.journal import TradeJournal
+    tmpdir = tempfile.TemporaryDirectory()
+    bot.journal = TradeJournal(Path(tmpdir.name) / "trades.jsonl")
     bot._resolve_symbol_meta()
     bot._check_liquidation_cascade = lambda: False
+    bot.ob_feed = _FakeOBFeed(
+        bid=100.0,
+        ask=100.01,
+        spread_pct=0.01,
+        bid_depth=10_000.0,
+        ask_depth=10_000.0,
+    )
 
     def seed_overlay():
         decision = {
@@ -4669,6 +4680,86 @@ def test_auto_pump_fade_places_market_sell_at_100x():
     assert "BTCUSDT" not in bot.pending_limits
     orders = [e for e in bot.state.snapshot()["events"] if e["kind"] == "order"]
     assert any("lev=100x" in e["text"] for e in orders)
+    import json
+    journal_events = [json.loads(line) for line in bot.journal.path.read_text().splitlines()]
+    assert journal_events[-1]["pump_fade_confidence"] == 95
+    assert journal_events[-1]["execution_realism_status"] in ("ok", "warn")
+
+
+def test_auto_pump_fade_requires_live_order_book_for_market_short():
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.trading.symbols = ["BTCUSDT"]
+    cfg.trading.auto_execute_pump_fade_shorts = True
+    cfg.trading.pump_fade_auto_min_confidence = 95
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot._resolve_symbol_meta()
+    bot._check_liquidation_cascade = lambda: False
+
+    decision = {
+        "action": "short",
+        "confidence_score": 98,
+        "confidenceScore": 98,
+        "setup": "parabolic_pump_fade",
+        "primary_signal": {"reasons": ["parabolic pump", "CVD flipped"]},
+    }
+    bot._compute_overlays = lambda: bot.state.record_overlay("BTCUSDT", {
+        "symbol": "BTCUSDT",
+        "price": 100.0,
+        "horizons": {"h_15m": {"price": 100.0, "atr": 0.25}},
+        "decision": decision,
+        "next_1h": decision,
+    })
+
+    bot._tick()
+
+    bot.client.place_order.assert_not_called()
+    skips = [e["text"] for e in bot.state.snapshot()["events"] if e["kind"] == "skip"]
+    assert any("needs live order book" in text for text in skips)
+
+
+def test_auto_pump_fade_skips_thin_book_even_with_high_confidence():
+    reset_state()
+    cfg = fresh_cfg()
+    cfg.mode = "live"
+    cfg.trading.symbols = ["BTCUSDT"]
+    cfg.trading.auto_execute_pump_fade_shorts = True
+    cfg.trading.pump_fade_auto_min_confidence = 95
+    cfg.trading.pump_fade_auto_min_depth_ratio = 2.0
+    bot = BitunixBot(cfg)
+    bot.client = make_mock_client()
+    bot._resolve_symbol_meta()
+    bot._check_liquidation_cascade = lambda: False
+    bot.ob_feed = _FakeOBFeed(
+        bid=100.0,
+        ask=100.01,
+        spread_pct=0.01,
+        bid_depth=0.01,
+        ask_depth=0.01,
+    )
+
+    decision = {
+        "action": "short",
+        "confidence_score": 98,
+        "confidenceScore": 98,
+        "setup": "parabolic_pump_fade",
+        "primary_signal": {"reasons": ["parabolic pump", "CVD flipped"]},
+    }
+    bot._compute_overlays = lambda: bot.state.record_overlay("BTCUSDT", {
+        "symbol": "BTCUSDT",
+        "price": 100.0,
+        "horizons": {"h_15m": {"price": 100.0, "atr": 0.25}},
+        "decision": decision,
+        "next_1h": decision,
+    })
+
+    bot._tick()
+
+    bot.client.place_order.assert_not_called()
+    skips = [e["text"] for e in bot.state.snapshot()["events"] if e["kind"] == "skip"]
+    assert any("depth cushion" in text for text in skips)
 
 
 def test_auto_pump_fade_only_skips_legacy_strategy_without_strong_match():

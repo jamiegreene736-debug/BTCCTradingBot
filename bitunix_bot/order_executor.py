@@ -91,6 +91,21 @@ class OrderExecutor:
 
         return self._place_market(symbol, plan, order_text)
 
+    def execution_realism_report(
+        self,
+        symbol: str,
+        plan: OrderPlan,
+        *,
+        force_market: bool = False,
+    ) -> dict[str, Any]:
+        """Estimate entry/exit friction before a live order is allowed.
+
+        The same model is used for paper-mode audit logs and live auto-trade
+        gating so the bot does not treat spread/depth/fees as after-the-fact
+        explanations.
+        """
+        return self._paper_realism_report(symbol, plan, force_market=force_market)
+
     # ------------------------------------------------------------------
     # Paper realism
     # ------------------------------------------------------------------
