@@ -4730,6 +4730,15 @@ def test_suggested_trade_plan_prefers_maker_limit_with_exit_target():
     assert plan["max_exit_price"] == plan["take_profit"]
     assert plan["valid_for_seconds"] == cfg.trading.post_only_timeout_secs
     assert plan["horizon"] == "Next 1h"
+    sim = plan["max_leverage_simulation"]
+    assert sim["mode"] == "max_leverage_limit_entry"
+    assert sim["entry_order_type"] == "LIMIT_POST_ONLY"
+    assert sim["max_leverage"] == 200
+    assert sim["entry_price"] == plan["entry_price"]
+    assert sim["take_profit"] > sim["entry_price"] > sim["recommended_stop_loss"]
+    assert sim["estimated_fee_margin_pct"] == round(cfg.risk.round_trip_fee_pct * 200, 3)
+    assert "estimated_net_profit_margin_pct" in sim
+    assert "estimated_net_loss_margin_pct" in sim
 
 
 def test_suggested_trade_plan_waits_without_action():
@@ -4785,6 +4794,8 @@ def test_suggested_trade_plan_previews_entry_for_pump_watch():
     assert plan["entry_price"] < 60_002.0
     assert plan["take_profit"] < plan["entry_price"] < plan["stop_loss"]
     assert "preview only" in plan["rationale"]
+    assert plan["max_leverage_simulation"]["entry_order_type"] == "LIMIT_TRIGGER"
+    assert plan["max_leverage_simulation"]["entry_price"] == plan["entry_price"]
 
 
 def test_signal_records_factor_breakdown():

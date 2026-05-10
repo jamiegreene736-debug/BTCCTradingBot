@@ -68,9 +68,29 @@
   }
 
   function fmtPct(value) {
+    if (value === null || value === undefined || value === "") return "--";
     const n = Number(value);
     if (!Number.isFinite(n)) return "--";
     return `${n.toFixed(2)}%`;
+  }
+
+  function fmtSignedPct(value) {
+    if (value === null || value === undefined || value === "") return "--";
+    const n = Number(value);
+    if (!Number.isFinite(n)) return "--";
+    const sign = n > 0 ? "+" : "";
+    return `${sign}${n.toFixed(1)}%`;
+  }
+
+  function numberOrNull(value) {
+    const n = Number(value);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function pnlClass(value) {
+    const n = numberOrNull(value);
+    if (n === null) return "";
+    return n >= 0 ? "good" : "bad";
   }
 
   function fmtAge(secs) {
@@ -145,6 +165,19 @@
   function decisionFor(symData) {
     return symData?.decision || symData?.recommendation || symData?.next_1h ||
       symData?.next1h || symData?.next_15m || symData?.next15m || {};
+  }
+
+  function tradePlanFor(decision, symData) {
+    return decision?.trade_plan || decision?.tradePlan || symData?.trade_plan || symData?.tradePlan || null;
+  }
+
+  function simulationFromPlan(plan) {
+    return plan?.max_leverage_simulation || plan?.maxLeverageSimulation ||
+      plan?.estimated_pnl || plan?.estimatedPnl || plan?.simulation || null;
+  }
+
+  function maxLeverageSimulation(decision, symData) {
+    return simulationFromPlan(tradePlanFor(decision, symData));
   }
 
   function stageFor(decision) {
@@ -243,6 +276,8 @@
 
       const symData = latest.symbols?.[c.symbol] || {};
       const eta = c.decision?.fade_eta || c.decision?.fadeEta || {};
+      const plan = tradePlanFor(c.decision, symData);
+      const sim = simulationFromPlan(plan);
       alertHistory.unshift({
         ts: now,
         symbol: c.symbol,
@@ -251,6 +286,13 @@
         scoreText: candidateScoreText(c),
         price: symData.price,
         eta: eta.label || "",
+        simEntryPrice: pick(sim, "entry_price", "entryPrice", "limit_price", "limitPrice") || pick(plan, "entry_price", "entryPrice"),
+        simTakeProfit: pick(sim, "take_profit", "takeProfit", "target_exit_price", "targetExitPrice") || pick(plan, "take_profit", "takeProfit", "target_exit_price", "targetExitPrice"),
+        simStopLoss: pick(sim, "recommended_stop_loss", "recommendedStopLoss", "stop_loss", "stopLoss") || pick(plan, "stop_loss", "stopLoss"),
+        simLeverage: pick(sim, "max_leverage", "maxLeverage", "leverage") || pick(symData, "max_leverage", "maxLeverage"),
+        estimatedPnlPct: pick(sim, "estimated_net_profit_margin_pct", "estimatedNetProfitMarginPct", "estimated_pnl_pct", "estimatedPnlPct"),
+        estimatedLossPct: pick(sim, "estimated_net_loss_margin_pct", "estimatedNetLossMarginPct", "estimated_loss_pct", "estimatedLossPct"),
+        feeMarginPct: pick(sim, "estimated_fee_margin_pct", "estimatedFeeMarginPct"),
       });
       changed = true;
     }
@@ -386,7 +428,7 @@
   }
 
   function tradePlanHtml(decision, symData) {
-    const plan = decision?.trade_plan || decision?.tradePlan || symData?.trade_plan || symData?.tradePlan;
+    const plan = tradePlanFor(decision, symData);
     if (!plan || !["ready", "preview"].includes(String(plan.status || ""))) return "";
     const preview = plan.status === "preview" || plan.preview === true;
     const orderType = String(pick(plan, "order_type", "orderType") || "MARKET").replace(/_/g, " ");
@@ -400,6 +442,28 @@
     const stopLabel = preview ? "Preview stop loss" : "Stop loss";
     const rewardLabel = preview ? "Target profit" : "Target profit";
     const riskLabel = preview ? "Max loss" : "Max loss";
+    const sim = maxLeverageSimulation(decision, symData);
+    const simNet = numberOrNull(pick(sim, "estimated_net_profit_margin_pct", "estimatedNetProfitMarginPct", "estimated_pnl_pct", "estimatedPnlPct"));
+    const simLoss = numberOrNull(pick(sim, "estimated_net_loss_margin_pct", "estimatedNetLossMarginPct", "estimated_loss_pct", "estimatedLossPct"));
+    const simFee = numberOrNull(pick(sim, "estimated_fee_margin_pct", "estimatedFeeMarginPct"));
+    const simLev = pick(sim, "max_leverage", "maxLeverage", "leverage");
+    const simEntry = Number(pick(sim, "entry_price", "entryPrice", "limit_price", "limitPrice"));
+    const simTarget = Number(pick(sim, "take_profit", "takeProfit", "target_exit_price", "targetExitPrice"));
+    const simStop = Number(pick(sim, "recommended_stop_loss", "recommendedStopLoss", "stop_loss", "stopLoss"));
+    const simHtml = sim ? `<div class="bxm-sim">
+        <div class="bxm-sim-head">
+          <span>Max leverage limit-order simulation</span>
+          <strong>${escapeHtml(simLev || "--")}x</strong>
+        </div>
+        <div class="bxm-sim-grid">
+          <div><span>Est P&L at TP</span><strong class="${pnlClass(simNet)}">${fmtSignedPct(simNet)}</strong></div>
+          <div><span>If stop hits</span><strong class="bad">${fmtSignedPct(simLoss)}</strong></div>
+          <div><span>Limit entry</span><strong>${fmtPrice(simEntry)}</strong></div>
+          <div><span>Take profit</span><strong class="good">${fmtPrice(simTarget)}</strong></div>
+          <div><span>Recommended stop</span><strong class="bad">${fmtPrice(simStop)}</strong></div>
+          <div><span>Fee drag</span><strong>${fmtPct(simFee)}</strong></div>
+        </div>
+      </div>` : "";
     return `<div class="bxm-plan ${preview ? "preview" : ""}">
       <div class="bxm-plan-head">
         <span>${entryLabel}</span>
@@ -413,6 +477,7 @@
         <div><span>${riskLabel}</span><strong>${fmtPct(riskPct)}</strong></div>
       </div>
       ${plan.rationale ? `<div class="bxm-note">${escapeHtml(plan.rationale)}</div>` : ""}
+      ${simHtml}
     </div>`;
   }
 
@@ -476,7 +541,7 @@
     return `<div class="bxm-alert-history">
       <div class="bxm-alert-history-head">
         <div class="bxm-section-title">Recent pump warnings</div>
-        <span>last 5</span>
+        <span>Est P&L</span>
       </div>
       ${alertHistory.length ? alertHistory.map((row) => `
         <div class="bxm-alert-event stage-${escapeHtml(row.stage || "")}">
@@ -484,6 +549,14 @@
           <div>
             <strong>${escapeHtml((row.symbol || "").replace("USDT", ""))} ${escapeHtml(row.label || alertStageLabel(row.stage))}</strong>
             <span>${escapeHtml(row.scoreText || "")}${row.eta ? ` - ETA ${escapeHtml(row.eta)}` : ""}${row.price ? ` - @ ${fmtPrice(row.price)}` : ""}</span>
+            ${(row.simEntryPrice || row.simTakeProfit || row.simStopLoss) ? `<small>
+              Limit ${fmtPrice(row.simEntryPrice)} - TP ${fmtPrice(row.simTakeProfit)} - Stop ${fmtPrice(row.simStopLoss)}
+            </small>` : ""}
+          </div>
+          <div class="bxm-alert-pnl">
+            <em>${row.simLeverage ? `${escapeHtml(row.simLeverage)}x` : "max lev"}</em>
+            <strong class="${pnlClass(row.estimatedPnlPct)}">${fmtSignedPct(row.estimatedPnlPct)}</strong>
+            ${row.estimatedLossPct !== undefined && row.estimatedLossPct !== null ? `<span>SL ${fmtSignedPct(row.estimatedLossPct)}</span>` : ""}
           </div>
         </div>
       `).join("") : `<div class="bxm-alert-empty">No pump warnings logged yet.</div>`}

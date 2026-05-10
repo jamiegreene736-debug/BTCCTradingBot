@@ -2140,6 +2140,136 @@ class BitunixBot:
             return min(0.20, max(base, base * 1.25))
         return base
 
+    def _max_allowed_leverage_for_symbol(self, meta: SymbolMeta) -> int:
+        """Exchange max leverage used for display-only what-if simulations."""
+        return max(1, int(meta.max_leverage or 100))
+
+    def _build_max_leverage_limit_simulation(
+        self,
+        *,
+        symbol: str,
+        action: str,
+        meta: SymbolMeta,
+        maker_limit: float | None,
+        fallback_plan: OrderPlan,
+        plan_horizon: dict[str, Any],
+        reasons: list[str],
+        confidence_score: int,
+        atr: float,
+        preview_only: bool,
+    ) -> dict[str, Any] | None:
+        """Simulate a max-leverage limit entry through the suggested TP/SL.
+
+        The overlay uses this as an audit trail: "If I had entered with a
+        limit order at the max exchange leverage, then exited at the suggested
+        TP or stop, what would the return on margin have been after fees?"
+        """
+        max_lev = self._max_allowed_leverage_for_symbol(meta)
+        if preview_only:
+            sim_entry = float(fallback_plan.price)
+        elif maker_limit is not None:
+            sim_entry = float(maker_limit)
+        else:
+            sim_entry = float(fallback_plan.price)
+        if sim_entry <= 0:
+            return None
+
+        signal = Signal(
+            direction=action,  # type: ignore[arg-type]
+            score=max(0.01, min(1.0, confidence_score / 100.0)),
+            indicator_score=len(reasons),
+            pattern_score=0.0,
+            reasons=reasons,
+            price=sim_entry,
+            atr=atr,
+            fire_threshold_used=self.cfg.strategy.fire_threshold,
+            last_bar_high=self._first_float(plan_horizon.get("last_bar_high")),
+            last_bar_low=self._first_float(plan_horizon.get("last_bar_low")),
+        )
+        sim_plan = build_order(
+            signal,
+            free_margin=100_000.0,
+            trading=self.cfg.trading,
+            risk=self.cfg.risk,
+            min_volume=meta.min_qty,
+            volume_step=meta.base_precision,
+            digits=meta.price_precision,
+            effective_leverage=max_lev,
+            symbol=symbol,
+        )
+        if sim_plan is None or sim_plan.price <= 0:
+            return None
+
+        entry = float(sim_plan.price)
+        take_profit = float(sim_plan.take_profit)
+        stop_loss = float(sim_plan.stop_loss)
+        reward_price_pct = abs(take_profit - entry) / entry * 100.0
+        risk_price_pct = abs(stop_loss - entry) / entry * 100.0
+        fee_pct_notional = max(0.0, float(getattr(self.cfg.risk, "round_trip_fee_pct", 0.0) or 0.0))
+        fee_margin_pct = fee_pct_notional * max_lev
+        gross_profit_margin_pct = reward_price_pct * max_lev
+        gross_loss_margin_pct = risk_price_pct * max_lev
+        net_profit_margin_pct = gross_profit_margin_pct - fee_margin_pct
+        net_loss_margin_pct = -(gross_loss_margin_pct + fee_margin_pct)
+
+        out = {
+            "mode": "max_leverage_limit_entry",
+            "label": "Max leverage limit-entry simulation",
+            "symbol": symbol,
+            "side": "SELL" if action == "short" else "BUY",
+            "direction": action,
+            "entry_order_type": (
+                "LIMIT_TRIGGER" if preview_only
+                else "LIMIT_POST_ONLY" if maker_limit is not None
+                else "LIMIT_REFERENCE"
+            ),
+            "entryOrderType": (
+                "LIMIT_TRIGGER" if preview_only
+                else "LIMIT_POST_ONLY" if maker_limit is not None
+                else "LIMIT_REFERENCE"
+            ),
+            "entry_price": entry,
+            "entryPrice": entry,
+            "limit_price": entry,
+            "limitPrice": entry,
+            "take_profit": take_profit,
+            "takeProfit": take_profit,
+            "target_exit_price": take_profit,
+            "targetExitPrice": take_profit,
+            "recommended_stop_loss": stop_loss,
+            "recommendedStopLoss": stop_loss,
+            "stop_loss": stop_loss,
+            "stopLoss": stop_loss,
+            "leverage": max_lev,
+            "max_leverage": max_lev,
+            "maxLeverage": max_lev,
+            "fee_pct_notional": round(fee_pct_notional, 4),
+            "feePctNotional": round(fee_pct_notional, 4),
+            "estimated_fee_margin_pct": round(fee_margin_pct, 3),
+            "estimatedFeeMarginPct": round(fee_margin_pct, 3),
+            "gross_profit_margin_pct": round(gross_profit_margin_pct, 3),
+            "grossProfitMarginPct": round(gross_profit_margin_pct, 3),
+            "estimated_net_profit_margin_pct": round(net_profit_margin_pct, 3),
+            "estimatedNetProfitMarginPct": round(net_profit_margin_pct, 3),
+            "gross_loss_margin_pct": round(gross_loss_margin_pct, 3),
+            "grossLossMarginPct": round(gross_loss_margin_pct, 3),
+            "estimated_net_loss_margin_pct": round(net_loss_margin_pct, 3),
+            "estimatedNetLossMarginPct": round(net_loss_margin_pct, 3),
+            "reward_price_pct": round(reward_price_pct, 4),
+            "rewardPricePct": round(reward_price_pct, 4),
+            "risk_price_pct": round(risk_price_pct, 4),
+            "riskPricePct": round(risk_price_pct, 4),
+            "assumptions": (
+                "max exchange leverage, limit/post-only entry, suggested TP, "
+                f"recommended stop, {fee_pct_notional:.3f}% round-trip fee model"
+            ),
+        }
+        out["estimated_pnl_pct"] = out["estimated_net_profit_margin_pct"]
+        out["estimatedPnlPct"] = out["estimated_net_profit_margin_pct"]
+        out["estimated_loss_pct"] = out["estimated_net_loss_margin_pct"]
+        out["estimatedLossPct"] = out["estimated_net_loss_margin_pct"]
+        return out
+
     def _build_suggested_trade_plan(
         self,
         symbol: str,
@@ -2307,10 +2437,22 @@ class BitunixBot:
                 "reason": "risk geometry rejected the setup",
             }
 
+        max_leverage_sim = self._build_max_leverage_limit_simulation(
+            symbol=sym_u,
+            action=action,
+            meta=meta,
+            maker_limit=maker_limit,
+            fallback_plan=order_plan,
+            plan_horizon=plan_horizon,
+            reasons=reasons,
+            confidence_score=confidence_score,
+            atr=atr,
+            preview_only=preview_only,
+        )
         risk_pct = abs(order_plan.price - order_plan.stop_loss) / order_plan.price * 100.0
         reward_pct = abs(order_plan.take_profit - order_plan.price) / order_plan.price * 100.0
         timeout_secs = self.cfg.trading.post_only_timeout_secs
-        return {
+        out = {
             "status": "preview" if preview_only else "ready",
             "ready": not preview_only,
             "preview": preview_only,
@@ -2347,6 +2489,14 @@ class BitunixBot:
             "ask": round(ask, meta.price_precision) if ask else None,
             "rationale": rationale,
         }
+        if max_leverage_sim:
+            out["max_leverage_simulation"] = max_leverage_sim
+            out["maxLeverageSimulation"] = max_leverage_sim
+            out["estimated_pnl"] = max_leverage_sim
+            out["estimatedPnl"] = max_leverage_sim
+            out["recommended_stop_loss"] = max_leverage_sim["recommended_stop_loss"]
+            out["recommendedStopLoss"] = max_leverage_sim["recommended_stop_loss"]
+        return out
 
     def _get_klines_cached(self, symbol: str, timeframe: str,
                            ttl_seconds: int, limit: int = 200) -> list | None:
@@ -2707,9 +2857,16 @@ class BitunixBot:
                 "tradePlan": trade_plan,
             }
             sub_hour = self._build_sub_hour_payload(horizons, next_hour)
+            max_leverage = self._max_allowed_leverage_for_symbol(meta)
             self.state.record_overlay(sym_u, {
                 "symbol": sym_u,
                 "price": latest_price,
+                "max_leverage": max_leverage,
+                "maxLeverage": max_leverage,
+                "price_precision": meta.price_precision,
+                "pricePrecision": meta.price_precision,
+                "base_precision": meta.base_precision,
+                "basePrecision": meta.base_precision,
                 "horizons": horizons,
                 "horizon_order": [k for k, _, _, _ in self._OVERLAY_HORIZONS if k in horizons],
                 "alignment": alignment,
