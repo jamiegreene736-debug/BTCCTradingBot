@@ -456,7 +456,7 @@
           <strong>${escapeHtml(simLev || "--")}x</strong>
         </div>
         <div class="bxm-sim-grid">
-          <div><span>Est P&L at TP</span><strong class="${pnlClass(simNet)}">${fmtSignedPct(simNet)}</strong></div>
+          <div><span>If TP hits (est.)</span><strong class="${pnlClass(simNet)}">${fmtSignedPct(simNet)}</strong></div>
           <div><span>If stop hits</span><strong class="bad">${fmtSignedPct(simLoss)}</strong></div>
           <div><span>Limit entry</span><strong>${fmtPrice(simEntry)}</strong></div>
           <div><span>Take profit</span><strong class="good">${fmtPrice(simTarget)}</strong></div>
@@ -540,9 +540,10 @@
   function alertHistoryHtml() {
     return `<div class="bxm-alert-history">
       <div class="bxm-alert-history-head">
-        <div class="bxm-section-title">Recent pump warnings</div>
-        <span>Est P&L</span>
+        <div class="bxm-section-title">Signal history - not closed trades</div>
+        <span>If TP hits</span>
       </div>
+      <p class="bxm-alert-disclaimer">Watchlist estimates only. Actual closed-trade P&L is in the Closed trades section.</p>
       ${alertHistory.length ? alertHistory.map((row) => `
         <div class="bxm-alert-event stage-${escapeHtml(row.stage || "")}">
           <time>${escapeHtml(fmtClock(row.ts))}</time>
@@ -550,13 +551,13 @@
             <strong>${escapeHtml((row.symbol || "").replace("USDT", ""))} ${escapeHtml(row.label || alertStageLabel(row.stage))}</strong>
             <span>${escapeHtml(row.scoreText || "")}${row.eta ? ` - ETA ${escapeHtml(row.eta)}` : ""}${row.price ? ` - @ ${fmtPrice(row.price)}` : ""}</span>
             ${(row.simEntryPrice || row.simTakeProfit || row.simStopLoss) ? `<small>
-              Limit ${fmtPrice(row.simEntryPrice)} - TP ${fmtPrice(row.simTakeProfit)} - Stop ${fmtPrice(row.simStopLoss)}
+              Sim limit ${fmtPrice(row.simEntryPrice)} - TP ${fmtPrice(row.simTakeProfit)} - Stop ${fmtPrice(row.simStopLoss)}
             </small>` : ""}
           </div>
           <div class="bxm-alert-pnl">
             <em>${row.simLeverage ? `${escapeHtml(row.simLeverage)}x` : "max lev"}</em>
-            <strong class="${pnlClass(row.estimatedPnlPct)}">${fmtSignedPct(row.estimatedPnlPct)}</strong>
-            ${row.estimatedLossPct !== undefined && row.estimatedLossPct !== null ? `<span>SL ${fmtSignedPct(row.estimatedLossPct)}</span>` : ""}
+            <strong class="${pnlClass(row.estimatedPnlPct)}">TP ${fmtSignedPct(row.estimatedPnlPct)}</strong>
+            ${row.estimatedLossPct !== undefined && row.estimatedLossPct !== null ? `<span>Stop risk ${fmtSignedPct(row.estimatedLossPct)}</span>` : ""}
           </div>
         </div>
       `).join("") : `<div class="bxm-alert-empty">No pump warnings logged yet.</div>`}

@@ -503,6 +503,12 @@
   display: block;
   font-size: 11px;
 }
+#bxm-overlay .bxm-alert-disclaimer {
+  color: #687385;
+  font-size: 11px;
+  line-height: 1.3;
+  margin: -4px 0 8px;
+}
 #bxm-overlay .bxm-alert-event small {
   margin-top: 2px;
 }
