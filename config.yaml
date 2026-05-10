@@ -120,6 +120,13 @@ risk:
   # exact wick bottom snaps back. 15% means use 85% of the target distance
   # unless the fee floor would make the trade too small.
   take_profit_fill_buffer_pct: 15.0
+  # Active TP capture: do not wait for the exact wick bottom/native trigger.
+  # If an open trade reaches 85% of the distance to the current TP, flatten at
+  # market. This makes live exits behave closer to the widget's "if TP hits"
+  # estimates while avoiding missed fills at the absolute bottom.
+  profit_capture_enabled: true
+  profit_capture_tp_progress: 0.85
+  profit_capture_min_hold_secs: 3.0
   # ATR-aware SL hybrid. When use_atr=true, SL distance is the MAX of the
   # fixed `stop_loss_pct` floor and `atr_multiplier_sl × ATR%`. In calm
   # markets the floor binds (tight SL); in vol expansion ATR binds and

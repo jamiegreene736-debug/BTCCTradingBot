@@ -153,6 +153,12 @@ class RiskCfg:
     # wick bottom snaps back. 15 means use 85% of the target distance, subject
     # to the fee floor.
     take_profit_fill_buffer_pct: float = 0.0
+    # Active profit capture. Native TP/SL triggers can miss fast wick bottoms;
+    # close the full position at market once live price has traveled this
+    # fraction of the distance from entry to the current TP trigger.
+    profit_capture_enabled: bool = False
+    profit_capture_tp_progress: float = 0.85
+    profit_capture_min_hold_secs: float = 3.0
     # Stale-trade early exit. If a position has been alive for stale_exit_min
     # minutes AND has never reached more than stale_exit_max_favor_r favorable,
     # flash-close it. Pro-desk rule: a 1m scalp signal that hasn't moved in 6
@@ -412,6 +418,10 @@ def _validate(cfg: Config) -> None:
         errs.append("risk.margin_profit_target_pct must be >=0")
     if not (0 <= r.take_profit_fill_buffer_pct <= 80):
         errs.append("risk.take_profit_fill_buffer_pct must be 0..80")
+    if not (0 < r.profit_capture_tp_progress <= 1.0):
+        errs.append("risk.profit_capture_tp_progress must be 0..1")
+    if r.profit_capture_min_hold_secs < 0:
+        errs.append("risk.profit_capture_min_hold_secs must be >=0")
     if r.breakeven_at_r < 0 or r.trailing_activate_r < 0 or r.trailing_distance_r < 0:
         errs.append("risk.breakeven_at_r / trailing_* must be >=0")
     if s.fire_threshold < 0 or s.fire_threshold > 1:

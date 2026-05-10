@@ -153,6 +153,7 @@ def fresh_cfg():
     cfg.trading.max_position_age_seconds = 0
     cfg.trading.time_exit_only_if_losing = True
     cfg.risk.partial_tp_enabled = True
+    cfg.risk.profit_capture_enabled = False
     cfg.risk.tape_exit_enabled = False
     cfg.risk.tape_exit_threshold = 0.50
     cfg.risk.tape_exit_min_hold_secs = 30
@@ -1196,6 +1197,49 @@ def test_breakeven_sl_short():
     new_sl = float(bot.client.modify_tpsl_order.call_args.kwargs["sl_price"])
     # Expected: entry - 0.05% buffer = 99_950
     assert abs(new_sl - 99_950.0) < 1.0, f"short BE SL wrong: {new_sl}"
+
+
+def test_profit_capture_market_closes_short_near_tp():
+    """When price gets close enough to the native TP, market-close the full
+    position so fast pump-fade bottoms do not have to tag the exact TP."""
+    bot, _, _ = _setup_bot_with_open_position(
+        side="SELL",
+        entry=100_000.0,
+        current_price=99_780.0,  # 220 / 250 = 88% of the TP path
+        original_tp=99_750.0,
+        breakeven_at_r=2.0,
+        trailing_activate_r=3.0,
+    )
+    bot.cfg.risk.profit_capture_enabled = True
+    bot.cfg.risk.profit_capture_tp_progress = 0.85
+    bot.cfg.risk.profit_capture_min_hold_secs = 0
+
+    bot._tick()
+
+    bot.client.flash_close_position.assert_called_once_with("POS1")
+    bot.client.modify_tpsl_order.assert_not_called()
+    orders = [e for e in bot.state.snapshot()["events"] if e["kind"] == "order"]
+    assert any("PROFIT_CAPTURE" in e["text"] for e in orders), \
+        f"expected PROFIT_CAPTURE event; got {[e['text'] for e in orders]}"
+
+
+def test_profit_capture_waits_until_near_tp():
+    bot, _, _ = _setup_bot_with_open_position(
+        side="SELL",
+        entry=100_000.0,
+        current_price=99_800.0,  # 200 / 250 = 80%, below 85% trigger
+        original_tp=99_750.0,
+        breakeven_at_r=2.0,
+        trailing_activate_r=3.0,
+    )
+    bot.cfg.risk.profit_capture_enabled = True
+    bot.cfg.risk.profit_capture_tp_progress = 0.85
+    bot.cfg.risk.profit_capture_min_hold_secs = 0
+
+    bot._tick()
+
+    bot.client.flash_close_position.assert_not_called()
+    bot.client.modify_tpsl_order.assert_not_called()
 
 
 def test_breakeven_sl_clamps_on_30030_short():

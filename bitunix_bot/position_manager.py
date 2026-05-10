@@ -176,6 +176,35 @@ class PositionManager:
                 # less protected, so the time cap should still flatten it.
                 ctime_ms = int(p.get("ctime") or 0)
                 age_s = (time.time() * 1000 - ctime_ms) / 1000.0 if ctime_ms else 0.0
+                tp_order_for_capture = tp_orders.get(pid)
+                if (rk.profit_capture_enabled
+                        and tp_order_for_capture
+                        and age_s >= float(getattr(rk, "profit_capture_min_hold_secs", 0.0) or 0.0)):
+                    try:
+                        current_tp = float(tp_order_for_capture.get("tpPrice") or 0)
+                    except (TypeError, ValueError):
+                        current_tp = 0.0
+                    target_dist = abs(current_tp - entry)
+                    favor_dist = (current_price - entry) if is_long else (entry - current_price)
+                    progress = favor_dist / target_dist if target_dist > 0 else 0.0
+                    progress_trigger = float(getattr(rk, "profit_capture_tp_progress", 0.85) or 0.85)
+                    if current_tp > 0 and favor_dist > 0 and progress >= progress_trigger:
+                        try:
+                            bot.client.flash_close_position(pid)
+                            log.info(
+                                "PROFIT CAPTURE %s: progress=%.0f%% to TP "
+                                "(entry=%s current=%.6f tp=%s)",
+                                symbol, progress * 100.0, entry, current_price, current_tp,
+                            )
+                            bot.state.record_order(
+                                f"{symbol} PROFIT_CAPTURE positionId={pid} "
+                                f"{progress * 100:.0f}% to TP"
+                            )
+                            continue
+                        except BitunixError as e:
+                            log.warning("Profit capture failed for %s: %s", symbol, e)
+                            # Fall through; native TP/SL may still protect it.
+
                 max_age_s = self.hard_time_exit_seconds(symbol)
                 if max_age_s > 0 and age_s >= max_age_s:
                     try:
