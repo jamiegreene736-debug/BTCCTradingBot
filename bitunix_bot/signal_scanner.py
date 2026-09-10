@@ -1,4 +1,4 @@
-"""Rate-limited market reads and durable manual/paper tracking for intraday alerts."""
+"""Rate-limited market reads plus live-position import for intraday alerts."""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ import random
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import asdict, replace
+from dataclasses import asdict, dataclass, replace
 from functools import partial
 from typing import TypeVar
 
@@ -20,10 +20,13 @@ from .intraday import (
     Check,
     Decision,
     Market,
+    Side,
     Tier,
+    TradePlan,
     closed_candles,
     evaluate_intraday,
     number,
+    volatility,
 )
 from .signal_config import SignalsCfg, SignalSettings
 from .signal_store import SignalStore, TrackedTrade, evaluate_exit
@@ -36,6 +39,105 @@ from .symbol_meta import (
 
 log = logging.getLogger(__name__)
 T = TypeVar("T")
+MISSING_POSITION_KEYS = "Add Bitunix API keys to import live positions."
+
+
+@dataclass(frozen=True)
+class OpenPosition:
+    position_id: str
+    symbol: str
+    side: Side
+    quantity: float
+    entry: float
+    mark: float | None = None
+    unrealized_pnl: float | None = None
+    leverage: int | None = None
+    opened_at: int | None = None
+
+
+def parse_open_position(row: object) -> OpenPosition | None:
+    if not isinstance(row, dict):
+        return None
+    symbol = str(row.get("symbol") or "").upper()
+    if not symbol.endswith("USDT"):
+        return None
+    raw_side = str(row.get("side") or row.get("positionSide") or "").upper()
+    if raw_side in ("LONG", "BUY"):
+        side: Side = "long"
+    elif raw_side in ("SHORT", "SELL"):
+        side = "short"
+    else:
+        return None
+    try:
+        quantity = abs(
+            number(row.get("qty") or row.get("size") or row.get("volume") or 0)
+        )
+        entry = number(
+            row.get("avgOpenPrice") or row.get("entryPrice") or row.get("openPrice")
+        )
+    except (TypeError, ValueError):
+        return None
+    if quantity <= 0 or entry <= 0:
+        return None
+    position_id = str(row.get("positionId") or row.get("position_id") or "")
+    if not position_id:
+        position_id = f"{symbol}:{side}"
+    mark: float | None = None
+    for key in ("markPrice", "mark_price"):
+        if row.get(key) not in (None, ""):
+            try:
+                mark = number(row[key])
+            except (TypeError, ValueError):
+                mark = None
+            break
+    unrealized: float | None = None
+    for key in ("unrealizedPNL", "unrealizedPnl", "unrealized_pnl"):
+        if row.get(key) not in (None, ""):
+            try:
+                unrealized = number(row[key])
+            except (TypeError, ValueError):
+                unrealized = None
+            break
+    leverage: int | None = None
+    for key in ("leverage", "leverageLevel"):
+        if row.get(key) not in (None, ""):
+            try:
+                parsed = int(number(row[key]))
+            except (TypeError, ValueError):
+                parsed = 0
+            if parsed >= 1:
+                leverage = parsed
+            break
+    opened_at: int | None = None
+    raw_open = (
+        row.get("ctime")
+        or row.get("createdTime")
+        or row.get("created_time")
+        or row.get("openTime")
+        or row.get("open_time")
+    )
+    if raw_open not in (None, ""):
+        try:
+            timestamp = number(raw_open)
+            if timestamp > 10_000_000_000:
+                timestamp /= 1000
+            if timestamp > 0:
+                opened_at = int(timestamp)
+        except (TypeError, ValueError):
+            opened_at = None
+    return OpenPosition(
+        position_id,
+        symbol,
+        side,
+        quantity,
+        entry,
+        mark,
+        unrealized,
+        leverage,
+        opened_at,
+    )
+
+
 READ_ERRORS = (
     BitunixError,
     requests.RequestException,
@@ -63,6 +165,7 @@ class SignalScanner:
         self._featured_symbol: str | None = None
         self._handoff_to: str | None = None
         self._handoff_until: int = 0
+        self._positions_error: str | None = None
 
     def _read(self, key: str, ttl: float, fetch: Callable[[], T]) -> T:
         now = time.time()
@@ -215,10 +318,276 @@ class SignalScanner:
             self._last_scan = time.time()
             self.refresh_lock.release()
 
+    def _has_account_keys(self) -> bool:
+        key = getattr(self.client, "api_key", "")
+        secret = getattr(self.client, "secret_key", "")
+        return (
+            isinstance(key, str)
+            and isinstance(secret, str)
+            and bool(key.strip() and secret.strip())
+        )
+
+    def _load_positions(self) -> tuple[list[OpenPosition], bool]:
+        if not self._has_account_keys():
+            self._positions_error = MISSING_POSITION_KEYS
+            return [], False
+        now = time.time()
+        cached = self._cache.get("positions")
+        if cached and now - cached[0] < self.cfg.refresh_seconds:
+            rows = cached[1]
+            if isinstance(rows, list):
+                return (
+                    [p for row in rows if (p := parse_open_position(row))],
+                    True,
+                )
+        wait = 0.13 - (time.monotonic() - self._last_request)
+        if wait > 0:
+            time.sleep(wait)
+        self._last_request = time.monotonic()
+        try:
+            rows = self.client.pending_positions()
+            if not isinstance(rows, list):
+                raise ValueError("Invalid positions payload")
+            self._cache["positions"] = (time.time(), copy.deepcopy(rows))
+            self._positions_error = None
+            return [p for row in rows if (p := parse_open_position(row))], True
+        except Exception as exc:
+            log.warning("Live positions unavailable: %s", exc)
+            self._positions_error = (
+                "Could not read Bitunix positions; live tracking is paused"
+            )
+            if cached and isinstance(cached[1], list):
+                return (
+                    [p for row in cached[1] if (p := parse_open_position(row))],
+                    False,
+                )
+            return [], False
+
+    def _plan_for_position(
+        self,
+        position: OpenPosition,
+        decision: Decision | None,
+        settings: SignalSettings,
+        now: int,
+    ) -> TradePlan:
+        side = position.side
+        sign = 1 if side == "long" else -1
+        entry = position.entry
+        quantity = position.quantity
+        leverage = max(1, min(position.leverage or settings.leverage, 125))
+        mark = position.mark or (
+            decision.price if decision and decision.price else entry
+        )
+        cost_pct = self.cfg.round_trip_fee_pct + self.cfg.slippage_pct
+        target2: float | None = None
+        funding_cost_pct = 0.0
+        funding_payments = 0
+        liquidation: float | None = None
+        max_leverage = leverage
+        if decision and decision.plan and decision.side == side:
+            plan = decision.plan
+            stop = plan.stop
+            target = plan.target
+            target2 = plan.target2
+            cost_pct = plan.cost_pct
+            funding_cost_pct = plan.funding_cost_pct
+            funding_payments = plan.funding_payments
+            liquidation = (
+                plan.liquidation_estimate * entry / plan.entry
+                if plan.liquidation_estimate is not None and plan.entry
+                else None
+            )
+            max_leverage = plan.max_leverage
+        else:
+            bars = self.frames.get(position.symbol, {}).get("15m", [])
+            atr_value = volatility(bars) if len(bars) >= 15 else 0.0
+            stop_distance = max(
+                entry * 0.015, atr_value * 1.5 if atr_value > 0 else entry * 0.015
+            )
+            stop = entry - sign * stop_distance
+            target = entry + sign * 2 * stop_distance
+            liquidation = entry * (1 - sign / leverage)
+        if sign * (mark - stop) <= 0:
+            stop = mark - sign * max(entry * 0.005, abs(entry - stop) * 0.15)
+        notional = entry * quantity
+        risk = quantity * (abs(entry - stop) + entry * cost_pct / 100)
+        reward = quantity * (abs(target - entry) - entry * cost_pct / 100)
+        return TradePlan(
+            side,
+            entry,
+            min(entry, mark),
+            max(entry, mark),
+            stop,
+            target,
+            target2,
+            quantity,
+            notional,
+            notional / leverage,
+            risk,
+            risk / settings.planning_equity * 100,
+            reward / risk if risk > 0 else 0.0,
+            abs(entry - stop) / entry * 100,
+            cost_pct,
+            funding_cost_pct,
+            funding_payments,
+            liquidation,
+            max_leverage,
+            leverage,
+            settings.hold_hours,
+            now + 1800,
+        )
+
+    def _sync_exchange_positions(
+        self,
+        positions: list[OpenPosition],
+        decisions: dict[str, Decision],
+        now: int,
+        *,
+        fetch_ok: bool,
+    ) -> None:
+        if not fetch_ok:
+            return
+        settings = self.store.settings()
+        live_ids = {position.position_id for position in positions}
+        matched: set[str] = set()
+        seen: set[tuple[str, str]] = set()
+        for position in positions:
+            key = (position.symbol, position.side)
+            if key in seen:
+                continue
+            seen.add(key)
+            trade_id = f"exchange:{position.position_id}"
+            trades = self.store.trades()
+            existing = next((trade for trade in trades if trade.id == trade_id), None)
+            if existing is None:
+                existing = next(
+                    (
+                        trade
+                        for trade in trades
+                        if trade.closed_at is None
+                        and trade.kind == "exchange"
+                        and trade.symbol == position.symbol
+                        and trade.plan.side == position.side
+                    ),
+                    None,
+                )
+            if existing is None:
+                recorded = next(
+                    (
+                        trade
+                        for trade in trades
+                        if trade.closed_at is None
+                        and trade.kind in ("paper", "manual")
+                        and trade.symbol == position.symbol
+                        and trade.plan.side == position.side
+                    ),
+                    None,
+                )
+                if recorded:
+                    recorded.mark_price = position.mark
+                    recorded.unrealized_pnl = position.unrealized_pnl
+                    recorded.exchange_position_id = position.position_id
+                    self.store.save_trade(recorded)
+                    matched.add(recorded.id)
+                    continue
+                opened = position.opened_at or now
+                if opened > now or opened <= 0:
+                    opened = now
+                plan = self._plan_for_position(
+                    position, decisions.get(position.symbol), settings, now
+                )
+                trade = TrackedTrade(
+                    trade_id,
+                    position.symbol,
+                    "exchange",
+                    opened,
+                    plan,
+                    plan.stop,
+                    position.mark or position.entry,
+                    state=f"HOLD_{position.side.upper()}",
+                    reason=(
+                        "Imported live Bitunix position; alerts only, no exchange order"
+                    ),
+                    checked_at=opened,
+                    mark_price=position.mark,
+                    unrealized_pnl=position.unrealized_pnl,
+                    exchange_position_id=position.position_id,
+                )
+                self.store.save_trade(trade)
+                matched.add(trade.id)
+                self.store.record_alert(
+                    f"{trade_id}:imported:{opened}",
+                    trade.state,
+                    position.symbol,
+                    trade.reason,
+                    now,
+                    side=position.side,
+                )
+                continue
+            if existing.closed_at:
+                existing.closed_at = None
+                existing.exit_price = None
+                existing.estimated_net_pnl = None
+                existing.state = f"HOLD_{position.side.upper()}"
+                existing.reason = "Live Bitunix position is still open"
+            existing.exchange_position_id = position.position_id
+            existing.mark_price = position.mark
+            existing.unrealized_pnl = position.unrealized_pnl
+            mark = position.mark or existing.best_price
+            sign = 1 if existing.plan.side == "long" else -1
+            existing.best_price = max(
+                [existing.best_price, mark], key=lambda price: sign * price
+            )
+            if (
+                abs(existing.plan.quantity - position.quantity) > 1e-12
+                or abs(existing.plan.entry - position.entry) > 1e-8
+            ):
+                plan = self._plan_for_position(
+                    position, decisions.get(position.symbol), settings, now
+                )
+                if sign * (existing.current_stop - plan.stop) <= 0:
+                    existing.current_stop = plan.stop
+                existing.plan = plan
+            self.store.save_trade(existing)
+            matched.add(existing.id)
+        for trade in self.store.trades(active_only=True):
+            if trade.kind == "exchange" and trade.id not in matched:
+                mark = trade.mark_price or trade.plan.entry
+                trade.closed_at = now
+                trade.exit_price = mark
+                trade.state = "CLOSED"
+                sign = 1 if trade.plan.side == "long" else -1
+                trade.estimated_net_pnl = (
+                    sign * (mark - trade.plan.entry) * trade.plan.quantity
+                    - trade.plan.notional * trade.plan.cost_pct / 100
+                )
+                trade.reason = (
+                    "Bitunix position is no longer open; tracking closed automatically"
+                )
+                self.store.save_trade(trade)
+                self.store.record_alert(
+                    f"{trade.id}:closed:{now}",
+                    trade.state,
+                    trade.symbol,
+                    trade.reason,
+                    now,
+                    side=trade.plan.side,
+                )
+            elif (
+                trade.kind != "exchange"
+                and trade.exchange_position_id
+                and trade.exchange_position_id not in live_ids
+            ):
+                trade.exchange_position_id = ""
+                trade.mark_price = None
+                trade.unrealized_pnl = None
+                self.store.save_trade(trade)
+
     def _refresh(self) -> None:
         now = int(time.time())
         settings = self.store.settings()
         active = self.store.trades(active_only=True)
+        positions, positions_ok = self._load_positions()
         try:
             pairs = self._read("pairs", 900, self.client.trading_pairs)
             tickers = self._read(
@@ -236,7 +605,12 @@ class SignalScanner:
                 reverse=True,
             )[: self.cfg.max_symbols]
             symbols = list(
-                dict.fromkeys(["BTCUSDT"] + liquid + [t.symbol for t in active])
+                dict.fromkeys(
+                    ["BTCUSDT"]
+                    + liquid
+                    + [t.symbol for t in active]
+                    + [p.symbol for p in positions]
+                )
             )
             if not by_ticker:
                 raise ValueError("Provider returned no tradable markets")
@@ -245,6 +619,9 @@ class SignalScanner:
             with self.lock:
                 self.error = "Market provider unavailable; new entries are blocked"
                 self.decisions = {}
+                self._sync_exchange_positions(
+                    positions, {}, now, fetch_ok=positions_ok
+                )
                 self._update_exits({}, now)
             return
         frames: dict[str, dict[str, list[Candle]]] = {}
@@ -281,6 +658,9 @@ class SignalScanner:
             self.error = None
             self._stamp_states(decisions, now)
             self.frames, self.decisions = frames, decisions
+            self._sync_exchange_positions(
+                positions, decisions, now, fetch_ok=positions_ok
+            )
             self._update_exits(decisions, int(time.time()))
             for decision in decisions.values():
                 self._portfolio_gate(decision)
@@ -491,6 +871,12 @@ class SignalScanner:
             )
             featured, handoff = self._featured_and_handoff(ranked, rows, now)
             trades = self.store.trades()
+            live = [
+                t
+                for t in trades
+                if not t.closed_at and (t.kind == "exchange" or t.exchange_position_id)
+            ]
+            connected = self._has_account_keys()
             return {
                 "version": 2,
                 "strategy": "intraday",
@@ -504,6 +890,15 @@ class SignalScanner:
                         for d in rows.values()
                     ),
                     "error": self.error,
+                },
+                "positions": {
+                    "connected": connected,
+                    "imported": len(live),
+                    "error": (
+                        MISSING_POSITION_KEYS
+                        if not connected
+                        else self._positions_error
+                    ),
                 },
                 "symbols": {d.symbol: asdict(d) for d in ranked},
                 "queue": [

@@ -85,7 +85,11 @@ extra collateral, not the exchange's exact liquidation price or a guarantee.
 
 - **Track paper trade** records a simulated entry without placing an order.
 - **Record my fill** records a fill you already executed, within the confirmed
-  entry zone and planned size/risk. It does not detect/import exchange positions.
+  entry zone and planned size/risk.
+- **Live Bitunix positions** are imported read-only when `BITUNIX_API_KEY` and
+  `BITUNIX_SECRET_KEY` are set. The scanner never places, amends, or closes
+  orders; it only tracks size, mark, unrealized P&L, and hold/exit alerts.
+  A vanished position closes that live track automatically.
 - Original stop, target, risk and holding limit are frozen when recorded.
 - Exit alerts cover stop/target touches, opposite completed 1h structure, failure
   to make 0.25R progress within four hours, and maximum age. After 1R the stop
@@ -97,8 +101,8 @@ extra collateral, not the exchange's exact liquidation price or a guarantee.
   exit price and planned costs; they are not exchange-settled P&L.
 
 Tracked exposure is capped at 1.5% of planning equity and two trades in the same
-direction. This includes both paper and user-recorded trades and cannot account
-for unrecorded exchange positions. Put actual protective stops on Bitunix;
+direction. Live imported positions count toward that cap so an open HYPE short
+blocks a second HYPE entry alert. Put actual protective stops on Bitunix;
 browser alerts are not a replacement for exchange-side protection.
 
 ## Data integrity and persistence

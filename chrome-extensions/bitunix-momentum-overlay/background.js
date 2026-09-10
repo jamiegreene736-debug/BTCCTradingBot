@@ -11,6 +11,7 @@ function validateSnapshot(payload) {
   if (!object(payload.settings) || !object(payload.symbols) ||
       !['planning_equity', 'risk_pct', 'leverage', 'hold_hours'].every(key => Number.isFinite(payload.settings[key])) ||
       !['trades', 'history', 'closed_trades', 'queue'].every(key => Array.isArray(payload[key])) ||
+      (payload.positions != null && !object(payload.positions)) ||
       (payload.handoff != null && (typeof payload.handoff !== 'object' || Array.isArray(payload.handoff))) ||
       !Object.values(payload.symbols).every(row => object(row) && typeof row.state === 'string' &&
         typeof row.symbol === 'string' && Array.isArray(row.checks) && object(row.metrics))) {
