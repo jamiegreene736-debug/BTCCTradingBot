@@ -49,6 +49,16 @@ These changes increase the number of valid 12/24h candidates. They do not
 create a measured edge. Forward paper observation is still required before
 treating signals as profitable.
 
+## Signal queue, timestamps and handoff
+
+The snapshot now includes a ranked `queue` of up to five markets, `state_since`
+on each decision, and a `handoff` countdown when the featured card is about
+to change. WATCH alerts are persisted alongside ENTER and exit alerts, keyed
+per symbol / state / setup / completed bar so refreshes do not duplicate them.
+History rows keep a unix `time` plus setup and side. The overlay formats
+those as local date-time and a relative age, and holds the current featured
+setup for 20 seconds after a better rank appears.
+
 ## Extension startup repair — 1.0.1
 
 The blank-panel report on 2026-09-10 came from a mixed local installation:

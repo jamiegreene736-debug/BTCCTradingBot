@@ -46,6 +46,20 @@ async function main() {
     });
     await page.locator('.bis-state').waitFor();
     assert.equal(await page.locator('.bis-state').textContent(), 'ENTER LONG');
+    assert.match(await page.locator('#bis-queue').textContent(), /Top setups/);
+    assert.match(await page.locator('#bis-queue').textContent(), /BTCUSDT/);
+    await page.locator('#bis-history-wrap summary').click();
+    assert.match(await page.locator('#bis-history').textContent(), /ENTER LONG/);
+    await page.evaluate(() => {
+      const now = Math.floor(Date.now() / 1000);
+      window.testPayload.handoff = {
+        from_symbol: 'BTCUSDT', to_symbol: 'ETHUSDT', reason: 'Entry window ending',
+        expires_at: now + 20, seconds_remaining: 20,
+      };
+      window.listeners[0]({ type: 'signals-update', payload: window.testPayload });
+    });
+    assert.match(await page.locator('#bis-handoff').textContent(), /Switching to ETHUSDT/);
+    assert.match(await page.locator('#bis-card').textContent(), /Shown /);
     await page.locator('[data-action="paper"]').click();
     assert.match(await page.locator('.bis-modal').textContent(), /No order is submitted/);
     await page.locator('.bis-modal [type="submit"]').click();
@@ -133,13 +147,13 @@ async function main() {
     await popup.setContent(fs.readFileSync(path.join(root, 'popup.html'), 'utf8').replace(/<script[^>]*><\/script>/g, ''));
     await popup.evaluate(() => {
       window.chrome = { runtime: {
-        getManifest: () => ({ version: '1.0.1' }),
+        getManifest: () => ({ version: '1.1.0' }),
         sendMessage: async () => ({ payload: { error: 'Cannot reach the dashboard.' } }),
       } };
     });
     await popup.addScriptTag({ path: path.join(root, 'popup.js') });
     assert.match(await popup.locator('#status').textContent(), /Cannot reach/);
-    assert.equal(await popup.locator('#version').textContent(), 'Version 1.0.1');
+    assert.equal(await popup.locator('#version').textContent(), 'Version 1.1.0');
     const stalled = await browser.newPage();
     stalled.on('pageerror', error => errors.push(error.message));
     await stalled.clock.install();

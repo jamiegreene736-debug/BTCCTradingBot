@@ -217,6 +217,7 @@ class Decision:
     signal_id: str = ""
     as_of: int = 0
     bar_time: int = 0
+    state_since: int = 0
     price: float | None = None
     plan: TradePlan | None = None
     checks: list[Check] = field(default_factory=list)

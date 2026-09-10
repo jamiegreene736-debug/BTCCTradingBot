@@ -63,6 +63,12 @@ The overlay's Edit button sets planning equity, risk per trade, leverage (1–40
 and maximum hold (12h/24h). Initial planning defaults are explicitly hypothetical:
 1,000 USDT equity, 0.5% risk, 25x, 24 hours. These are not an exchange balance.
 
+The overlay shows a ranked queue of the top five markets, each with the time
+the current state started. WATCH and ENTER alerts are stored with that
+timestamp so you can look back. When the featured setup is about to change —
+a higher-ranked market is ready, or the entry window is under 45 seconds —
+the panel counts down before switching.
+
 Position size accounts for the structural stop plus estimated costs. The scanner
 counts funding settlements over the maximum hold using the provider's actual
 interval and next-settlement timestamp, then projects the current funding rate.

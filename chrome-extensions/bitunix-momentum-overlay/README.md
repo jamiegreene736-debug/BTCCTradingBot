@@ -1,4 +1,4 @@
-# Bitunix Intraday Signals — Chrome extension v1.0.1
+# Bitunix Intraday Signals — Chrome extension v1.1.0
 
 Long and short entry, hold, review and exit alerts for trades lasting up to
 12–24 hours. The backend computes the strategy; this extension displays it.
@@ -18,7 +18,7 @@ No extension action sends an exchange order or modifies a position.
 - **Pump Fade Radar** or version **0.3.16** means old files or an old tab are
   still loaded. Reload the extension from this folder in `chrome://extensions`,
   then reload the Bitunix tab. The popup must say **Bitunix Intraday Signals**,
-  version **1.0.1**. Unpacked extensions do not refresh themselves after a git pull.
+  version **1.1.0**. Unpacked extensions do not refresh themselves after a git pull.
 - Use the complete extension folder from one release. Mixing the old manifest
   and panel with the new worker breaks message delivery and omits its alarms permission.
 - The panel displays **Connecting** immediately. A stalled or disconnected worker
@@ -28,6 +28,10 @@ No extension action sends an exchange order or modifies a position.
   wrong passwords, outages and incompatible responses show their own messages.
 - **Connected; waiting for complete market data** means the backend is reachable
   but has not produced usable market data yet. No entry is enabled during an outage.
+
+The top-five queue lists the current ranked markets with the time each state
+started. A countdown warning appears before the featured card switches to the
+next setup. Recent alerts keep WATCH and ENTER rows with full timestamps.
 
 The card shows WAIT, WATCH LONG/SHORT or ENTER LONG/SHORT, an entry zone,
 structural stop, profit target, estimated net reward/risk, planning size and

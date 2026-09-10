@@ -60,6 +60,9 @@ class SignalScanner:
         self._last_request = 0.0
         self._last_scan = 0.0
         self.error: str | None = None
+        self._featured_symbol: str | None = None
+        self._handoff_to: str | None = None
+        self._handoff_until: int = 0
 
     def _read(self, key: str, ttl: float, fetch: Callable[[], T]) -> T:
         now = time.time()
@@ -276,18 +279,12 @@ class SignalScanner:
             if settings != self.store.settings():
                 return
             self.error = None
+            self._stamp_states(decisions, now)
             self.frames, self.decisions = frames, decisions
             self._update_exits(decisions, int(time.time()))
             for decision in decisions.values():
                 self._portfolio_gate(decision)
-                if decision.state.startswith("ENTER_"):
-                    self.store.record_alert(
-                        decision.signal_id,
-                        decision.state,
-                        decision.symbol,
-                        decision.reasons[0],
-                        now,
-                    )
+                self._record_signal_alert(decision, now)
 
     def _portfolio_gate(self, decision: Decision) -> None:
         if not decision.state.startswith("ENTER_") or not decision.plan:
@@ -334,7 +331,129 @@ class SignalScanner:
                     trade.symbol,
                     trade.reason,
                     now,
+                    side=trade.plan.side,
                 )
+
+    def _stamp_states(self, decisions: dict[str, Decision], now: int) -> None:
+        previous = self.decisions
+        for symbol, decision in decisions.items():
+            prior = previous.get(symbol)
+            identity = (
+                decision.state,
+                decision.side,
+                decision.setup,
+                decision.bar_time,
+            )
+            if (
+                prior
+                and (
+                    prior.state,
+                    prior.side,
+                    prior.setup,
+                    prior.bar_time,
+                )
+                == identity
+                and prior.state_since
+            ):
+                decision.state_since = prior.state_since
+            else:
+                decision.state_since = now
+
+    def _record_signal_alert(self, decision: Decision, now: int) -> None:
+        if decision.state.startswith("ENTER_") and decision.signal_id:
+            key = decision.signal_id
+        elif decision.state.startswith("WATCH_") and decision.bar_time:
+            key = (
+                f"{decision.symbol}:{decision.state}:"
+                f"{decision.setup or 'none'}:{decision.bar_time}"
+            )
+        else:
+            return
+        reason = decision.reasons[0] if decision.reasons else decision.state
+        self.store.record_alert(
+            key,
+            decision.state,
+            decision.symbol,
+            reason,
+            now,
+            setup=decision.setup,
+            side=decision.side,
+        )
+
+    def _queue_item(self, decision: Decision, now: int) -> dict[str, object]:
+        expires = (
+            decision.plan.expires_at
+            if decision.plan and decision.state.startswith("ENTER_")
+            else None
+        )
+        remaining = max(0, expires - now) if expires is not None else None
+        return {
+            "symbol": decision.symbol,
+            "state": decision.state,
+            "side": decision.side,
+            "setup": decision.setup,
+            "as_of": decision.as_of,
+            "state_since": decision.state_since or decision.as_of or now,
+            "expires_at": expires,
+            "seconds_remaining": remaining,
+            "checks_passed": sum(c.passed for c in decision.checks),
+            "checks_total": len(decision.checks),
+            "reason": decision.reasons[0] if decision.reasons else "",
+            "price": decision.price,
+        }
+
+    def _featured_and_handoff(
+        self, ranked: list[Decision], rows: dict[str, Decision], now: int
+    ) -> tuple[str | None, dict[str, object] | None]:
+        natural = ranked[0].symbol if ranked else None
+        featured = self._featured_symbol
+        if featured and featured not in rows:
+            featured = None
+        if not featured:
+            featured = natural
+            self._handoff_to = None
+            self._handoff_until = 0
+        elif natural != featured:
+            if self._handoff_to != natural:
+                self._handoff_to = natural
+                self._handoff_until = now + self.cfg.handoff_seconds
+            if now >= self._handoff_until:
+                featured = natural
+                self._handoff_to = None
+                self._handoff_until = 0
+        else:
+            self._handoff_to = None
+            self._handoff_until = 0
+        self._featured_symbol = featured
+        handoff: dict[str, object] | None = None
+        if self._handoff_to and self._handoff_until > now:
+            handoff = {
+                "from_symbol": featured,
+                "to_symbol": self._handoff_to,
+                "reason": "A higher-ranked setup is ready",
+                "expires_at": self._handoff_until,
+                "seconds_remaining": max(0, self._handoff_until - now),
+            }
+        else:
+            current = rows.get(featured) if featured else None
+            if (
+                current
+                and current.plan
+                and current.state.startswith("ENTER_")
+            ):
+                remaining = current.plan.expires_at - now
+                if 0 < remaining <= self.cfg.expiry_warn_seconds:
+                    nxt = next(
+                        (d.symbol for d in ranked if d.symbol != featured), None
+                    )
+                    handoff = {
+                        "from_symbol": featured,
+                        "to_symbol": nxt,
+                        "reason": "Entry window ending",
+                        "expires_at": current.plan.expires_at,
+                        "seconds_remaining": remaining,
+                    }
+        return featured, handoff
 
     def snapshot(self) -> dict[str, object]:
         now = int(time.time())
@@ -357,18 +476,23 @@ class SignalScanner:
                         "Entry window expired; wait for the next completed candle"
                     ]
                 self._portfolio_gate(decision)
+            for decision in rows.values():
+                if not decision.state_since:
+                    decision.state_since = decision.as_of or now
             ranked = sorted(
                 rows.values(),
                 key=lambda d: (
                     d.state.startswith("ENTER_"),
                     d.state.startswith("WATCH_"),
                     sum(c.passed for c in d.checks),
+                    d.plan.net_reward_risk if d.plan else 0.0,
                 ),
                 reverse=True,
             )
+            featured, handoff = self._featured_and_handoff(ranked, rows, now)
             trades = self.store.trades()
             return {
-                "version": 1,
+                "version": 2,
                 "strategy": "intraday",
                 "mode": "alerts_only",
                 "now": now,
@@ -382,7 +506,11 @@ class SignalScanner:
                     "error": self.error,
                 },
                 "symbols": {d.symbol: asdict(d) for d in ranked},
-                "best_symbol": ranked[0].symbol if ranked else None,
+                "queue": [
+                    self._queue_item(d, now) for d in ranked[: self.cfg.queue_size]
+                ],
+                "best_symbol": featured,
+                "handoff": handoff,
                 "trades": [asdict(t) for t in trades if not t.closed_at],
                 "closed_trades": [asdict(t) for t in trades if t.closed_at][:30],
                 "history": self.store.history(),
@@ -394,6 +522,9 @@ class SignalScanner:
             self.store.save_settings(settings)
             self.decisions = {}
             self._last_scan = 0
+            self._featured_symbol = None
+            self._handoff_to = None
+            self._handoff_until = 0
 
     def track(self, values: dict[str, object]) -> TrackedTrade:
         if set(values) != {"signal_id", "kind", "entry", "quantity"} or values[

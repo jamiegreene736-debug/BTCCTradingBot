@@ -12,6 +12,15 @@
   const label = value => String(value || 'WAIT').replaceAll('_', ' ');
   const tone = state => state?.startsWith('EXIT') ? 'exit' : state?.includes('LONG') ? 'long' : state?.includes('SHORT') ? 'short' : 'wait';
   const ago = timestamp => timestamp ? Math.max(0, Math.floor(Date.now() / 1000 - timestamp)) + 's ago' : 'Waiting for data';
+  const clock = timestamp => Number.isFinite(timestamp) && timestamp > 0
+    ? new Date(timestamp * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' })
+    : '—';
+  const remain = seconds => {
+    if (!Number.isFinite(seconds) || seconds < 0) return '';
+    const whole = Math.floor(seconds);
+    const minutes = Math.floor(whole / 60);
+    return minutes > 0 ? `${minutes}m ${whole % 60}s` : `${whole}s`;
+  };
   function fresh(row) { return !payload?.error && row?.as_of > 0 && Date.now() / 1000 - row.as_of <= (payload?.data_max_age || 60); }
   function actionable(row) { return fresh(row) && row?.state?.startsWith('ENTER_') && row.plan?.expires_at > Date.now() / 1000; }
   const connectionError = 'Extension connection interrupted. Reload the extension, then this Bitunix tab.';
@@ -24,7 +33,7 @@
       ]);
     } finally { clearTimeout(timer); }
   }
-  host.innerHTML = `<header><div><span class="bis-eyebrow">BITUNIX · INTRADAY</span><strong>Trade signals</strong></div><div class="bis-actions"><button data-action="settings" title="Connection settings" aria-label="Connection settings">⚙</button><button data-action="collapse" aria-label="Collapse panel">−</button></div></header><div id="bis-body"><div id="bis-status" role="status"></div><div id="bis-planning"></div><div id="bis-selection"></div><div id="bis-card"></div><div id="bis-trades"></div><details><summary>Recent alerts</summary><div id="bis-history"></div></details><details><summary>Recorded closures</summary><div id="bis-closed"></div></details><footer>Alerts only · Orders and stops stay on Bitunix.<br>Candidate rules under evaluation; no measured win probability.</footer></div><div id="bis-form"></div>`;
+  host.innerHTML = `<header><div><span class="bis-eyebrow">BITUNIX · INTRADAY</span><strong>Trade signals</strong></div><div class="bis-actions"><button data-action="settings" title="Connection settings" aria-label="Connection settings">⚙</button><button data-action="collapse" aria-label="Collapse panel">−</button></div></header><div id="bis-body"><div id="bis-status" role="status"></div><div id="bis-planning"></div><div id="bis-handoff" hidden></div><div id="bis-queue"></div><div id="bis-selection"></div><div id="bis-card"></div><div id="bis-trades"></div><details id="bis-history-wrap"><summary>Recent alerts</summary><div id="bis-history"></div></details><details><summary>Recorded closures</summary><div id="bis-closed"></div></details><footer>Alerts only · Orders and stops stay on Bitunix.<br>Candidate rules under evaluation; no measured win probability.</footer></div><div id="bis-form"></div>`;
   function render() {
     try { renderContent(); }
     catch {
@@ -45,7 +54,9 @@
     const status = host.querySelector('#bis-status');
     if (!payload || (payload.error && !payload.symbols)) {
       status.className = 'bis-notice'; status.textContent = payload?.error || 'Connecting to your signal scanner…';
-      for (const id of ['card', 'selection', 'planning', 'trades', 'history', 'closed']) host.querySelector('#bis-' + id).replaceChildren();
+      for (const id of ['card', 'selection', 'planning', 'queue', 'trades', 'history', 'closed']) host.querySelector('#bis-' + id).replaceChildren();
+      const handoffEmpty = host.querySelector('#bis-handoff');
+      if (handoffEmpty) { handoffEmpty.hidden = true; handoffEmpty.replaceChildren(); }
       host.querySelector('#bis-card').innerHTML = '<div class="bis-buttons"><button data-action="settings">Open Settings</button><button data-action="refresh">Retry connection</button></div><p class="bis-empty">Signals need a running intraday backend and its dashboard password. Use Save and test connection in Settings.</p>';
       return;
     }
@@ -57,14 +68,39 @@
     if (selected && !payload.symbols[selected]) selected = '';
     const symbol = selected && payload.symbols[selected] ? selected : payload.best_symbol;
     const row = payload.symbols[symbol];
+    const nowSec = Date.now() / 1000;
+    const handoff = payload.handoff;
+    const handoffBox = host.querySelector('#bis-handoff');
+    if (handoff && handoff.to_symbol && Number(handoff.expires_at) > nowSec) {
+      const left = remain(handoff.expires_at - nowSec);
+      handoffBox.hidden = false;
+      handoffBox.className = 'bis-handoff';
+      handoffBox.innerHTML = `<strong>Switching to ${esc(handoff.to_symbol)}</strong><span>${esc(left)} left</span><small>${esc(handoff.reason || 'Signal change warning')} · now ${esc(handoff.from_symbol || symbol || '')}</small>`;
+    } else {
+      handoffBox.hidden = true;
+      handoffBox.replaceChildren();
+    }
+    const queue = Array.isArray(payload.queue) && payload.queue.length
+      ? payload.queue
+      : rows.slice(0, 5).map(item => ({
+        symbol: item.symbol, state: item.state, side: item.side, setup: item.setup,
+        as_of: item.as_of, state_since: item.state_since, expires_at: item.plan?.expires_at,
+        reason: item.reasons?.[0] || '', price: item.price,
+      }));
+    host.querySelector('#bis-queue').innerHTML = `<h3>Top setups <span>${Math.min(queue.length, 5)}</span></h3>${queue.slice(0, 5).map((item, index) => {
+      const live = fresh(payload.symbols?.[item.symbol]) ? item.state : 'WAIT';
+      const left = item.expires_at && live.startsWith('ENTER_') ? remain(item.expires_at - nowSec) : '';
+      return `<button type="button" class="bis-queue-row ${tone(live)}${item.symbol === symbol ? ' active' : ''}" data-action="pick" data-symbol="${esc(item.symbol)}"><b>${index + 1}</b><div><strong>${esc(item.symbol)}</strong><small>${esc(label(live))}${item.setup ? ' · ' + esc(item.setup) : ''}</small><small>${esc(clock(item.state_since || item.as_of))}${left ? ' · ' + left + ' left' : ''}</small></div><span>${price(item.price)}</span></button>`;
+    }).join('') || '<p class="bis-empty">No ranked setups yet.</p>'}`;
     if (document.activeElement?.id !== 'bis-symbol') host.querySelector('#bis-selection').innerHTML = `<label>Market <select id="bis-symbol"><option value="">Best setup</option>${rows.map(r => `<option value="${esc(r.symbol)}" ${selected === r.symbol ? 'selected' : ''}>${esc(r.symbol)} · ${esc(fresh(r) ? label(r.state) : 'WAIT')}</option>`).join('')}</select></label><button data-action="refresh" title="Refresh signals">↻</button>`;
     if (row) {
       const state = fresh(row) && (!row.plan || row.plan.expires_at > Date.now() / 1000) ? row.state : 'WAIT';
       const plan = row.plan;
-      host.querySelector('#bis-card').innerHTML = `<article class="bis-signal ${tone(state)}"><div class="bis-row"><strong>${esc(row.symbol)}</strong><span>${price(row.price)}</span></div><div class="bis-state" aria-live="polite">${esc(label(state))}</div><p>${esc(fresh(row) ? row.reasons?.[0] : 'Data is stale. Entry alerts are paused.')}</p><div class="bis-meta">${esc(row.setup || '4h bias → 1h structure → 15m entry')} · ${esc(ago(row.as_of))}</div>${plan ? `<div class="bis-levels"><div><small>Entry zone</small><b>${price(plan.entry_low)} – ${price(plan.entry_high)}</b></div><div><small>Stop loss</small><b>${price(plan.stop)}</b></div><div><small>Profit target</small><b>${price(plan.target)}</b></div><div><small>Net reward / risk</small><b>${fixed(plan.net_reward_risk)}R</b></div><div><small>Planned loss incl. costs</small><b>${money(plan.risk_usdt)} · ${fixed(plan.risk_pct)}%</b></div><div><small>Notional / margin</small><b>${money(plan.notional)} / ${money(plan.margin)}</b></div></div><div class="bis-meta">Entry expires ${new Date(plan.expires_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · Estimated leverage ceiling ${plan.max_leverage}x · 25-40x band</div><div class="bis-buttons"><button data-action="paper" ${actionable(row) ? '' : 'disabled'}>Track paper trade</button><button data-action="manual" ${actionable(row) ? '' : 'disabled'}>Record my fill</button></div>` : ''}<details><summary>Why this signal · ${row.checks.filter(c => c.passed).length}/${row.checks.length} checks</summary><ul class="bis-checks">${row.checks.map(c => `<li class="${c.passed ? 'pass' : 'fail'}"><span>${c.passed ? '✓' : '○'}</span><div><b>${esc(c.label)}</b><small>${esc(c.detail)}</small></div></li>`).join('')}</ul><div class="bis-meta">4h bias: ${esc(row.metrics.trend_4h || '—')} · 1h structure: ${esc(row.metrics.trend_1h || '—')}<br>ATR: ${fixed(row.metrics.atr_pct)}% · 1h ATR: ${fixed(row.metrics.hourly_atr_pct)}% · Volume: ${fixed(row.metrics.relative_volume)}×<br>UTC session VWAP: ${price(row.metrics.vwap)}<br>BTC relative strength (6h): ${fixed(row.metrics.relative_strength_pct)}%<br>Funding / interval: ${fixed(row.metrics.funding_rate_pct, 4)}%<br>Open interest: ${row.metrics.open_interest == null ? 'Unavailable' : price(row.metrics.open_interest)}</div>${plan ? `<p class="bis-meta">Estimated liquidation: ${price(plan.liquidation_estimate)}. Isolated margin, no extra collateral; verify on Bitunix. Estimated total costs ${fixed(plan.cost_pct)}%, including ${plan.funding_payments} projected funding payments. Future rates can change. Target 2 (context only): ${price(plan.target2)}.</p>` : ''}</details></article>`;
+      const expiryLeft = plan && state.startsWith('ENTER_') ? remain(plan.expires_at - nowSec) : '';
+      host.querySelector('#bis-card').innerHTML = `<article class="bis-signal ${tone(state)}"><div class="bis-row"><strong>${esc(row.symbol)}</strong><span>${price(row.price)}</span></div><div class="bis-state" aria-live="polite">${esc(label(state))}</div><p>${esc(fresh(row) ? row.reasons?.[0] : 'Data is stale. Entry alerts are paused.')}</p><div class="bis-meta">${esc(row.setup || '4h bias → 1h structure → 15m entry')}<br>Shown ${esc(clock(row.state_since || row.as_of))} · ${esc(ago(row.state_since || row.as_of))}<br>Market snapshot ${esc(clock(row.as_of))} · ${esc(ago(row.as_of))}</div>${plan ? `<div class="bis-levels"><div><small>Entry zone</small><b>${price(plan.entry_low)} – ${price(plan.entry_high)}</b></div><div><small>Stop loss</small><b>${price(plan.stop)}</b></div><div><small>Profit target</small><b>${price(plan.target)}</b></div><div><small>Net reward / risk</small><b>${fixed(plan.net_reward_risk)}R</b></div><div><small>Planned loss incl. costs</small><b>${money(plan.risk_usdt)} · ${fixed(plan.risk_pct)}%</b></div><div><small>Notional / margin</small><b>${money(plan.notional)} / ${money(plan.margin)}</b></div></div><div class="bis-meta">Entry expires ${esc(clock(plan.expires_at))}${expiryLeft ? ' · ' + expiryLeft + ' left' : ''} · Estimated leverage ceiling ${plan.max_leverage}x · 25-40x band</div><div class="bis-buttons"><button data-action="paper" ${actionable(row) ? '' : 'disabled'}>Track paper trade</button><button data-action="manual" ${actionable(row) ? '' : 'disabled'}>Record my fill</button></div>` : ''}<details><summary>Why this signal · ${row.checks.filter(c => c.passed).length}/${row.checks.length} checks</summary><ul class="bis-checks">${row.checks.map(c => `<li class="${c.passed ? 'pass' : 'fail'}"><span>${c.passed ? '✓' : '○'}</span><div><b>${esc(c.label)}</b><small>${esc(c.detail)}</small></div></li>`).join('')}</ul><div class="bis-meta">4h bias: ${esc(row.metrics.trend_4h || '—')} · 1h structure: ${esc(row.metrics.trend_1h || '—')}<br>ATR: ${fixed(row.metrics.atr_pct)}% · 1h ATR: ${fixed(row.metrics.hourly_atr_pct)}% · Volume: ${fixed(row.metrics.relative_volume)}×<br>UTC session VWAP: ${price(row.metrics.vwap)}<br>BTC relative strength (6h): ${fixed(row.metrics.relative_strength_pct)}%<br>Funding / interval: ${fixed(row.metrics.funding_rate_pct, 4)}%<br>Open interest: ${row.metrics.open_interest == null ? 'Unavailable' : price(row.metrics.open_interest)}</div>${plan ? `<p class="bis-meta">Estimated liquidation: ${price(plan.liquidation_estimate)}. Isolated margin, no extra collateral; verify on Bitunix. Estimated total costs ${fixed(plan.cost_pct)}%, including ${plan.funding_payments} projected funding payments. Future rates can change. Target 2 (context only): ${price(plan.target2)}.</p>` : ''}</details></article>`;
     } else host.querySelector('#bis-card').innerHTML = '<p class="bis-empty">Scanner warming up. Missing data blocks entries.</p>';
     host.querySelector('#bis-trades').innerHTML = `<h3>Tracked trades <span>${payload.trades.length}</span></h3>${payload.trades.length ? payload.trades.map(t => payload.error && !t.state.startsWith('EXIT_') ? { ...t, state: 'REVIEW', reason: 'Connection unavailable. Check Bitunix; this is the last recorded plan.' } : t).map(t => `<article class="bis-trade ${tone(t.state)}"><div class="bis-row"><b>${esc(t.symbol)} · ${esc(t.plan.side.toUpperCase())}</b><small>${t.kind === 'paper' ? 'PAPER' : 'USER RECORDED'}</small></div><strong class="bis-trade-state">${esc(label(t.state))}</strong><p>${esc(t.reason)}</p><div class="bis-meta">Entry ${price(t.plan.entry)} · Stop ${price(t.current_stop)} · Target ${price(t.plan.target)}<br>Held ${fixed((Date.now() / 1000 - t.opened_at) / 3600, 1)}h / ${t.plan.hold_hours}h max</div><button data-action="close" data-id="${esc(t.id)}">Record closure</button></article>`).join('') : '<p class="bis-empty">Record an entry to receive hold and exit guidance. Tracking never submits an order.</p>'}`;
-    host.querySelector('#bis-history').innerHTML = payload.history.slice(0, 10).map(event => `<div class="bis-history-row"><div><b>${esc(event.symbol)}</b> · ${esc(label(event.state))}<small>${esc(event.reason)}</small></div><time>${new Date(event.time * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time></div>`).join('') || '<p class="bis-empty">Confirmed entries and exit changes appear here.</p>';
+    host.querySelector('#bis-history').innerHTML = payload.history.slice(0, 30).map(event => `<div class="bis-history-row"><div><b>${esc(event.symbol)}</b> · ${esc(label(event.state))}${event.setup ? ' · ' + esc(event.setup) : ''}<small>${esc(event.reason)}</small></div><time datetime="${esc(event.time ? new Date(event.time * 1000).toISOString() : '')}">${esc(clock(event.time))}<small>${esc(ago(event.time))}</small></time></div>`).join('') || '<p class="bis-empty">WATCH and ENTER alerts appear here with timestamps.</p>';
     host.querySelector('#bis-closed').innerHTML = payload.closed_trades.slice(0, 10).map(t => `<div class="bis-history-row"><div><b>${esc(t.symbol)}</b> · ${esc(t.kind)}<small>Recorded exit ${price(t.exit_price)} · estimated net</small></div><b>${money(t.estimated_net_pnl)}</b></div>`).join('') || '<p class="bis-empty">No recorded closures. Signal alerts are not completed trades.</p>';
     if (host.querySelector('#bis-card details')) host.querySelector('#bis-card details').open = checksOpen;
     const alert = payload.history[0];
@@ -108,6 +144,7 @@
     if (!button || button.disabled) return;
     const action = button.dataset.action;
     if (action === 'settings') send('open-options').catch(() => { payload = { error: connectionError }; render(); });
+    if (action === 'pick' && button.dataset.symbol) { selected = button.dataset.symbol; render(); }
     if (action === 'refresh') refresh(true);
     if (action === 'cancel') closeForm();
     if (action === 'collapse') {
@@ -150,5 +187,6 @@
     });
   } catch { payload = { error: connectionError }; render(); }
   setInterval(() => refresh(), 5000);
+  setInterval(() => { if (payload && !formOpen) render(); }, 1000);
   refresh();
 })();
