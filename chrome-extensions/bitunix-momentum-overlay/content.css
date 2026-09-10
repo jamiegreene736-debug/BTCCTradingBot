@@ -1,7 +1,9 @@
-#bis-panel{all:initial;position:fixed;top:76px;right:18px;width:410px;max-width:calc(100vw - 24px);max-height:calc(100vh - 90px);z-index:2147483646;background:#101823;color:#e8eef6;border:1px solid #344254;border-radius:16px;box-shadow:0 14px 65px #0009;font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color-scheme:dark;overflow:hidden;display:flex;flex-direction:column}
+#bis-panel{all:initial;position:fixed;top:76px;right:18px;width:410px;max-width:calc(100vw - 24px);max-height:calc(100vh - 90px);z-index:2147483646;background:#101823;color:#e8eef6;border:1px solid #344254;border-radius:16px;box-shadow:0 14px 65px #0009;font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color-scheme:dark;overflow:hidden;display:flex;flex-direction:column;pointer-events:auto}
 #bis-panel *{box-sizing:border-box}
 #bis-panel header{display:flex;align-items:center;justify-content:space-between;padding:16px 18px;border-bottom:1px solid #2a3747;background:#151f2d;cursor:grab;user-select:none;touch-action:none;flex:0 0 auto}
 #bis-panel header strong{display:block;font-size:21px;letter-spacing:-.5px}
+#bis-panel .bis-drag{display:flex;align-items:center;gap:10px;min-width:0;flex:1}
+#bis-panel .bis-grip{flex:0 0 12px;width:12px;height:18px;border-radius:3px;background:radial-gradient(#8ea3ba 1.3px,transparent 1.4px) 0 0/6px 6px;opacity:.85}
 #bis-panel .bis-eyebrow{font-size:10px;letter-spacing:1.8px;color:#94a9bf;font-weight:700}
 #bis-panel .bis-actions{display:flex;gap:6px}
 #bis-panel button,#bis-panel select,#bis-panel input{font:inherit;color:#e8eef6;background:#1d2a3b;border:1px solid #40526a;border-radius:7px;padding:7px 10px;cursor:pointer}
@@ -55,7 +57,7 @@
 #bis-panel.bis-placed #bis-body{max-height:none}
 #bis-panel.bis-dragging{user-select:none}
 #bis-panel.bis-dragging header{cursor:grabbing}
-#bis-panel .bis-resize{position:absolute;right:1px;bottom:1px;width:18px;height:18px;cursor:nwse-resize;touch-action:none;background:linear-gradient(135deg,transparent 0 54%,#6d849c 54% 60%,transparent 60% 70%,#6d849c 70% 76%,transparent 76% 86%,#6d849c 86%)}
+#bis-panel .bis-resize{position:absolute;right:0;bottom:0;width:28px;height:28px;z-index:2;cursor:nwse-resize;touch-action:none;pointer-events:auto;background:linear-gradient(135deg,transparent 0 48%,#8ea3ba 48% 54%,transparent 54% 64%,#8ea3ba 64% 70%,transparent 70% 80%,#8ea3ba 80%)}
 #bis-panel.bis-flash{animation:bis-glow 1s ease 3}@keyframes bis-glow{50%{box-shadow:0 0 28px #6ed2b888}}
 @media(prefers-reduced-motion:reduce){#bis-panel.bis-flash{animation:none}}
 @media(max-width:600px){#bis-panel{top:12px;right:12px;max-height:calc(100dvh - 24px)}#bis-panel #bis-body{max-height:calc(100dvh - 108px)}}
