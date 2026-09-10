@@ -14,6 +14,7 @@ from bitunix_bot.client import BitunixClient
 from bitunix_bot.config import load
 from bitunix_bot.dashboard import create_app
 from bitunix_bot.intraday import (
+    CHECKLIST_LABELS,
     Candle,
     Market,
     Tier,
@@ -957,3 +958,73 @@ def test_refresh_imports_open_position_outside_liquid_universe(tmp_path):
     scanner.client.pending_positions.assert_called()
     scanner.client.place_order.assert_not_called()
     scanner.client.flash_close_position.assert_not_called()
+
+
+def test_checklist_length_is_stable_from_wait_to_entry():
+    waiting, market, frames = ready_decision()
+    assert [c.label for c in waiting.checks] == list(CHECKLIST_LABELS)
+    mixed = evaluate_intraday(
+        replace(market, symbol="ETHUSDT"),
+        frames,
+        None,
+        SignalSettings(),
+        SignalsCfg(),
+        NOW,
+    )
+    assert [c.label for c in mixed.checks] == list(CHECKLIST_LABELS)
+    assert mixed.state == "WATCH_LONG"
+    assert len(waiting.checks) == len(mixed.checks) == 19
+
+
+def test_funding_print_window_blocks_entry():
+    decision, market, frames = ready_decision()
+    assert decision.state == "ENTER_LONG"
+    blocked = evaluate_intraday(
+        replace(market, next_funding=NOW + 60),
+        frames,
+        None,
+        SignalSettings(),
+        SignalsCfg(),
+        NOW,
+    )
+    assert blocked.state == "WATCH_LONG"
+    assert any(
+        c.label == "Funding print window" and not c.passed for c in blocked.checks
+    )
+
+
+def test_mark_basis_blocks_entry():
+    decision, market, frames = ready_decision()
+    assert decision.state == "ENTER_LONG"
+    blocked = evaluate_intraday(
+        replace(market, mark=market.price * 1.01),
+        frames,
+        None,
+        SignalSettings(),
+        SignalsCfg(),
+        NOW,
+    )
+    assert blocked.state == "WATCH_LONG"
+    assert any(c.label == "Mark vs last" and not c.passed for c in blocked.checks)
+
+
+def test_portfolio_gate_does_not_change_checklist_length(tmp_path):
+    scanner, decision = scanner_with_entry(tmp_path)
+    before = len(decision.checks)
+    with patch("time.time", return_value=NOW):
+        scanner.track(
+            {
+                "signal_id": decision.signal_id,
+                "kind": "paper",
+                "entry": decision.plan.entry,
+                "quantity": decision.plan.quantity,
+            }
+        )
+        snap = scanner.snapshot()
+    gated = snap["symbols"]["BTCUSDT"]
+    assert gated["state"] == "WATCH_LONG"
+    assert len(gated["checks"]) == before
+    assert any(
+        check["label"] == "Tracked exposure" and not check["passed"]
+        for check in gated["checks"]
+    )

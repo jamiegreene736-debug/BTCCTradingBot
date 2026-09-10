@@ -17,15 +17,16 @@ import requests
 from .client import BitunixClient, BitunixError
 from .intraday import (
     Candle,
-    Check,
     Decision,
     Market,
     Side,
     Tier,
     TradePlan,
+    blank_checklist,
     closed_candles,
     evaluate_intraday,
     number,
+    upsert_check,
     volatility,
 )
 from .signal_config import SignalsCfg, SignalSettings
@@ -643,13 +644,9 @@ class SignalScanner:
                 decisions[symbol] = Decision(
                     symbol,
                     reasons=[f"Data unavailable: {exc}"],
-                    checks=[
-                        Check(
-                            "Complete market data",
-                            False,
-                            "Wait for valid candles, funding, depth and risk tiers",
-                        )
-                    ],
+                    checks=blank_checklist(
+                        "Wait for valid candles, funding, depth and risk tiers"
+                    ),
                 )
         with self.lock:
             # A settings update invalidates any scan that started with the old risk profile.
@@ -680,12 +677,11 @@ class SignalScanner:
         )
         if blocked:
             decision.state = f"WATCH_{decision.side.upper()}"
-            decision.checks.append(
-                Check(
-                    "Tracked exposure",
-                    False,
-                    "Close or review existing tracked exposure before adding this trade",
-                )
+            upsert_check(
+                decision.checks,
+                "Tracked exposure",
+                False,
+                "Close or review existing tracked exposure before adding this trade",
             )
             decision.reasons = [
                 "Tracked portfolio risk or same-direction limit reached"
