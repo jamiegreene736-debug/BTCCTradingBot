@@ -21,6 +21,7 @@ async function main() {
       window.testPayload = data;
       window.messages = [];
       window.listeners = [];
+      window.savedLayout = {};
       window.chrome = { runtime: {
         sendMessage: async message => {
           window.messages.push(message);
@@ -28,7 +29,11 @@ async function main() {
           return { payload: structuredClone(window.testPayload) };
         },
         onMessage: { addListener: listener => window.listeners.push(listener) },
-      } };
+      }, storage: { local: {
+        get: async key => key ? { [key]: window.savedLayout[key] } : { ...window.savedLayout },
+        set: async value => { Object.assign(window.savedLayout, value); },
+        remove: async key => { delete window.savedLayout[key]; },
+      } } };
       const now = Math.floor(Date.now() / 1000);
       for (const row of Object.values(data.symbols)) { row.as_of = now; row.plan.expires_at = now + 900; }
     }, fixture);
@@ -60,6 +65,29 @@ async function main() {
     });
     assert.match(await page.locator('#bis-handoff').textContent(), /Switching to ETHUSDT/);
     assert.match(await page.locator('#bis-card').textContent(), /Shown /);
+    const beforeMove = await page.locator('#bis-panel').boundingBox();
+    const title = await page.locator('#bis-panel header strong').boundingBox();
+    await page.mouse.move(title.x + 24, title.y + 8);
+    await page.mouse.down();
+    await page.mouse.move(title.x - 160, title.y - 40);
+    await page.mouse.up();
+    const afterMove = await page.locator('#bis-panel').boundingBox();
+    assert.ok(afterMove.x < beforeMove.x - 40);
+    assert.ok(afterMove.y < beforeMove.y - 8);
+    const handle = await page.locator('#bis-panel .bis-resize').boundingBox();
+    await page.mouse.move(handle.x + handle.width / 2, handle.y + handle.height / 2);
+    await page.mouse.down();
+    await page.mouse.move(handle.x - 80, handle.y - 120);
+    await page.mouse.up();
+    const afterResize = await page.locator('#bis-panel').boundingBox();
+    assert.ok(afterResize.width < afterMove.width - 20);
+    assert.ok(afterResize.height < afterMove.height - 20);
+    const stored = await page.evaluate(() => window.savedLayout.panelLayout);
+    assert.ok(stored && stored.width < afterMove.width && stored.height < afterMove.height);
+    await page.locator('[data-action="reset-layout"]').click();
+    const afterReset = await page.locator('#bis-panel').boundingBox();
+    assert.ok(Math.abs(afterReset.x - beforeMove.x) < 8);
+    assert.equal(await page.evaluate(() => window.savedLayout.panelLayout), undefined);
     await page.locator('[data-action="paper"]').click();
     assert.match(await page.locator('.bis-modal').textContent(), /No order is submitted/);
     await page.locator('.bis-modal [type="submit"]').click();
@@ -147,13 +175,13 @@ async function main() {
     await popup.setContent(fs.readFileSync(path.join(root, 'popup.html'), 'utf8').replace(/<script[^>]*><\/script>/g, ''));
     await popup.evaluate(() => {
       window.chrome = { runtime: {
-        getManifest: () => ({ version: '1.1.0' }),
+        getManifest: () => ({ version: '1.2.0' }),
         sendMessage: async () => ({ payload: { error: 'Cannot reach the dashboard.' } }),
       } };
     });
     await popup.addScriptTag({ path: path.join(root, 'popup.js') });
     assert.match(await popup.locator('#status').textContent(), /Cannot reach/);
-    assert.equal(await popup.locator('#version').textContent(), 'Version 1.1.0');
+    assert.equal(await popup.locator('#version').textContent(), 'Version 1.2.0');
     const stalled = await browser.newPage();
     stalled.on('pageerror', error => errors.push(error.message));
     await stalled.clock.install();
@@ -168,7 +196,7 @@ async function main() {
     assert.equal(await stalled.locator('[data-action="settings"]').last().isVisible(), true);
     await stalled.screenshot({ path: path.join(output, 'connection-error.png') });
     assert.deepEqual(errors, []);
-    console.log('Browser checks passed: startup, malformed data, missing settings, disconnected worker, recovery, long/short cards, tracking, settings, mobile, stale data, escaping, collapse, no exchange actions.');
+    console.log('Browser checks passed: startup, malformed data, missing settings, disconnected worker, recovery, long/short cards, tracking, settings, mobile, stale data, escaping, collapse, move/resize, no exchange actions.');
   } finally { await browser.close(); }
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

@@ -33,7 +33,88 @@
       ]);
     } finally { clearTimeout(timer); }
   }
-  host.innerHTML = `<header><div><span class="bis-eyebrow">BITUNIX · INTRADAY</span><strong>Trade signals</strong></div><div class="bis-actions"><button data-action="settings" title="Connection settings" aria-label="Connection settings">⚙</button><button data-action="collapse" aria-label="Collapse panel">−</button></div></header><div id="bis-body"><div id="bis-status" role="status"></div><div id="bis-planning"></div><div id="bis-handoff" hidden></div><div id="bis-queue"></div><div id="bis-selection"></div><div id="bis-card"></div><div id="bis-trades"></div><details id="bis-history-wrap"><summary>Recent alerts</summary><div id="bis-history"></div></details><details><summary>Recorded closures</summary><div id="bis-closed"></div></details><footer>Alerts only · Orders and stops stay on Bitunix.<br>Candidate rules under evaluation; no measured win probability.</footer></div><div id="bis-form"></div>`;
+  host.innerHTML = `<header title="Drag to move. Double-click or use Reset to restore the default position."><div><span class="bis-eyebrow">BITUNIX · INTRADAY</span><strong>Trade signals</strong></div><div class="bis-actions"><button data-action="reset-layout" title="Reset size and position" aria-label="Reset size and position">⤢</button><button data-action="settings" title="Connection settings" aria-label="Connection settings">⚙</button><button data-action="collapse" aria-label="Collapse panel">−</button></div></header><div id="bis-body"><div id="bis-status" role="status"></div><div id="bis-planning"></div><div id="bis-handoff" hidden></div><div id="bis-queue"></div><div id="bis-selection"></div><div id="bis-card"></div><div id="bis-trades"></div><details id="bis-history-wrap"><summary>Recent alerts</summary><div id="bis-history"></div></details><details><summary>Recorded closures</summary><div id="bis-closed"></div></details><footer>Alerts only · Orders and stops stay on Bitunix.<br>Candidate rules under evaluation; no measured win probability.</footer></div><div id="bis-form"></div><div class="bis-resize" role="separator" aria-orientation="horizontal" aria-label="Resize panel" title="Drag to resize"></div>`;
+  const MIN_W = 280, MIN_H = 200, EDGE = 8;
+  let layout = null;
+  function box() {
+    const rect = host.getBoundingClientRect();
+    return { left: rect.left, top: rect.top, width: rect.width, height: rect.height };
+  }
+  function clamp(next) {
+    const maxW = Math.max(MIN_W, window.innerWidth - EDGE * 2);
+    const maxH = Math.max(MIN_H, window.innerHeight - EDGE * 2);
+    const width = Math.min(Math.max(next.width, MIN_W), maxW);
+    const height = Math.min(Math.max(next.height, MIN_H), maxH);
+    return {
+      left: Math.min(Math.max(next.left, EDGE), window.innerWidth - width - EDGE),
+      top: Math.min(Math.max(next.top, EDGE), window.innerHeight - height - EDGE),
+      width,
+      height,
+    };
+  }
+  function persistLayout() {
+    if (!layout) return;
+    try { chrome.storage?.local?.set({ panelLayout: layout }); } catch { /* keep the in-memory layout */ }
+  }
+  function applyLayout(next, persist) {
+    layout = clamp(next);
+    host.classList.add('bis-placed');
+    host.style.left = layout.left + 'px';
+    host.style.top = layout.top + 'px';
+    host.style.right = 'auto';
+    host.style.width = collapsed ? '230px' : layout.width + 'px';
+    host.style.height = collapsed ? 'auto' : layout.height + 'px';
+    host.style.maxWidth = 'none';
+    host.style.maxHeight = 'none';
+    if (persist) persistLayout();
+  }
+  function resetLayout() {
+    layout = null;
+    host.classList.remove('bis-placed');
+    host.style.left = host.style.top = host.style.right = '';
+    host.style.width = host.style.height = host.style.maxWidth = host.style.maxHeight = '';
+    try { chrome.storage?.local?.remove('panelLayout'); } catch { /* default CSS position */ }
+  }
+  function bindDrag(target, onMove) {
+    target.addEventListener('pointerdown', event => {
+      if (event.button && event.button !== 0) return;
+      if (event.target.closest('button, a, input, select, textarea, summary')) return;
+      if (formOpen) return;
+      const start = box();
+      const pointer = { x: event.clientX, y: event.clientY };
+      host.classList.add('bis-dragging');
+      target.setPointerCapture?.(event.pointerId);
+      const move = ev => onMove(start, ev.clientX - pointer.x, ev.clientY - pointer.y);
+      const up = () => {
+        host.classList.remove('bis-dragging');
+        window.removeEventListener('pointermove', move);
+        window.removeEventListener('pointerup', up);
+        if (layout) persistLayout();
+      };
+      window.addEventListener('pointermove', move);
+      window.addEventListener('pointerup', up);
+      event.preventDefault();
+    });
+  }
+  bindDrag(host.querySelector('header'), (start, dx, dy) => {
+    applyLayout({ left: start.left + dx, top: start.top + dy, width: start.width, height: start.height });
+  });
+  bindDrag(host.querySelector('.bis-resize'), (start, dx, dy) => {
+    applyLayout({ left: start.left, top: start.top, width: start.width + dx, height: start.height + dy });
+  });
+  host.querySelector('header').addEventListener('dblclick', event => {
+    if (!event.target.closest('button')) resetLayout();
+  });
+  window.addEventListener('resize', () => { if (layout) applyLayout(layout, false); });
+  try {
+    const pending = chrome.storage?.local?.get?.('panelLayout');
+    if (pending && typeof pending.then === 'function') {
+      pending.then(stored => {
+        const saved = stored?.panelLayout;
+        if (saved && [saved.left, saved.top, saved.width, saved.height].every(Number.isFinite)) applyLayout(saved, false);
+      }).catch(() => {});
+    }
+  } catch { /* default CSS position */ }
   function render() {
     try { renderContent(); }
     catch {
@@ -147,9 +228,11 @@
     if (action === 'pick' && button.dataset.symbol) { selected = button.dataset.symbol; render(); }
     if (action === 'refresh') refresh(true);
     if (action === 'cancel') closeForm();
+    if (action === 'reset-layout') resetLayout();
     if (action === 'collapse') {
       collapsed = !collapsed; host.classList.toggle('bis-collapsed', collapsed); button.textContent = collapsed ? '+' : '−';
       button.setAttribute('aria-label', collapsed ? 'Expand panel' : 'Collapse panel');
+      if (layout) applyLayout(layout, false);
     }
     if (action === 'planning') {
       const s = payload.settings;

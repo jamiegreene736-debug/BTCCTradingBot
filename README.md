@@ -24,6 +24,9 @@ Load `chrome-extensions/bitunix-momentum-overlay` unpacked through
 `chrome://extensions`. Connect it to your HTTPS Railway dashboard and password.
 After updating, reload the extension and then the Bitunix tab. The new overlay
 requires the matching backend release; it does not interpret old pump-fade scores.
+Drag the header to move the panel, the bottom-right corner to resize it, or
+double-click the header / use ⤢ to restore the default position. The layout is
+stored in local Chrome storage.
 
 ## Signals
 
