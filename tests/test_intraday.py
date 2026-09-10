@@ -28,7 +28,12 @@ from bitunix_bot.intraday import (
 )
 from bitunix_bot.signal_config import SignalsCfg, SignalSettings
 from bitunix_bot.signal_scanner import SignalScanner, parse_open_position
-from bitunix_bot.signal_store import SignalStore, TrackedTrade, evaluate_exit
+from bitunix_bot.signal_store import (
+    HOLD_CHECK_LABELS,
+    SignalStore,
+    TrackedTrade,
+    evaluate_exit,
+)
 
 NOW = 1_800_000_060
 
@@ -390,6 +395,9 @@ def test_exit_rules_are_position_specific_and_sticky(side, exit_type):
     decision.as_of = now
     evaluate_exit(trade, decision, frames["15m"], now, SignalsCfg())
     assert trade.state == f"EXIT_{side.upper()}"
+    assert trade.suggestion == f"CLOSE_{side.upper()}"
+    assert trade.hold_confidence is not None and trade.hold_confidence <= 10
+    assert [item.label for item in trade.checks] == list(HOLD_CHECK_LABELS)
     decision.price = trade.plan.entry
     decision.metrics["trend_1h"] = side
     evaluate_exit(trade, decision, [], now + 1, SignalsCfg())
@@ -410,6 +418,37 @@ def test_pre_entry_wick_does_not_trigger_exit():
     bar = Candle(NOW // 900 * 900, 99, 120, 10, 99, 100)
     evaluate_exit(trade, decision, [bar], NOW + 10, SignalsCfg())
     assert trade.state == "HOLD_LONG"
+
+
+def test_hold_suggestion_is_live_with_fixed_close_checks():
+    trade, decision, _ = new_trade("short")
+    evaluate_exit(trade, decision, [], NOW + 10, SignalsCfg())
+    assert trade.state == "HOLD_SHORT"
+    assert trade.suggestion == "HOLD_SHORT"
+    assert [item.label for item in trade.checks] == list(HOLD_CHECK_LABELS)
+    assert trade.hold_confidence >= 70
+    assert trade.reason.startswith("Live:")
+    assert "1h short" in trade.reason
+
+
+def test_soft_hold_failures_suggest_close_without_latching_exit():
+    trade, decision, _ = new_trade("short")
+    risk = abs(trade.plan.entry - trade.plan.stop)
+    decision.price = trade.plan.entry + 0.6 * risk
+    decision.metrics["trend_4h"] = "long"
+    decision.metrics["vwap"] = decision.price - 1
+    decision.metrics["funding_rate_pct"] = -0.05
+    evaluate_exit(trade, decision, [], NOW + 10, SignalsCfg())
+    assert trade.state == "HOLD_SHORT"
+    assert trade.suggestion == "CONSIDER_CLOSE"
+    assert trade.hold_confidence < 70
+    assert any(item.label == "4h bias" and not item.passed for item in trade.checks)
+    assert any(
+        item.label == "Drawdown contained" and not item.passed for item in trade.checks
+    )
+    evaluate_exit(trade, decision, [], NOW + 15, SignalsCfg())
+    assert trade.state == "HOLD_SHORT"
+    assert trade.suggestion == "CONSIDER_CLOSE"
 
 
 def test_trailing_stop_never_widens():

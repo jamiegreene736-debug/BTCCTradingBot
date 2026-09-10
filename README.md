@@ -99,10 +99,16 @@ extra collateral, not the exchange's exact liquidation price or a guarantee.
   orders; it only tracks size, mark, unrealized P&L, and hold/exit alerts.
   A vanished position closes that live track automatically.
 - Original stop, target, risk and holding limit are frozen when recorded.
-- Exit alerts cover stop/target touches, opposite completed 1h structure, failure
-  to make 0.25R progress within four hours, and maximum age. After 1R the stop
-  can advance to cover estimated costs; a trailing stop can advance after 1.5R
-  and never widen. Stop changes are suggestions to apply manually.
+- Tracked cards show a live hold/close suggestion, a hold-confidence checklist
+  score (not a measured win rate), and a fixed 12-gate close-out list: fresh
+  data, stop, target, hold time, drawdown, room to the working stop, liquidation
+  buffer, 1h structure, 4h bias, stale progress, session VWAP, and funding
+  carry. Hard EXIT alerts still latch on stop/target touches, opposite completed
+  1h structure, failure to make 0.25R progress within four hours, and maximum
+  age. Soft failures drop hold confidence and can switch the live suggestion to
+  CONSIDER CLOSE without latching an exit. After 1R the stop can advance to
+  cover estimated costs; a trailing stop can advance after 1.5R and never widen.
+  Stop changes are suggestions to apply manually.
 - Exit alerts remain latched until you record closure. They do not reverse into
   an opposite entry or assume that an exchange order filled.
 - **Record closure** ends tracking only. Estimated net results use the recorded

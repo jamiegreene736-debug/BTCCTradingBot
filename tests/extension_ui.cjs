@@ -23,7 +23,7 @@ async function main() {
       window.listeners = [];
       window.savedLayout = {};
       window.chrome = { runtime: {
-        getManifest: () => ({ version: '1.4.1' }),
+        getManifest: () => ({ version: '1.4.2' }),
         sendMessage: async message => {
           window.messages.push(message);
           if (['save-planning', 'track-entry', 'close-track'].includes(message.type)) return { ok: true };
@@ -55,7 +55,7 @@ async function main() {
     });
     await page.addStyleTag({ path: path.join(root, 'content.css') });
     await page.addScriptTag({ path: path.join(root, 'content.js') });
-    assert.equal(await page.locator('#bis-panel').getAttribute('data-bis-version'), '1.4.1');
+    assert.equal(await page.locator('#bis-panel').getAttribute('data-bis-version'), '1.4.2');
     assert.equal(await page.locator('#bis-panel').evaluate(el => el.textContent.includes('OLD IMMOVABLE PANEL')), false);
     assert.match(await page.locator('#bis-status').textContent(), /Connecting/);
     await page.evaluate(() => {
@@ -106,16 +106,30 @@ async function main() {
       window.testPayload.trades = [{
         id: 'exchange:HYPE1', symbol: 'HYPEUSDT', kind: 'exchange', opened_at: now - 120,
         plan: { side: 'short', entry: 80.37, stop: 81.6, target: 78, hold_hours: 24, quantity: 36.59 },
-        current_stop: 81.6, state: 'HOLD_SHORT', reason: 'Imported live Bitunix position',
+        current_stop: 81.6, state: 'HOLD_SHORT', suggestion: 'HOLD_SHORT',
+        reason: 'Live: 80.21 · +0.12R · 1h short · 23.9h left',
+        hold_confidence: 83, checked_at: now - 5,
         mark_price: 80.574, unrealized_pnl: -7.318, exchange_position_id: 'HYPE1',
+        checks: [
+          { label: 'Fresh market data', passed: true, detail: 'Live suggestion needs a fresh market snapshot', group: 'risk' },
+          { label: 'Stop not reached', passed: true, detail: 'Stop still intact', group: 'risk' },
+          { label: '1h structure', passed: true, detail: 'Completed 1h structure is short', group: 'structure' },
+          { label: '4h bias', passed: false, detail: '4h EMA bias is mixed', group: 'structure' },
+        ],
       }];
       window.testPayload.positions = { connected: true, imported: 1, error: null };
       window.listeners[0]({ type: 'signals-update', payload: window.testPayload });
     });
     assert.match(await page.locator('#bis-status').textContent(), /1 live position/);
-    assert.match(await page.locator('#bis-trades').textContent(), /LIVE/);
+    assert.match(await page.locator('#bis-trades').textContent(), /LIVE SUGGESTION/);
+    assert.match(await page.locator('#bis-trades').textContent(), /HOLD SHORT/);
+    assert.match(await page.locator('#bis-trades').textContent(), /Hold confidence/);
+    assert.match(await page.locator('#bis-trades').textContent(), /83%/);
     assert.match(await page.locator('#bis-trades').textContent(), /HYPEUSDT/);
     assert.match(await page.locator('#bis-trades').textContent(), /Unrealized/);
+    await page.locator('#bis-trades summary').click();
+    assert.match(await page.locator('#bis-trades').textContent(), /Hold \/ close checks/);
+    assert.match(await page.locator('#bis-trades').textContent(), /4h EMA bias is mixed/);
     await page.locator('[data-action="paper"]').click();
     assert.match(await page.locator('.bis-modal').textContent(), /No order is submitted/);
     await page.locator('.bis-modal [type="submit"]').click();
@@ -203,13 +217,13 @@ async function main() {
     await popup.setContent(fs.readFileSync(path.join(root, 'popup.html'), 'utf8').replace(/<script[^>]*><\/script>/g, ''));
     await popup.evaluate(() => {
       window.chrome = { runtime: {
-        getManifest: () => ({ version: '1.4.1' }),
+        getManifest: () => ({ version: '1.4.2' }),
         sendMessage: async () => ({ payload: { error: 'Cannot reach the dashboard.' } }),
       } };
     });
     await popup.addScriptTag({ path: path.join(root, 'popup.js') });
     assert.match(await popup.locator('#status').textContent(), /Cannot reach/);
-    assert.equal(await popup.locator('#version').textContent(), 'Version 1.4.1');
+    assert.equal(await popup.locator('#version').textContent(), 'Version 1.4.2');
     const stalled = await browser.newPage();
     stalled.on('pageerror', error => errors.push(error.message));
     await stalled.clock.install();

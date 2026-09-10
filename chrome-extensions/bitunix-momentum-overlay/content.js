@@ -15,7 +15,7 @@
   const price = value => Number.isFinite(value) ? value.toLocaleString('en-US', { maximumFractionDigits: value < 1 ? 8 : value < 100 ? 5 : 2 }) : '—';
   const fixed = (value, digits = 2) => Number.isFinite(value) ? value.toFixed(digits) : '—';
   const label = value => String(value || 'WAIT').replaceAll('_', ' ');
-  const tone = state => state?.startsWith('EXIT') ? 'exit' : state?.includes('LONG') ? 'long' : state?.includes('SHORT') ? 'short' : 'wait';
+  const tone = state => state?.startsWith('EXIT') || state?.startsWith('CLOSE') || state === 'CONSIDER_CLOSE' ? 'exit' : state?.includes('LONG') ? 'long' : state?.includes('SHORT') ? 'short' : 'wait';
   const ago = timestamp => timestamp ? Math.max(0, Math.floor(Date.now() / 1000 - timestamp)) + 's ago' : 'Waiting for data';
   const clock = timestamp => Number.isFinite(timestamp) && timestamp > 0
     ? new Date(timestamp * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' })
@@ -155,6 +155,7 @@
       return;
     }
     const checksOpen = host.querySelector('#bis-card details')?.open || false;
+    const openTradeChecks = new Set([...host.querySelectorAll('#bis-trades article[data-id] details')].filter(node => node.open).map(node => node.closest('article')?.dataset.id).filter(Boolean));
     const status = host.querySelector('#bis-status');
     if (!payload || (payload.error && !payload.symbols)) {
       status.className = 'bis-notice'; status.textContent = payload?.error || 'Connecting to your signal scanner…';
@@ -219,7 +220,23 @@
       || (payload.positions?.connected === false
         ? 'Add Bitunix API keys on the backend to import live positions. You can still record a fill.'
         : 'No open Bitunix positions. Record a fill to track a paper or manual trade.');
-    host.querySelector('#bis-trades').innerHTML = `<h3>Tracked trades <span>${payload.trades.length}</span></h3>${payload.trades.length ? payload.trades.map(t => payload.error && !t.state.startsWith('EXIT_') ? { ...t, state: 'REVIEW', reason: 'Connection unavailable. Check Bitunix; this is the last recorded plan.' } : t).map(t => `<article class="bis-trade ${tone(t.state)}"><div class="bis-row"><b>${esc(t.symbol)} · ${esc(t.plan.side.toUpperCase())}</b><small>${kindLabel(t.kind)}</small></div><strong class="bis-trade-state">${esc(label(t.state))}</strong><p>${esc(t.reason)}</p><div class="bis-meta">Entry ${price(t.plan.entry)}${Number.isFinite(t.mark_price) ? ' · Mark ' + price(t.mark_price) : ''} · Stop ${price(t.current_stop)} · Target ${price(t.plan.target)}${Number.isFinite(t.unrealized_pnl) ? '<br>Unrealized ' + pnlText(t.unrealized_pnl) : ''}<br>Held ${fixed((Date.now() / 1000 - t.opened_at) / 3600, 1)}h / ${t.plan.hold_hours}h max</div><button data-action="close" data-id="${esc(t.id)}">Record closure</button></article>`).join('') : `<p class="bis-empty">${esc(tradesEmpty)}</p>`}`;
+    function tradeArticle(raw) {
+      const t = payload.error && !raw.state.startsWith('EXIT_')
+        ? { ...raw, state: 'REVIEW', suggestion: 'REVIEW', reason: 'Connection unavailable. Check Bitunix; this is the last recorded plan.', hold_confidence: null }
+        : raw;
+      const suggestion = t.suggestion || t.state;
+      const holdChecks = Array.isArray(t.checks) ? t.checks : [];
+      const holdPass = holdChecks.filter(item => item.passed).length;
+      const conf = Number.isFinite(t.hold_confidence) ? t.hold_confidence : (holdChecks.length ? Math.round(100 * holdPass / holdChecks.length) : null);
+      const groups = [['risk', 'Risk'], ['structure', 'Structure'], ['tape', 'Tape'], ['cost', 'Cost']].map(([key, title]) => {
+        const items = holdChecks.filter(item => (item.group || 'risk') === key);
+        if (!items.length) return '';
+        const pass = items.filter(item => item.passed).length;
+        return `<li class="bis-check-group">${esc(title)} ${pass}/${items.length}</li>` + items.map(item => `<li class="${item.passed ? 'pass' : 'fail'}"><span>${item.passed ? '✓' : '○'}</span><div><b>${esc(item.label)}</b><small>${esc(item.detail)}</small></div></li>`).join('');
+      }).join('');
+      return `<article class="bis-trade ${tone(suggestion)}" data-id="${esc(t.id)}"><div class="bis-row"><b>${esc(t.symbol)} · ${esc(t.plan.side.toUpperCase())}</b><small>${kindLabel(t.kind)}</small></div><small class="bis-live">LIVE SUGGESTION</small><strong class="bis-trade-state" aria-live="polite">${esc(label(suggestion))}</strong>${conf == null ? '' : `<div class="bis-confidence"><small>Hold confidence</small><b>${conf}%</b><div class="bis-confidence-bar" role="meter" aria-label="Hold confidence" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${conf}"><i style="width:${conf}%"></i></div><small>Checklist score from the close-out gates. Not a measured win rate.</small></div>`}<p>${esc(t.reason)}</p><div class="bis-meta">Entry ${price(t.plan.entry)}${Number.isFinite(t.mark_price) ? ' · Mark ' + price(t.mark_price) : ''} · Stop ${price(t.current_stop)} · Target ${price(t.plan.target)}${Number.isFinite(t.unrealized_pnl) ? '<br>Unrealized ' + pnlText(t.unrealized_pnl) : ''}<br>Held ${fixed((Date.now() / 1000 - t.opened_at) / 3600, 1)}h / ${t.plan.hold_hours}h max${t.checked_at ? `<br>Checked ${esc(ago(t.checked_at))}` : ''}</div>${holdChecks.length ? `<details${openTradeChecks.has(t.id) ? ' open' : ''}><summary>Hold / close checks · ${holdPass}/${holdChecks.length}</summary><p class="bis-empty">Same 12 gates on every open trade. Failures are reasons to close or review, not exchange orders.</p><ul class="bis-checks">${groups}</ul></details>` : ''}<button data-action="close" data-id="${esc(t.id)}">Record closure</button></article>`;
+    }
+    host.querySelector('#bis-trades').innerHTML = `<h3>Tracked trades <span>${payload.trades.length}</span></h3>${payload.trades.length ? payload.trades.map(tradeArticle).join('') : `<p class="bis-empty">${esc(tradesEmpty)}</p>`}`;
     host.querySelector('#bis-history').innerHTML = payload.history.slice(0, 30).map(event => `<div class="bis-history-row"><div><b>${esc(event.symbol)}</b> · ${esc(label(event.state))}${event.setup ? ' · ' + esc(event.setup) : ''}<small>${esc(event.reason)}</small></div><time datetime="${esc(event.time ? new Date(event.time * 1000).toISOString() : '')}">${esc(clock(event.time))}<small>${esc(ago(event.time))}</small></time></div>`).join('') || '<p class="bis-empty">WATCH and ENTER alerts appear here with timestamps.</p>';
     host.querySelector('#bis-closed').innerHTML = payload.closed_trades.slice(0, 10).map(t => `<div class="bis-history-row"><div><b>${esc(t.symbol)}</b> · ${esc(t.kind)}<small>Recorded exit ${price(t.exit_price)} · estimated net</small></div><b>${money(t.estimated_net_pnl)}</b></div>`).join('') || '<p class="bis-empty">No recorded closures. Signal alerts are not completed trades.</p>';
     if (host.querySelector('#bis-card details')) host.querySelector('#bis-card details').open = checksOpen;

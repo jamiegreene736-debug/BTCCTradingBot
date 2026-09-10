@@ -51,6 +51,13 @@ These changes increase the number of valid 12/24h candidates. They do not
 create a measured edge. Forward paper observation is still required before
 treating signals as profitable.
 
+## Live hold suggestion
+
+Open tracked trades now carry a live hold/close suggestion, a hold-confidence
+checklist score, and a fixed 12-gate close-out list. Hard EXIT rules are
+unchanged and still latch. Soft failures only change the suggestion to
+CONSIDER CLOSE. The score is a checklist percentage, not a measured win rate.
+
 ## Signal queue, timestamps and handoff
 
 The snapshot now includes a ranked `queue` of up to five markets, `state_since`

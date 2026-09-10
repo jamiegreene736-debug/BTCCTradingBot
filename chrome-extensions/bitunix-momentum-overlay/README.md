@@ -1,4 +1,4 @@
-# Bitunix Intraday Signals — Chrome extension v1.4.1
+# Bitunix Intraday Signals — Chrome extension v1.4.2
 
 Long and short entry, hold, review and exit alerts for trades lasting up to
 12–24 hours. The backend computes the strategy; this extension displays it.
@@ -18,10 +18,10 @@ No extension action sends an exchange order or modifies a position.
 - **Pump Fade Radar** or version **0.3.16** means old files or an old tab are
   still loaded. Reload the extension from this folder in `chrome://extensions`,
   then reload the Bitunix tab. The popup must say **Bitunix Intraday Signals**,
-  version **1.4.1**. Unpacked extensions do not refresh themselves after a git pull.
+  version **1.4.2**. Unpacked extensions do not refresh themselves after a git pull.
   Click **Reload** on this extension in `chrome://extensions`, then reload the
   Bitunix tab. A Bitunix in-page refresh is not enough. The panel header must
-  show **v1.4.1**, a drag grip, and ⤢. Drag the title to move; drag the
+  show **v1.4.2**, a drag grip, and ⤢. Drag the title to move; drag the
   bottom-right corner to resize.
 - Use the complete extension folder from one release. Mixing the old manifest
   and panel with the new worker breaks message delivery and omits its alarms permission.
@@ -50,9 +50,11 @@ Stale data disables entry tracking. The Best setup selector ranks eligible marke
 
 Track paper trade simulates a record. Record my fill records a trade you already
 executed, within the currently confirmed plan. Neither button places an order.
-Tracked trades display HOLD, REVIEW or EXIT; stops and closures on Bitunix remain
-manual. Open futures positions are imported read-only from the backend when API
-keys are configured, labeled **LIVE**, and show mark and unrealized P&L.
+Tracked trades show a live hold/close suggestion (HOLD, CONSIDER CLOSE, CLOSE,
+or REVIEW), a hold-confidence checklist score, and the 12 close-out gates.
+Stops and closures on Bitunix remain manual. Open futures positions are imported
+read-only from the backend when API keys are configured, labeled **LIVE**, and
+show mark and unrealized P&L.
 Set protective stops on the exchange. Record closure only ends overlay tracking;
 a still-open Bitunix position is imported again on the next scan.
 

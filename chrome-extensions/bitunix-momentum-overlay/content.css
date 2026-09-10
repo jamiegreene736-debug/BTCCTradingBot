@@ -45,7 +45,16 @@
 #bis-panel .bis-empty{font-size:11px;color:#91a4bb;margin:10px 0}
 #bis-panel .bis-trade{border:1px solid #3e516a;border-radius:9px;padding:12px;margin:8px 0;background:#182534}
 #bis-panel .bis-trade.exit{border-color:#e9ac69;background:#352b24}#bis-panel .bis-trade p{font-size:11px}
-#bis-panel .bis-trade-state{display:block;margin-top:7px}#bis-panel .bis-trade button{margin-top:6px;font-size:11px}
+#bis-panel .bis-live{display:block;margin-top:8px;font-size:10px;letter-spacing:1.4px;color:#8fb7a8;font-weight:700}
+#bis-panel .bis-trade.exit .bis-live{color:#efd3ad}
+#bis-panel .bis-trade-state{display:block;margin-top:2px}#bis-panel .bis-trade button{margin-top:6px;font-size:11px}
+#bis-panel .bis-confidence{display:grid;grid-template-columns:1fr auto;gap:3px 8px;align-items:center;margin:8px 0}
+#bis-panel .bis-confidence b{font-size:16px}
+#bis-panel .bis-confidence-bar{grid-column:1/-1;height:6px;background:#243246;border-radius:99px;overflow:hidden}
+#bis-panel .bis-confidence-bar>i{display:block;height:100%;background:#55d8af}
+#bis-panel .bis-trade.exit .bis-confidence-bar>i{background:#e9ac69}
+#bis-panel .bis-confidence small:last-child{grid-column:1/-1}
+#bis-panel .bis-trade details{margin-top:10px}
 #bis-panel .bis-history-row{display:flex;gap:8px;justify-content:space-between;padding:10px 0;border-bottom:1px solid #263447;font-size:10px}
 #bis-panel time{font-size:10px;color:#8fa3ba;white-space:nowrap}#bis-panel footer{font-size:10px;color:#8298af;line-height:1.6;margin-top:16px}
 #bis-panel .bis-modal{position:absolute;inset:0;background:#0b111aeb;display:flex;align-items:center;justify-content:center;padding:18px;overflow-y:auto}
