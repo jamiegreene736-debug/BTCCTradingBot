@@ -179,6 +179,67 @@ class Check:
     label: str
     passed: bool
     detail: str
+    group: str = "market"
+
+
+CHECK_GROUPS: dict[str, str] = {
+    "Fresh market data": "market",
+    "Liquid market": "market",
+    "Spread": "market",
+    "Hold-window volatility": "market",
+    "4h bias / 1h structure": "market",
+    "BTC context": "market",
+    "Mark vs last": "market",
+    "Funding print window": "market",
+    "Completed 15m trigger": "setup",
+    "Volume confirmation": "setup",
+    "Entry zone": "plan",
+    "Stop outside normal noise": "plan",
+    "Structural target": "plan",
+    "Reward after costs": "plan",
+    "Funding drag": "plan",
+    "Order size": "plan",
+    "Execution depth": "plan",
+    "Leverage buffer": "plan",
+    "Tracked exposure": "portfolio",
+}
+CHECKLIST_LABELS: tuple[str, ...] = tuple(CHECK_GROUPS)
+PLAN_LABELS: tuple[str, ...] = tuple(
+    label for label, group in CHECK_GROUPS.items() if group == "plan"
+)
+WAITING_ALIGNMENT = "Waiting for 4h EMA bias and confirmed 1h structure"
+WAITING_SETUP = "Waiting for a completed 15m setup"
+
+
+def make_check(label: str, passed: bool, detail: str) -> Check:
+    return Check(label, passed, detail, CHECK_GROUPS[label])
+
+
+def waiting_check(label: str, detail: str) -> Check:
+    return make_check(label, False, detail)
+
+
+def order_checks(checks: list[Check]) -> list[Check]:
+    by_label = {item.label: item for item in checks}
+    return [
+        by_label[label]
+        if label in by_label
+        else waiting_check(label, "Waiting for evaluation")
+        for label in CHECKLIST_LABELS
+    ]
+
+
+def blank_checklist(detail: str) -> list[Check]:
+    return order_checks([waiting_check(label, detail) for label in CHECKLIST_LABELS])
+
+
+def upsert_check(checks: list[Check], label: str, passed: bool, detail: str) -> None:
+    replacement = make_check(label, passed, detail)
+    for index, item in enumerate(checks):
+        if item.label == label:
+            checks[index] = replacement
+            return
+    checks.append(replacement)
 
 
 @dataclass
@@ -414,18 +475,25 @@ def build_plan(
         (anchor - sign * 0.15 * atr_value, anchor + sign * 0.2 * atr_value)
     )
     checks = [
-        Check(
+        make_check(
             "Entry zone", low <= entry <= high, "Wait for the entry zone; do not chase"
         ),
-        Check(
+        make_check(
             "Stop outside normal noise",
             stop_distance >= 0.75 * atr_value,
             "Structural stop must allow at least 0.75 ATR",
         ),
     ]
     if stop_distance <= 0:
-        return None, checks + [
-            Check("Invalidation", False, "Price has passed the setup's stop")
+        blocked = "Price has passed the setup's stop"
+        return None, [
+            checks[0],
+            make_check("Stop outside normal noise", False, blocked),
+            *[
+                waiting_check(label, blocked)
+                for label in PLAN_LABELS
+                if label not in ("Entry zone", "Stop outside normal noise")
+            ],
         ]
     levels: list[float] = []
     for bars in (hourly[-96:], four_hour[-96:]):
@@ -457,12 +525,19 @@ def build_plan(
         cfg,
     )
     if not targets:
+        blocked = "No confirmed target that clears 2R inside the ≤24h travel budget"
         return None, checks + [
-            Check(
-                "Structural target",
-                False,
-                "No confirmed target that clears 2R inside the ≤24h travel budget",
-            )
+            make_check("Structural target", False, blocked),
+            *[
+                waiting_check(label, blocked)
+                for label in PLAN_LABELS
+                if label
+                not in (
+                    "Entry zone",
+                    "Stop outside normal noise",
+                    "Structural target",
+                )
+            ],
         ]
     notional = min(
         settings.planning_equity * settings.risk_pct / 100 / risk_fraction,
@@ -508,28 +583,33 @@ def build_plan(
         )
     checks.extend(
         [
-            Check(
+            make_check(
+                "Structural target",
+                True,
+                "Confirmed target clears 2R inside the ≤24h travel budget",
+            ),
+            make_check(
                 "Reward after costs",
                 ratio >= cfg.min_reward_risk,
                 f"{ratio:.2f}R net; need {cfg.min_reward_risk:g}R",
             ),
-            Check(
+            make_check(
                 "Funding drag",
                 funding_pct <= cfg.max_funding_cost_pct,
                 f"{funding_pct:.3f}% projected funding over the hold; max {cfg.max_funding_cost_pct:g}%",
             ),
-            Check(
+            make_check(
                 "Order size",
                 qty >= market.min_quantity and qty > 0,
                 "Quantity must meet the exchange minimum",
             ),
-            Check(
+            make_check(
                 "Execution depth",
                 min(market.bid_depth_usdt, market.ask_depth_usdt)
                 >= notional * cfg.min_depth_ratio,
                 f"Both sides need at least {cfg.min_depth_ratio:g} times the planned notional",
             ),
-            Check(
+            make_check(
                 "Leverage buffer",
                 tier is not None and settings.leverage <= max_leverage,
                 leverage_detail,
@@ -593,35 +673,60 @@ def evaluate_intraday(
         "open_interest": market.open_interest,
         "spread_pct": (market.ask - market.bid) / market.price * 100,
     }
+    basis_pct = abs(market.mark - market.price) / market.price * 100
+    funding_eta = market.next_funding - now
     result.checks = [
-        Check(
+        make_check(
             "Fresh market data",
             0 <= now - market.as_of <= cfg.max_data_age_seconds,
             "Market snapshot must be fresh",
         ),
-        Check(
+        make_check(
             "Liquid market",
             market.quote_volume >= cfg.min_quote_volume,
             "24h quote volume must pass the liquidity floor",
         ),
-        Check(
+        make_check(
             "Spread",
             0 < market.bid <= market.ask
             and (market.ask - market.bid) / market.price * 100 <= cfg.max_spread_pct,
             "Spread must fit the execution limit",
         ),
-        Check(
+        make_check(
             "Hold-window volatility",
             cfg.min_hourly_atr_pct <= hourly_atr_pct <= cfg.max_hourly_atr_pct,
             f"1h ATR {hourly_atr_pct:.2f}% must fit a 25-40x, ≤24h trade",
         ),
-        Check(
+        make_check(
             "4h bias / 1h structure",
             one == four_bias and one != "mixed",
             f"4h bias {four_bias}; 1h structure {one}",
         ),
+        make_check(
+            "Mark vs last",
+            basis_pct <= cfg.max_mark_basis_pct,
+            f"Mark is {basis_pct:.3f}% from last; max {cfg.max_mark_basis_pct:g}%",
+        ),
+        make_check(
+            "Funding print window",
+            funding_eta > cfg.funding_blackout_seconds,
+            f"Next funding in {max(0, funding_eta)}s; wait if ≤{cfg.funding_blackout_seconds}s",
+        ),
     ]
     if one != four_bias or one not in ("long", "short"):
+        result.checks.extend(
+            waiting_check(label, WAITING_ALIGNMENT)
+            for label in CHECKLIST_LABELS
+            if label
+            not in {item.label for item in result.checks}
+            and label != "Tracked exposure"
+        )
+        result.checks.append(
+            make_check(
+                "Tracked exposure", True, "No conflicting tracked exposure"
+            )
+        )
+        result.checks = order_checks(result.checks)
         result.reasons = [
             "Wait for 4h EMA bias and confirmed 1h structure in the same direction"
         ]
@@ -645,15 +750,23 @@ def evaluate_intraday(
             {"btc_trend": btc_trend, "relative_strength_pct": relative}
         )
         result.checks.append(
-            Check(
+            make_check(
                 "BTC context",
                 btc_trend == side and relative is not None and sign * relative >= 0,
                 "Require aligned BTC direction and matching 6h relative strength",
             )
         )
+    else:
+        result.checks.append(
+            make_check(
+                "BTC context",
+                True,
+                "BTC is the benchmark; no extra relative-strength gate",
+            )
+        )
     setup = find_setup(bars, hourly, side, atr_value, vwap, cfg)
     result.checks.append(
-        Check(
+        make_check(
             "Completed 15m trigger",
             setup is not None,
             "Waiting for a pullback reclaim, impulse continuation, or breakout retest",
@@ -664,7 +777,7 @@ def evaluate_intraday(
         result.signal_id = f"{market.symbol}:{side}:{setup.name}:{result.bar_time}"
         result.metrics["relative_volume"] = setup.relative_volume
         result.checks.append(
-            Check(
+            make_check(
                 "Volume confirmation",
                 setup.relative_volume >= cfg.relative_volume_min,
                 f"{setup.relative_volume:.2f} times baseline volume",
@@ -674,13 +787,22 @@ def evaluate_intraday(
             market, bars, hourly, four_hour, setup, side, now, settings, cfg
         )
         result.checks.extend(checks)
-        if result.plan and now >= result.plan.expires_at:
-            result.checks.append(
-                Check("Entry expiry", False, "Entry window has expired")
-            )
-        if result.plan and all(c.passed for c in result.checks):
-            result.state = f"ENTER_{side.upper()}"
-    result.reasons = [c.detail for c in result.checks if not c.passed] or [
+    else:
+        result.checks.extend(
+            waiting_check(label, WAITING_SETUP)
+            for label in ("Volume confirmation",) + PLAN_LABELS
+        )
+    result.checks.append(
+        make_check("Tracked exposure", True, "No conflicting tracked exposure")
+    )
+    result.checks = order_checks(result.checks)
+    if (
+        result.plan
+        and now < result.plan.expires_at
+        and all(item.passed for item in result.checks)
+    ):
+        result.state = f"ENTER_{side.upper()}"
+    result.reasons = [item.detail for item in result.checks if not item.passed] or [
         f"{result.setup} confirmed on a completed 15m candle"
     ]
     return result

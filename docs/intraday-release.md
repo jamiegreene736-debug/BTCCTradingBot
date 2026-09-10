@@ -6,6 +6,7 @@ exchange actions are disabled. Initial planning values are hypothetical.
 
 - [x] Symmetric pullback and breakout/retest engine; structural stops and targets.
 - [x] Completed-candle, volume, BTC, funding, spread, depth and maintenance-tier checks.
+- [x] Stable 19-gate checklist plus mark/last and funding-print window.
 - [x] Persistent manual/paper tracking; latched exits and non-widening trailing stops.
 - [x] New overlay, editable planning values, alert history and recorded closures.
 - [x] Regression suite, strict typing for new Python modules, worker/browser tests.

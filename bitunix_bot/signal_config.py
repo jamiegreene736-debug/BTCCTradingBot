@@ -72,6 +72,8 @@ class SignalsCfg:
     queue_size: int = 5
     handoff_seconds: int = 20
     expiry_warn_seconds: int = 45
+    max_mark_basis_pct: float = 0.25
+    funding_blackout_seconds: int = 180
 
     def validate(self) -> None:
         if type(self.enabled) is not bool:
@@ -85,6 +87,7 @@ class SignalsCfg:
             "queue_size",
             "handoff_seconds",
             "expiry_warn_seconds",
+            "funding_blackout_seconds",
         ):
             if type(getattr(self, name)) is not int:
                 raise ValueError(f"signals.{name} must be a whole number")

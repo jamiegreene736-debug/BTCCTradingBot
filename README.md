@@ -57,11 +57,16 @@ stored in local Chrome storage.
    isolated-margin band is 25-40x; leverage never narrows the stop.
 
 The scanner ranks the twelve most liquid eligible USDT perpetuals, plus BTC and
-any actively tracked symbols. All gates are visible in the signal checklist.
-There are no fabricated confidence percentages or calibrated win probabilities.
-Funding and open interest are context, not independent buy/sell triggers; missing
-open interest is labeled unavailable. Missing funding, depth, or maintenance
-tiers blocks a new entry. This release does not include a news/event feed.
+any actively tracked symbols. Every card uses the same 19-gate checklist
+(market, setup, plan, book). Later stages stay listed as waiting, so a WATCH
+does not jump from 4/5 to 5/7 when a 15m trigger appears. Two extra market
+gates — mark vs last, and a 3-minute funding-print blackout — use data the
+scanner already has. RSI, MACD, news, and open-interest trend are not added:
+they are either redundant with the 4h/1h/15m stack or need history we do not
+store. Funding and open interest remain context, not standalone buy/sell
+triggers; missing open interest is labeled unavailable. Missing funding, depth,
+or maintenance tiers blocks a new entry. This release does not include a
+news/event feed.
 
 ## Planning and tracking
 
