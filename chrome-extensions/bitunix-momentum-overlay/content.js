@@ -1,8 +1,13 @@
 (() => {
-  if (document.getElementById('bis-panel')) return;
+  window.__bisIntradayTeardown?.();
+  document.querySelectorAll('#bis-panel').forEach(node => node.remove());
   const host = document.createElement('aside');
   host.id = 'bis-panel';
   host.setAttribute('aria-label', 'Bitunix intraday signals');
+  const version = (() => {
+    try { return chrome.runtime.getManifest().version || ''; } catch { return ''; }
+  })();
+  if (version) host.dataset.bisVersion = version;
   document.documentElement.appendChild(host);
   let payload = null, selected = '', collapsed = false, formOpen = false, lastAlert = '', alertsInitialized = false;
   const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
@@ -33,7 +38,7 @@
       ]);
     } finally { clearTimeout(timer); }
   }
-  host.innerHTML = `<header title="Drag to move. Double-click or use Reset to restore the default position."><div><span class="bis-eyebrow">BITUNIX · INTRADAY</span><strong>Trade signals</strong></div><div class="bis-actions"><button data-action="reset-layout" title="Reset size and position" aria-label="Reset size and position">⤢</button><button data-action="settings" title="Connection settings" aria-label="Connection settings">⚙</button><button data-action="collapse" aria-label="Collapse panel">−</button></div></header><div id="bis-body"><div id="bis-status" role="status"></div><div id="bis-planning"></div><div id="bis-handoff" hidden></div><div id="bis-queue"></div><div id="bis-selection"></div><div id="bis-card"></div><div id="bis-trades"></div><details id="bis-history-wrap"><summary>Recent alerts</summary><div id="bis-history"></div></details><details><summary>Recorded closures</summary><div id="bis-closed"></div></details><footer>Alerts only · Live positions import read-only. Orders and stops stay on Bitunix.<br>Candidate rules under evaluation; no measured win probability.</footer></div><div id="bis-form"></div><div class="bis-resize" role="separator" aria-orientation="horizontal" aria-label="Resize panel" title="Drag to resize"></div>`;
+  host.innerHTML = `<header title="Drag the title or grip to move. Double-click or use Reset to restore the default position."><div class="bis-drag"><span class="bis-grip" aria-hidden="true"></span><div><span class="bis-eyebrow">BITUNIX · INTRADAY${version ? ' · v' + version : ''}</span><strong>Trade signals</strong></div></div><div class="bis-actions"><button data-action="reset-layout" title="Reset size and position" aria-label="Reset size and position">⤢</button><button data-action="settings" title="Connection settings" aria-label="Connection settings">⚙</button><button data-action="collapse" aria-label="Collapse panel">−</button></div></header><div id="bis-body"><div id="bis-status" role="status"></div><div id="bis-planning"></div><div id="bis-handoff" hidden></div><div id="bis-queue"></div><div id="bis-selection"></div><div id="bis-card"></div><div id="bis-trades"></div><details id="bis-history-wrap"><summary>Recent alerts</summary><div id="bis-history"></div></details><details><summary>Recorded closures</summary><div id="bis-closed"></div></details><footer>Alerts only · Live positions import read-only. Orders and stops stay on Bitunix.<br>Candidate rules under evaluation; no measured win probability.</footer></div><div id="bis-form"></div><div class="bis-resize" role="separator" aria-orientation="horizontal" aria-label="Resize panel" title="Drag the corner to resize"></div>`;
   const MIN_W = 280, MIN_H = 200, EDGE = 8;
   let layout = null;
   function box() {
@@ -75,26 +80,42 @@
     host.style.width = host.style.height = host.style.maxWidth = host.style.maxHeight = '';
     try { chrome.storage?.local?.remove('panelLayout'); } catch { /* default CSS position */ }
   }
+  const listeners = [];
+  const timers = [];
   function bindDrag(target, onMove) {
-    target.addEventListener('pointerdown', event => {
+    if (!target) return;
+    const onDown = event => {
       if (event.button && event.button !== 0) return;
-      if (event.target.closest('button, a, input, select, textarea, summary')) return;
+      const hit = event.target;
+      if (!(hit instanceof Node) || !target.contains(hit)) return;
+      if (hit.closest?.('button, a, input, select, textarea, summary')) return;
       if (formOpen) return;
+      event.preventDefault();
+      event.stopPropagation();
       const start = box();
       const pointer = { x: event.clientX, y: event.clientY };
       host.classList.add('bis-dragging');
-      target.setPointerCapture?.(event.pointerId);
-      const move = ev => onMove(start, ev.clientX - pointer.x, ev.clientY - pointer.y);
-      const up = () => {
+      try { target.setPointerCapture(event.pointerId); } catch { /* keep window listeners */ }
+      const move = ev => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        onMove(start, ev.clientX - pointer.x, ev.clientY - pointer.y);
+      };
+      const up = ev => {
+        ev.stopPropagation();
         host.classList.remove('bis-dragging');
-        window.removeEventListener('pointermove', move);
-        window.removeEventListener('pointerup', up);
+        window.removeEventListener('pointermove', move, true);
+        window.removeEventListener('pointerup', up, true);
+        window.removeEventListener('pointercancel', up, true);
         if (layout) persistLayout();
       };
-      window.addEventListener('pointermove', move);
-      window.addEventListener('pointerup', up);
-      event.preventDefault();
-    });
+      window.addEventListener('pointermove', move, true);
+      window.addEventListener('pointerup', up, true);
+      window.addEventListener('pointercancel', up, true);
+    };
+    // Window capture runs before Bitunix document listeners that stopPropagation.
+    window.addEventListener('pointerdown', onDown, true);
+    listeners.push(() => window.removeEventListener('pointerdown', onDown, true));
   }
   bindDrag(host.querySelector('header'), (start, dx, dy) => {
     applyLayout({ left: start.left + dx, top: start.top + dy, width: start.width, height: start.height });
@@ -105,7 +126,9 @@
   host.querySelector('header').addEventListener('dblclick', event => {
     if (!event.target.closest('button')) resetLayout();
   });
-  window.addEventListener('resize', () => { if (layout) applyLayout(layout, false); });
+  const onViewport = () => { if (layout) applyLayout(layout, false); };
+  window.addEventListener('resize', onViewport);
+  listeners.push(() => window.removeEventListener('resize', onViewport));
   try {
     const pending = chrome.storage?.local?.get?.('panelLayout');
     if (pending && typeof pending.then === 'function') {
@@ -280,7 +303,13 @@
       }
     });
   } catch { payload = { error: connectionError }; render(); }
-  setInterval(() => refresh(), 5000);
-  setInterval(() => { if (payload && !formOpen) render(); }, 1000);
+  timers.push(setInterval(() => refresh(), 5000));
+  timers.push(setInterval(() => { if (payload && !formOpen) render(); }, 1000));
+  window.__bisIntradayTeardown = () => {
+    timers.forEach(clearInterval);
+    listeners.forEach(unlisten => unlisten());
+    host.remove();
+    if (window.__bisIntradayTeardown) delete window.__bisIntradayTeardown;
+  };
   refresh();
 })();

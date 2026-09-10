@@ -23,6 +23,7 @@ async function main() {
       window.listeners = [];
       window.savedLayout = {};
       window.chrome = { runtime: {
+        getManifest: () => ({ version: '1.4.0' }),
         sendMessage: async message => {
           window.messages.push(message);
           if (['save-planning', 'track-entry', 'close-track'].includes(message.type)) return { ok: true };
@@ -42,8 +43,20 @@ async function main() {
       window.originalSend = chrome.runtime.sendMessage;
       chrome.runtime.sendMessage = () => new Promise(resolve => { window.releaseStartup = resolve; });
     });
+    await page.evaluate(() => {
+      const stale = document.createElement('aside');
+      stale.id = 'bis-panel';
+      stale.textContent = 'OLD IMMOVABLE PANEL';
+      document.documentElement.appendChild(stale);
+      document.addEventListener('pointerdown', event => {
+        event.stopPropagation();
+        event.preventDefault();
+      }, true);
+    });
     await page.addStyleTag({ path: path.join(root, 'content.css') });
     await page.addScriptTag({ path: path.join(root, 'content.js') });
+    assert.equal(await page.locator('#bis-panel').getAttribute('data-bis-version'), '1.4.0');
+    assert.equal(await page.locator('#bis-panel').evaluate(el => el.textContent.includes('OLD IMMOVABLE PANEL')), false);
     assert.match(await page.locator('#bis-status').textContent(), /Connecting/);
     await page.evaluate(() => {
       chrome.runtime.sendMessage = window.originalSend;
@@ -190,13 +203,13 @@ async function main() {
     await popup.setContent(fs.readFileSync(path.join(root, 'popup.html'), 'utf8').replace(/<script[^>]*><\/script>/g, ''));
     await popup.evaluate(() => {
       window.chrome = { runtime: {
-        getManifest: () => ({ version: '1.3.0' }),
+        getManifest: () => ({ version: '1.4.0' }),
         sendMessage: async () => ({ payload: { error: 'Cannot reach the dashboard.' } }),
       } };
     });
     await popup.addScriptTag({ path: path.join(root, 'popup.js') });
     assert.match(await popup.locator('#status').textContent(), /Cannot reach/);
-    assert.equal(await popup.locator('#version').textContent(), 'Version 1.3.0');
+    assert.equal(await popup.locator('#version').textContent(), 'Version 1.4.0');
     const stalled = await browser.newPage();
     stalled.on('pageerror', error => errors.push(error.message));
     await stalled.clock.install();
