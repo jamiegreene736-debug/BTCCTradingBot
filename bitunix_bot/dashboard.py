@@ -35,6 +35,7 @@ from .pnl import (
     position_side,
 )
 from .state import get as get_state
+from .signal_routes import register_signal_routes
 
 log = logging.getLogger(__name__)
 
@@ -48,6 +49,8 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
     unit tests), admin endpoints return 503.
     """
     app = Flask(__name__)
+    app.config["MAX_CONTENT_LENGTH"] = 16_384
+    register_signal_routes(app, getattr(bot, "signal_scanner", None))
     state = get_state()
     password = os.environ.get("DASHBOARD_PASSWORD", "")
     manual_close_after_seconds = max(0, int(cfg.trading.max_position_age_seconds or 0))
@@ -526,6 +529,8 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
             return None
         if not _check_auth():
             return _unauth()
+        if cfg.signals.enabled and request.method == "POST" and not request.path.startswith("/api/signals/"):
+            return jsonify({"error": "Exchange actions are disabled in alerts-only mode"}), 403
         return None
 
     # ------------------------------------------------------------------ routes
@@ -862,6 +867,10 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
         Note: these are confluence scores, not calibrated probabilities or
         financial advice. The extension is intentionally single-purpose now.
         """
+        if cfg.signals.enabled:
+            scanner = getattr(bot, "signal_scanner", None)
+            return jsonify(scanner.snapshot() if scanner else {"error": "Intraday scanner warming up"})
+
         def _overlay_stale(snapshot: dict[str, Any]) -> bool:
             if not snapshot:
                 return True

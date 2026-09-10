@@ -1,217 +1,81 @@
-// Service worker — owns all network I/O and the polling loop. Content scripts
-// ask for the latest scores via runtime messaging instead of fetching directly,
-// because:
-//   1. host_permissions on the manifest let the SW bypass page CORS
-//   2. one polling loop is shared across all open Bitunix tabs
-//   3. settings live here in chrome.storage and are read once at startup
-
-const NORMAL_POLL_INTERVAL_MS = 3000;
-const FAST_POLL_INTERVAL_MS = 1000;
-const FETCH_TIMEOUT_MS = 4000;
-
-let latest = null;          // most recent /api/momentum payload, or { error }
-let lastFetchAt = 0;
-let pollTimer = null;
-let currentPollIntervalMs = NORMAL_POLL_INTERVAL_MS;
-let fetchInFlight = null;
+// Authenticated requests stay in the service worker; no exchange trading routes.
+const POLL_MS = 5000;
+let latest = null, fetchedAt = 0, inFlight = null;
 let settings = { dashboardUrl: '', password: '' };
 
+function validDashboardUrl(raw) {
+  const url = new URL(raw);
+  if (url.protocol !== 'https:' || !url.hostname.endsWith('.up.railway.app') || url.username || url.password || url.search || url.hash || !['', '/'].includes(url.pathname)) {
+    throw new Error('Use your HTTPS Railway dashboard address, without a path.');
+  }
+  return url.origin;
+}
 async function loadSettings() {
-  const stored = await chrome.storage.sync.get(['dashboardUrl', 'password']);
-  settings.dashboardUrl = (stored.dashboardUrl || '').replace(/\/+$/, '');
-  settings.password = stored.password || '';
-}
-
-function basicAuthHeader(password) {
-  // Username is hardcoded "admin" by the bot's dashboard.
-  return 'Basic ' + btoa('admin:' + password);
-}
-
-function stageFromDecision(decision) {
-  const action = String(decision?.action || '').toLowerCase();
-  const setup = String(decision?.setup || '').toLowerCase();
-  const stage = String(decision?.setup_stage || decision?.setupStage || '').toLowerCase();
-  if (action === 'short' && setup === 'parabolic_pump_fade') return 'short';
-  if (stage === 'pump_watch') return 'watch';
-  if (stage === 'pump_building') return 'building';
-  return 'hunting';
-}
-
-function payloadNeedsFastPoll(payload) {
-  if (!payload || payload.error) return false;
-  const best = payload.best_candidate || payload.bestCandidate;
-  if (['short', 'watch', 'building'].includes(String(best?.stage || '').toLowerCase())) return true;
-  const symbols = payload.symbols || {};
-  return Object.values(symbols).some((row) => (
-    ['short', 'watch', 'building'].includes(stageFromDecision(row?.decision || row?.recommendation || row?.next_1h || row?.next1h))
-  ));
-}
-
-function desiredPollIntervalMs() {
-  return payloadNeedsFastPoll(latest) ? FAST_POLL_INTERVAL_MS : NORMAL_POLL_INTERVAL_MS;
-}
-
-function ensurePollInterval() {
-  const desired = desiredPollIntervalMs();
-  if (pollTimer && desired === currentPollIntervalMs) return;
-  if (pollTimer) clearInterval(pollTimer);
-  currentPollIntervalMs = desired;
-  pollTimer = setInterval(fetchOnce, currentPollIntervalMs);
-}
-
-async function doFetchOnce() {
-  if (!settings.dashboardUrl || !settings.password) {
-    latest = { error: 'not_configured', message: 'Open the extension settings and add your dashboard URL + password.' };
-    lastFetchAt = Date.now();
-    broadcast();
-    ensurePollInterval();
-    return;
+  const local = await chrome.storage.local.get(['dashboardUrl', 'password']);
+  const old = await chrome.storage.sync.get(['dashboardUrl', 'password']);
+  settings = { dashboardUrl: local.dashboardUrl || old.dashboardUrl || '', password: local.password || old.password || '' };
+  if (old.password || old.dashboardUrl) {
+    await chrome.storage.local.set(settings);
+    await chrome.storage.sync.remove(['dashboardUrl', 'password']);
   }
-  const url = settings.dashboardUrl + '/api/momentum';
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
-  try {
-    const resp = await fetch(url, {
-      method: 'GET',
-      headers: { 'Authorization': basicAuthHeader(settings.password) },
-      signal: ctrl.signal,
-      cache: 'no-store',
-    });
-    if (resp.status === 401) {
-      latest = { error: 'auth', message: 'Dashboard rejected the password (401).' };
-    } else if (resp.status === 503) {
-      latest = { error: 'disabled', message: 'Dashboard returned 503 — DASHBOARD_PASSWORD env var unset on Railway?' };
-    } else if (!resp.ok) {
-      latest = { error: 'http', message: `Dashboard returned HTTP ${resp.status}.` };
-    } else {
-      latest = await resp.json();
-    }
-  } catch (e) {
-    latest = { error: 'network', message: 'Could not reach dashboard: ' + (e?.message || String(e)) };
-  } finally {
-    clearTimeout(t);
-    lastFetchAt = Date.now();
-  }
-  // Push to any listening content scripts so the UI updates instantly.
-  broadcast();
-  ensurePollInterval();
 }
-
-async function fetchOnce() {
-  if (fetchInFlight) return fetchInFlight;
-  fetchInFlight = doFetchOnce().finally(() => {
-    fetchInFlight = null;
+let settingsReady = loadSettings();
+async function request(path, body) {
+  await settingsReady;
+  if (!settings.dashboardUrl || !settings.password) throw new Error('Open Settings and connect your dashboard.');
+  const origin = validDashboardUrl(settings.dashboardUrl);
+  const bytes = new TextEncoder().encode('admin:' + settings.password);
+  const response = await fetch(origin + path, {
+    method: body === undefined ? 'GET' : 'POST',
+    headers: { Authorization: 'Basic ' + btoa(String.fromCharCode(...bytes)), 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal: AbortSignal.timeout(8000), cache: 'no-store', redirect: 'error',
   });
-  return fetchInFlight;
+  const payload = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(payload.error || (response.status === 401 ? 'Dashboard password rejected.' : `Dashboard returned ${response.status}.`));
+  return payload;
 }
-
-async function postDashboardJson(path, body) {
-  if (!settings.dashboardUrl || !settings.password) {
-    return { ok: false, error: 'not_configured', message: 'Dashboard URL/password missing.' };
+async function refresh() {
+  if (inFlight) return inFlight;
+  inFlight = (async () => {
+    try {
+      const payload = await request('/api/signals');
+      if (payload.strategy !== 'intraday' || payload.mode !== 'alerts_only') throw new Error('Update the backend to the intraday signals release.');
+      latest = payload;
+    } catch (error) { latest = { ...(latest?.strategy === 'intraday' ? latest : {}), error: error.message || 'Dashboard unavailable' }; }
+    fetchedAt = Date.now();
+    const tabs = await chrome.tabs.query({ url: 'https://*.bitunix.com/*' });
+    await Promise.allSettled(tabs.map(tab => chrome.tabs.sendMessage(tab.id, { type: 'signals-update', payload: latest, fetchedAt })));
+    return { payload: latest, fetchedAt };
+  })().finally(() => { inFlight = null; });
+  return inFlight;
+}
+chrome.runtime.onMessage.addListener((message, sender, respond) => {
+  if (sender.id !== chrome.runtime.id) return false;
+  if (message.type === 'open-options') {
+    chrome.runtime.openOptionsPage(); respond({ ok: true }); return false;
   }
-  const url = settings.dashboardUrl + path;
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), FETCH_TIMEOUT_MS);
-  try {
-    const resp = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Authorization': basicAuthHeader(settings.password),
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body || {}),
-      signal: ctrl.signal,
-      cache: 'no-store',
-    });
-    let payload = {};
-    try { payload = await resp.json(); } catch {}
-    if (!resp.ok) {
-      return {
-        ok: false,
-        error: 'http',
-        message: payload?.error || payload?.message || `Dashboard returned HTTP ${resp.status}.`,
-        payload,
-      };
-    }
-    return { ok: true, payload, ...payload };
-  } catch (e) {
-    return { ok: false, error: 'network', message: e?.message || String(e) };
-  } finally {
-    clearTimeout(t);
+  if (message.type === 'request-latest' || message.type === 'force-refresh') {
+    const result = !latest || Date.now() - fetchedAt >= POLL_MS || message.type === 'force-refresh'
+      ? refresh() : Promise.resolve({ payload: latest, fetchedAt });
+    result.then(respond).catch(error => respond({ payload: { error: error.message } }));
+    return true;
   }
-}
-
-function broadcast() {
-  chrome.tabs.query({ url: 'https://*.bitunix.com/*' }, (tabs) => {
-    for (const tab of tabs) {
-      chrome.tabs.sendMessage(tab.id, {
-        type: 'momentum-update',
-        payload: latest,
-        fetchedAt: lastFetchAt,
-        pollMs: currentPollIntervalMs,
-      })
-        .catch(() => { /* tab may not have content script ready yet */ });
-    }
-  });
-}
-
-function startPolling() {
-  if (pollTimer) clearInterval(pollTimer);
-  pollTimer = null;
-  ensurePollInterval();
-  fetchOnce();
-}
-
-chrome.runtime.onInstalled.addListener(async () => {
-  await loadSettings();
-  startPolling();
+  const paths = { 'save-planning': '/api/signals/settings', 'track-entry': '/api/signals/track', 'close-track': '/api/signals/close' };
+  if (Object.hasOwn(paths, message.type)) {
+    request(paths[message.type], message.body).then(async result => {
+      await refresh(); respond(result);
+    }).catch(error => respond({ ok: false, error: error.message }));
+    return true;
+  }
+  return false;
 });
-chrome.runtime.onStartup.addListener(async () => {
-  await loadSettings();
-  startPolling();
-});
-
-// Settings changed → reload immediately so the user sees feedback.
-chrome.storage.onChanged.addListener(async (changes, area) => {
-  if (area !== 'sync') return;
-  await loadSettings();
-  fetchOnce();
-});
-
-// Content scripts ask for the latest snapshot when they mount.
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  if (msg?.type === 'request-latest') {
-    const stale = !latest || (Date.now() - lastFetchAt) > Math.max(1500, desiredPollIntervalMs() * 1.25);
-    if (stale) {
-      fetchOnce().then(() => sendResponse({ payload: latest, fetchedAt: lastFetchAt, pollMs: currentPollIntervalMs }));
-      return true;
-    }
-    sendResponse({ payload: latest, fetchedAt: lastFetchAt, pollMs: currentPollIntervalMs });
-    return false;
-  }
-  if (msg?.type === 'force-refresh') {
-    fetchOnce().then(() => sendResponse({ payload: latest, fetchedAt: lastFetchAt, pollMs: currentPollIntervalMs }));
-    return true; // async response
-  }
-  if (msg?.type === 'close-symbol') {
-    postDashboardJson('/api/admin/close-symbol', {
-      symbol: msg.symbol,
-      positionId: msg.positionId || null,
-      source: 'bitunix-momentum-extension',
-    }).then((resp) => {
-      fetchOnce().finally(() => sendResponse(resp));
-    });
-    return true; // async response
-  }
-  if (msg?.type === 'open-options') {
-    // chrome.runtime.openOptionsPage isn't available from content scripts in
-    // MV3 — has to be called from an extension context like this SW.
-    chrome.runtime.openOptionsPage?.();
-    sendResponse({ ok: true });
-    return false;
+chrome.storage.onChanged.addListener((changes, area) => {
+  if (area === 'local' && (changes.dashboardUrl || changes.password)) {
+    settingsReady = loadSettings(); latest = null; settingsReady.then(refresh);
   }
 });
-
-// Cold-start path for when the SW is woken by a message before
-// onStartup/onInstalled have fired this session.
-loadSettings().then(startPolling);
+// Alarms survive MV3 worker suspension; open tabs also refresh every five seconds.
+chrome.alarms.create('intraday-refresh', { periodInMinutes: 0.5 });
+chrome.alarms.onAlarm.addListener(alarm => { if (alarm.name === 'intraday-refresh') refresh(); });
+settingsReady.then(refresh);

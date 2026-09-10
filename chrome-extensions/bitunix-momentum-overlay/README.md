@@ -1,48 +1,32 @@
-# Bitunix Pump Fade Overlay
+# Bitunix Intraday Signals — Chrome extension v1.0.0
 
-Chrome extension for the Bitunix pump-fade scanner. It renders a floating
-overlay on `bitunix.com` and reads `/api/momentum` from the private Railway
-dashboard.
+Long and short entry, hold, review and exit alerts for trades lasting up to
+12–24 hours. The backend computes the strategy; this extension displays it.
+No extension action sends an exchange order or modifies a position.
 
-## Load Locally
+1. Deploy/start the matching backend with `signals.enabled: true`.
+2. Open `chrome://extensions`, enable Developer mode, and Load unpacked this folder.
+3. Open Settings and save the HTTPS Railway dashboard URL and dashboard password.
+4. Reload the Bitunix tab. For an existing installation, reload the extension first.
+5. Edit the displayed planning equity, risk, leverage and maximum holding time.
 
-1. Open `chrome://extensions`.
-2. Enable Developer mode.
-3. Click `Load unpacked`.
-4. Select this folder:
-   `chrome-extensions/bitunix-momentum-overlay`.
-5. Click the extension icon and open Settings.
-6. Add the Railway dashboard URL and dashboard password.
+The card shows WAIT, WATCH LONG/SHORT or ENTER LONG/SHORT, an entry zone,
+structural stop, profit target, estimated net reward/risk, planning size and
+estimated leverage ceiling. Open the checklist for the underlying evidence.
+Stale data disables entry tracking. The Best setup selector ranks eligible markets.
 
-## What It Shows
+Track paper trade simulates a record. Record my fill records a trade you already
+executed, within the currently confirmed plan. Neither button places an order.
+Tracked trades display HOLD, REVIEW or EXIT; stops and closures on Bitunix remain
+manual. Set protective stops on the exchange. Record closure only ends tracking.
 
-- `PUMP BUILDING`: earliest pump-ignition alert. The overlay auto-selects it,
-  flashes yellow, and flashes the browser tab title before the selloff confirms.
-- `PUMP WATCH`: pump is active now; the overlay auto-selects the coin, flashes
-  bright yellow, and flashes the browser tab title so you can get ready before
-  the fade entry confirms.
-- `FADE SHORT`: the backend has a confirmed pump-fade short setup.
-- `Fade ETA`: rough timing window (`NOW`, `10-30s`, `30-90s`, etc.) estimated
-  from pump speed, range position, 1m rejection, CVD/tape, and whether buyers
-  are still in control. This is a timing aid, not a guaranteed countdown.
-- `Suggested short entry trigger`: preview price to watch during `PUMP BUILDING`
-  and `PUMP WATCH`. It includes preview take-profit and stop-loss prices, but it
-  is not an entry until the rejection confirms.
-- `Suggested short entry`: confirmed short entry price. The card also shows
-  `Take profit / suggested exit`, `Stop loss`, target move, and stop distance.
-- `Signal history - no P&L`: local overlay history of the last five
-  `PUMP BUILDING`, `PUMP WATCH`, and `FADE SHORT` alerts, with the time, symbol,
-  score, ETA, price, and the suggested entry/TP/stop levels. It intentionally
-  does not show estimated P&L because these are alerts, not closed trades.
-- Per-symbol closed trade history and closed P&L.
-- Open-position display. Timed auto-close is currently disabled.
-- `AUTO` mode ranks all scanned coins, keeps the strongest pump-fade candidate
-  selected, and highlights the chosen coin in bright yellow. `PUMP BUILDING`,
-  `PUMP WATCH`, and `FADE SHORT` alerts switch immediately in AUTO mode so the
-  panel does not wait until rejection confirmation.
-- The extension polls every 3s normally and speeds up to about 1s while a
-  building, watch, or short-ready candidate exists. The backend 1m overlay
-  cache refreshes every bot tick so active pumps do not sit on stale data.
+Alert history does not claim trading P&L. Recorded closures show estimated net
+results with paper/user-recorded labels; fees and funding are not actual settlement.
+The extension does not import unrecorded positions from your exchange account.
 
-The extension does not compute signals locally. The backend is the source of
-truth; this folder only renders the overlay and relays admin actions.
+Connection credentials use local Chrome storage. Older sync settings migrate
+automatically. The service worker allows only HTTPS Railway origins, refuses
+redirects, and has no legacy close-symbol action. No script gets the dashboard
+password through page messages.
+
+See the root README for exact rules, costs, persistence, limitations and tests.

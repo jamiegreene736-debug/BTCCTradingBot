@@ -9,6 +9,8 @@ from typing import Any
 import yaml
 from dotenv import load_dotenv
 
+from .signal_config import SignalsCfg
+
 
 @dataclass
 class Credentials:
@@ -341,10 +343,11 @@ class Config:
     loop: LoopCfg
     logging: LoggingCfg
     raw: dict[str, Any] = field(default_factory=dict)
+    signals: SignalsCfg = field(default_factory=SignalsCfg)
 
     @property
     def is_live(self) -> bool:
-        return self.mode == "live"
+        return self.mode == "live" and not self.signals.enabled
 
 
 def load(path: str | Path = "config.yaml", env_path: str | Path = ".env") -> Config:
@@ -353,8 +356,8 @@ def load(path: str | Path = "config.yaml", env_path: str | Path = ".env") -> Con
         raw = yaml.safe_load(f)
 
     creds = Credentials(
-        api_key=os.environ["BITUNIX_API_KEY"],
-        secret_key=os.environ["BITUNIX_SECRET_KEY"],
+        api_key=os.environ.get("BITUNIX_API_KEY", ""),
+        secret_key=os.environ.get("BITUNIX_SECRET_KEY", ""),
     )
 
     # Backwards-compat: accept singular `symbol` and lift to `symbols: [..]`.
@@ -378,6 +381,7 @@ def load(path: str | Path = "config.yaml", env_path: str | Path = ".env") -> Con
         loop=LoopCfg(**raw["loop"]),
         logging=LoggingCfg(**raw["logging"]),
         raw=raw,
+        signals=SignalsCfg(**raw.get("signals", {})),
     )
     _validate(cfg)
     return cfg
@@ -386,6 +390,9 @@ def load(path: str | Path = "config.yaml", env_path: str | Path = ".env") -> Con
 def _validate(cfg: Config) -> None:
     """Catch config sins early — fail loudly at startup, not mid-trade."""
     errs: list[str] = []
+    cfg.signals.validate()
+    if cfg.is_live and not (cfg.creds.api_key and cfg.creds.secret_key):
+        errs.append("Live execution requires BITUNIX_API_KEY and BITUNIX_SECRET_KEY")
     t, r, s, l = cfg.trading, cfg.risk, cfg.strategy, cfg.loop
     if cfg.mode not in ("paper", "live"):
         errs.append(f"mode must be 'paper' or 'live', got {cfg.mode!r}")
