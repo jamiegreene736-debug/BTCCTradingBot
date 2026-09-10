@@ -18,9 +18,12 @@ from bitunix_bot.intraday import (
     Market,
     Tier,
     closed_candles,
+    ema_bias,
     evaluate_intraday,
     find_setup,
     funding_cost,
+    select_targets,
+    trend,
 )
 from bitunix_bot.signal_config import SignalsCfg, SignalSettings
 from bitunix_bot.signal_scanner import SignalScanner
@@ -112,8 +115,8 @@ def ready_decision(side="long"):
     for i in range(96):
         frames["15m"][i] = replace(
             frames["15m"][i],
-            high=110 if side == "long" else frames["15m"][i].high,
-            low=90 if side == "short" else frames["15m"][i].low,
+            high=102.4 if side == "long" else frames["15m"][i].high,
+            low=97.6 if side == "short" else frames["15m"][i].low,
         )
     decision = evaluate_intraday(
         market, frames, None, SignalSettings(), SignalsCfg(), NOW
@@ -248,6 +251,93 @@ def test_higher_leverage_does_not_tighten_stop():
     assert low.state == "ENTER_LONG"
     assert high.state == "WATCH_LONG"
     assert high.plan.max_leverage < 40
+
+
+def test_select_targets_skips_too_close_and_beyond_hold_budget():
+    targets = select_targets(
+        [100.2, 102.5, 140.0],
+        100.0,
+        "long",
+        0.8,
+        0.18,
+        0.5,
+        1.2,
+        SignalsCfg(),
+    )
+    assert targets == [102.5]
+
+
+def test_4h_ema_bias_can_enter_without_confirmed_4h_swings():
+    _, market, frames = ready_decision()
+    base = frames["4h"][0].close
+    frames["4h"] = [
+        replace(
+            c,
+            open=base + i * 0.15 - 0.04,
+            close=base + i * 0.15,
+            high=base + i * 0.15 + 0.02,
+            low=base + i * 0.15 - 0.06,
+        )
+        for i, c in enumerate(frames["4h"])
+    ]
+    assert trend(frames["4h"]) == "mixed"
+    assert ema_bias(frames["4h"]) == "long"
+    decision = evaluate_intraday(
+        market, frames, None, SignalSettings(), SignalsCfg(), NOW
+    )
+    assert decision.state == "ENTER_LONG", decision.reasons
+    assert decision.metrics["trend_4h"] == "long"
+    assert decision.metrics["trend_4h_structure"] == "mixed"
+
+
+def test_opposite_4h_bias_blocks_entry():
+    _, market, frames = ready_decision()
+    frames["4h"] = [
+        replace(
+            c,
+            open=c.close + 0.05,
+            high=c.close + 0.06,
+            low=c.close - 0.02,
+            close=max(70, 100 - i * 0.25),
+        )
+        for i, c in enumerate(frames["4h"])
+    ]
+    assert ema_bias(frames["4h"]) != "long"
+    decision = evaluate_intraday(
+        market, frames, None, SignalSettings(), SignalsCfg(), NOW
+    )
+    assert not decision.state.startswith("ENTER")
+
+
+def test_impulse_continuation_after_pullback():
+    _, frames = market_frames()
+    bars = [
+        replace(c, open=80.4, close=80.5, high=80.7, low=80.3, volume=100)
+        for c in frames["15m"]
+    ]
+    bars[-6] = replace(
+        bars[-6], open=105.5, close=107.2, high=107.3, low=105.4, volume=220
+    )
+    bars[-5] = replace(bars[-5], open=107.2, close=106.8, high=107.25, low=106.7)
+    bars[-4] = replace(bars[-4], open=106.8, close=106.5, high=106.9, low=106.4)
+    bars[-3] = replace(bars[-3], open=106.5, close=106.35, high=106.6, low=106.25)
+    bars[-2] = replace(bars[-2], open=106.35, close=106.4, high=106.55, low=106.25)
+    bars[-1] = replace(
+        bars[-1], open=106.4, close=106.85, high=106.9, low=106.35, volume=180
+    )
+    setup = find_setup(bars, frames["1h"], "long", 0.7, None, SignalsCfg())
+    assert setup is not None and setup.name == "Impulse continuation"
+
+
+def test_stop_covers_costs_at_one_r():
+    trade, decision, _ = new_trade()
+    risk = abs(trade.plan.entry - trade.plan.stop)
+    decision.price = trade.plan.entry + 1.05 * risk
+    evaluate_exit(trade, decision, [], NOW + 10, SignalsCfg())
+    assert trade.state == "HOLD_LONG"
+    covered = trade.plan.entry * (1 + trade.plan.cost_pct / 100)
+    assert trade.current_stop == pytest.approx(covered)
+    assert trade.current_stop > trade.plan.stop
 
 
 def test_alt_requires_btc_context_and_relative_strength():

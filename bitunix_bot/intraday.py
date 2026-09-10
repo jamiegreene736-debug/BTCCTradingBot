@@ -96,25 +96,35 @@ def swing_levels(candles: list[Candle]) -> tuple[list[float], list[float]]:
     return highs, lows
 
 
-def trend(candles: list[Candle]) -> str:
+def _ema_stack(candles: list[Candle]) -> str:
     closes = np.array([c.close for c in candles])
     fast, slow = ema(closes, 20), ema(closes, 50)
+    if closes[-1] > fast[-1] > slow[-1] and fast[-1] > fast[-4]:
+        return "long"
+    if closes[-1] < fast[-1] < slow[-1] and fast[-1] < fast[-4]:
+        return "short"
+    return "mixed"
+
+
+def ema_bias(candles: list[Candle]) -> str:
+    """4h directional filter for ≤24h holds.
+
+    Confirmed 4h swings need two closed bars on each side (16 hours) and often
+    arrive after the move a 12/24h trade can capture. EMA stack plus slope is
+    the bias; 1h structure still has to confirm.
+    """
+    return _ema_stack(candles)
+
+
+def trend(candles: list[Candle]) -> str:
+    """1h working trend: EMA stack, slope, and confirmed HH/HL or LH/LL."""
     highs, lows = swing_levels(candles[-64:])
     if min(len(highs), len(lows)) < 2:
         return "mixed"
-    if (
-        closes[-1] > fast[-1] > slow[-1]
-        and fast[-1] > fast[-4]
-        and highs[-1] > highs[-2]
-        and lows[-1] > lows[-2]
-    ):
+    stacked = _ema_stack(candles)
+    if stacked == "long" and highs[-1] > highs[-2] and lows[-1] > lows[-2]:
         return "long"
-    if (
-        closes[-1] < fast[-1] < slow[-1]
-        and fast[-1] < fast[-4]
-        and highs[-1] < highs[-2]
-        and lows[-1] < lows[-2]
-    ):
+    if stacked == "short" and highs[-1] < highs[-2] and lows[-1] < lows[-2]:
         return "short"
     return "mixed"
 
@@ -229,6 +239,20 @@ class Setup:
     relative_volume: float
 
 
+def _relative_volume(bars: list[Candle]) -> float:
+    baseline = sum(c.volume for c in bars[-21:-1]) / 20
+    return bars[-1].volume / baseline if baseline > 0 else 0
+
+
+def _reclaim(last: Candle, prior: Candle) -> bool:
+    # Close through the prior close, not the prior high — chasing the high is
+    # late for a 25-40x entry and spends the 24h hold on already-extended price.
+    span = last.high - last.low
+    return last.close > max(prior.close, last.open) and (
+        span <= 0 or last.close >= last.low + 0.4 * span
+    )
+
+
 def find_setup(
     candles: list[Candle],
     hourly: list[Candle],
@@ -262,8 +286,12 @@ def find_setup(
                     relative,
                 )
     h_closes = np.array([c.close for c in hourly])
+    m_closes = np.array([c.close for c in candles])
     _, support_lows = swing_levels(normalize(hourly[-64:], side))
-    levels = [sign * float(ema(h_closes, 20)[-1])]
+    levels = [
+        sign * float(ema(h_closes, 20)[-1]),
+        sign * float(ema(m_closes, 20)[-1]),
+    ]
     levels.extend(support_lows[-3:])
     if vwap is not None:
         levels.append(sign * vwap)
@@ -273,15 +301,79 @@ def find_setup(
         for level in levels
     )
     pulled_back = any(b.close < a.close for a, b in zip(bars[-5:-1], bars[-4:-1]))
-    baseline = sum(c.volume for c in bars[-21:-1]) / 20
-    relative = last.volume / baseline if baseline > 0 else 0
-    if touched and pulled_back and last.close > max(bars[-2].high, last.open):
+    if touched and pulled_back and _reclaim(last, bars[-2]):
         return Setup(
             "Trend pullback",
             sign * (min(c.low for c in bars[-4:]) - cfg.stop_atr_buffer * atr_value),
-            relative,
+            _relative_volume(bars),
+        )
+    return _impulse_continuation(bars, side, atr_value, cfg)
+
+
+def _impulse_continuation(
+    bars: list[Candle], side: Side, atr_value: float, cfg: SignalsCfg
+) -> Setup | None:
+    sign = 1 if side == "long" else -1
+    last = bars[-1]
+    if not _reclaim(last, bars[-2]):
+        return None
+    for idx in range(len(bars) - 8, len(bars) - 3):
+        impulse = bars[idx]
+        if impulse.close - impulse.open < cfg.impulse_atr_min * atr_value:
+            continue
+        pullback = bars[idx + 1 : -1]
+        if len(pullback) < 2:
+            continue
+        pullback_low = min(c.low for c in pullback)
+        if pullback_low < impulse.low - 0.35 * atr_value:
+            continue
+        if impulse.high - pullback_low < 0.3 * atr_value:
+            continue
+        eased = any(
+            b.close < a.close for a, b in zip(pullback, pullback[1:])
+        ) or pullback[0].close < impulse.close
+        if not eased:
+            continue
+        if last.low < impulse.low - 0.35 * atr_value:
+            continue
+        return Setup(
+            "Impulse continuation",
+            sign * (min(pullback_low, last.low) - cfg.stop_atr_buffer * atr_value),
+            _relative_volume(bars),
         )
     return None
+
+
+def select_targets(
+    levels: list[float],
+    entry: float,
+    side: Side,
+    stop_distance: float,
+    cost_pct: float,
+    hourly_atr: float,
+    four_atr: float,
+    cfg: SignalsCfg,
+) -> list[float]:
+    """Nearest structural targets that still clear 2R and a ≤24h travel budget."""
+    sign = 1 if side == "long" else -1
+    risk_fraction = (stop_distance / entry * 100 + cost_pct) / 100
+    if risk_fraction <= 0:
+        return []
+    min_distance = (cfg.min_reward_risk * risk_fraction + cost_pct / 100) * entry
+    max_distance = max(
+        cfg.max_target_atr_multiple * hourly_atr,
+        cfg.max_target_4h_atr_multiple * four_atr,
+        min_distance,
+    )
+    chosen: list[float] = []
+    for price in sorted(
+        {p for p in levels if 0 < sign * (p - entry) <= max_distance},
+        reverse=side == "short",
+    ):
+        reward = sign * (price - entry) / entry - cost_pct / 100
+        if reward / risk_fraction >= cfg.min_reward_risk:
+            chosen.append(price)
+    return chosen
 
 
 def funding_cost(
@@ -349,19 +441,28 @@ def build_plan(
             if side == "long"
             else min(c.low for c in previous_day)
         )
-    targets = sorted(
-        {p for p in levels if sign * (p - entry) > 0}, reverse=side == "short"
-    )
-    if not targets:
-        return None, checks + [
-            Check(
-                "Structural target", False, "No confirmed target with known room ahead"
-            )
-        ]
     funding_pct, payments = funding_cost(market, side, now, settings.hold_hours)
     cost_pct = cfg.round_trip_fee_pct + cfg.slippage_pct + funding_pct
     stop_pct = stop_distance / entry * 100
     risk_fraction = (stop_pct + cost_pct) / 100
+    targets = select_targets(
+        levels,
+        entry,
+        side,
+        stop_distance,
+        cost_pct,
+        volatility(hourly),
+        volatility(four_hour),
+        cfg,
+    )
+    if not targets:
+        return None, checks + [
+            Check(
+                "Structural target",
+                False,
+                "No confirmed target that clears 2R inside the ≤24h travel budget",
+            )
+        ]
     notional = min(
         settings.planning_equity * settings.risk_pct / 100 / risk_fraction,
         settings.planning_equity * settings.leverage * 0.9,
@@ -392,12 +493,29 @@ def build_plan(
                 max_leverage = leverage
             if leverage == settings.leverage:
                 liquidation = estimated
+    usable_band = min(max_leverage, 40) if max_leverage >= 25 else max_leverage
+    if tier is not None and settings.leverage <= max_leverage:
+        leverage_detail = (
+            f"{settings.leverage}x clears the isolated-margin buffer; "
+            f"{usable_band}x is the highest 25-40x leverage that still fits this stop"
+            if max_leverage >= 25
+            else "Estimated isolated-margin buffer passes; verify exchange liquidation price"
+        )
+    else:
+        leverage_detail = (
+            f"Reduce leverage or skip; estimated maximum {max_leverage}x"
+        )
     checks.extend(
         [
             Check(
                 "Reward after costs",
                 ratio >= cfg.min_reward_risk,
                 f"{ratio:.2f}R net; need {cfg.min_reward_risk:g}R",
+            ),
+            Check(
+                "Funding drag",
+                funding_pct <= cfg.max_funding_cost_pct,
+                f"{funding_pct:.3f}% projected funding over the hold; max {cfg.max_funding_cost_pct:g}%",
             ),
             Check(
                 "Order size",
@@ -413,9 +531,7 @@ def build_plan(
             Check(
                 "Leverage buffer",
                 tier is not None and settings.leverage <= max_leverage,
-                f"Reduce leverage or skip; estimated maximum {max_leverage}x"
-                if settings.leverage > max_leverage
-                else "Estimated isolated-margin buffer passes; verify exchange liquidation price",
+                leverage_detail,
             ),
         ]
     )
@@ -456,13 +572,20 @@ def evaluate_intraday(
 ) -> Decision:
     result = Decision(market.symbol, as_of=market.as_of, price=market.price)
     bars, hourly, four_hour = frames["15m"], frames["1h"], frames["4h"]
-    one, four = trend(hourly), trend(four_hour)
+    one, four_bias, four_structure = (
+        trend(hourly),
+        ema_bias(four_hour),
+        trend(four_hour),
+    )
     result.bar_time = bars[-1].time
     atr_value, vwap = volatility(bars), session_vwap(bars, now)
+    hourly_atr_pct = volatility(hourly) / market.price * 100
     result.metrics = {
         "trend_1h": one,
-        "trend_4h": four,
+        "trend_4h": four_bias,
+        "trend_4h_structure": four_structure,
         "atr_pct": atr_value / market.price * 100,
+        "hourly_atr_pct": hourly_atr_pct,
         "vwap": vwap,
         "funding_rate_pct": market.funding_rate * 100,
         "next_funding": market.next_funding,
@@ -487,11 +610,20 @@ def evaluate_intraday(
             "Spread must fit the execution limit",
         ),
         Check(
-            "4h / 1h alignment", one == four and one != "mixed", f"4h {four}; 1h {one}"
+            "Hold-window volatility",
+            cfg.min_hourly_atr_pct <= hourly_atr_pct <= cfg.max_hourly_atr_pct,
+            f"1h ATR {hourly_atr_pct:.2f}% must fit a 25-40x, ≤24h trade",
+        ),
+        Check(
+            "4h bias / 1h structure",
+            one == four_bias and one != "mixed",
+            f"4h bias {four_bias}; 1h structure {one}",
         ),
     ]
-    if one != four or one not in ("long", "short"):
-        result.reasons = ["Wait for aligned market structure and EMA direction"]
+    if one != four_bias or one not in ("long", "short"):
+        result.reasons = [
+            "Wait for 4h EMA bias and confirmed 1h structure in the same direction"
+        ]
         return result
     side: Side = "long" if one == "long" else "short"
     sign = 1 if side == "long" else -1
@@ -523,7 +655,7 @@ def evaluate_intraday(
         Check(
             "Completed 15m trigger",
             setup is not None,
-            "Waiting for a pullback reclaim or breakout retest",
+            "Waiting for a pullback reclaim, impulse continuation, or breakout retest",
         )
     )
     if setup:

@@ -19,8 +19,17 @@ signals:
   stale_trade_hours: 4
   stale_progress_r: 0.25
   trailing_activate_r: 1.5
+  breakeven_at_r: 1.0
   max_total_risk_pct: 1.5
   max_same_direction: 2
+  # 24h / 25-40x band: skip dead or blow-off hours, keep targets inside a
+  # hold-window travel budget, and reject funding that eats the edge.
+  min_hourly_atr_pct: 0.12
+  max_hourly_atr_pct: 5.0
+  max_target_atr_multiple: 8.0
+  max_target_4h_atr_multiple: 3.0
+  impulse_atr_min: 1.1
+  max_funding_cost_pct: 0.40
 
 trading:
   # User trades these four manually; bot only computes signals for the overlay.
