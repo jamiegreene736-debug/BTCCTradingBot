@@ -88,6 +88,21 @@ async function main() {
     const afterReset = await page.locator('#bis-panel').boundingBox();
     assert.ok(Math.abs(afterReset.x - beforeMove.x) < 8);
     assert.equal(await page.evaluate(() => window.savedLayout.panelLayout), undefined);
+    await page.evaluate(() => {
+      const now = Math.floor(Date.now() / 1000);
+      window.testPayload.trades = [{
+        id: 'exchange:HYPE1', symbol: 'HYPEUSDT', kind: 'exchange', opened_at: now - 120,
+        plan: { side: 'short', entry: 80.37, stop: 81.6, target: 78, hold_hours: 24, quantity: 36.59 },
+        current_stop: 81.6, state: 'HOLD_SHORT', reason: 'Imported live Bitunix position',
+        mark_price: 80.574, unrealized_pnl: -7.318, exchange_position_id: 'HYPE1',
+      }];
+      window.testPayload.positions = { connected: true, imported: 1, error: null };
+      window.listeners[0]({ type: 'signals-update', payload: window.testPayload });
+    });
+    assert.match(await page.locator('#bis-status').textContent(), /1 live position/);
+    assert.match(await page.locator('#bis-trades').textContent(), /LIVE/);
+    assert.match(await page.locator('#bis-trades').textContent(), /HYPEUSDT/);
+    assert.match(await page.locator('#bis-trades').textContent(), /Unrealized/);
     await page.locator('[data-action="paper"]').click();
     assert.match(await page.locator('.bis-modal').textContent(), /No order is submitted/);
     await page.locator('.bis-modal [type="submit"]').click();
@@ -175,13 +190,13 @@ async function main() {
     await popup.setContent(fs.readFileSync(path.join(root, 'popup.html'), 'utf8').replace(/<script[^>]*><\/script>/g, ''));
     await popup.evaluate(() => {
       window.chrome = { runtime: {
-        getManifest: () => ({ version: '1.2.0' }),
+        getManifest: () => ({ version: '1.3.0' }),
         sendMessage: async () => ({ payload: { error: 'Cannot reach the dashboard.' } }),
       } };
     });
     await popup.addScriptTag({ path: path.join(root, 'popup.js') });
     assert.match(await popup.locator('#status').textContent(), /Cannot reach/);
-    assert.equal(await popup.locator('#version').textContent(), 'Version 1.2.0');
+    assert.equal(await popup.locator('#version').textContent(), 'Version 1.3.0');
     const stalled = await browser.newPage();
     stalled.on('pageerror', error => errors.push(error.message));
     await stalled.clock.install();

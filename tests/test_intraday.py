@@ -26,7 +26,7 @@ from bitunix_bot.intraday import (
     trend,
 )
 from bitunix_bot.signal_config import SignalsCfg, SignalSettings
-from bitunix_bot.signal_scanner import SignalScanner
+from bitunix_bot.signal_scanner import SignalScanner, parse_open_position
 from bitunix_bot.signal_store import SignalStore, TrackedTrade, evaluate_exit
 
 NOW = 1_800_000_060
@@ -696,3 +696,264 @@ def test_trailing_stop_is_not_applied_to_an_earlier_wick():
     )
     evaluate_exit(trade, decision, [bar], NOW + 1900, SignalsCfg())
     assert trade.state == "HOLD_LONG"
+
+
+def test_parse_open_position_accepts_bitunix_short_fields():
+    parsed = parse_open_position(
+        {
+            "positionId": "HYPE1",
+            "symbol": "HYPEUSDT",
+            "qty": "36.59",
+            "side": "SHORT",
+            "avgOpenPrice": "80.37",
+            "markPrice": "80.574",
+            "unrealizedPNL": "-7.318",
+            "leverage": "40",
+            "ctime": NOW * 1000,
+        }
+    )
+    assert parsed is not None
+    assert parsed.side == "short"
+    assert parsed.quantity == pytest.approx(36.59)
+    assert parsed.entry == pytest.approx(80.37)
+    assert parsed.unrealized_pnl == pytest.approx(-7.318)
+    assert parsed.leverage == 40
+    assert parsed.opened_at == NOW
+    sell = parse_open_position(
+        {
+            "symbol": "HYPEUSDT",
+            "size": "1",
+            "positionSide": "SELL",
+            "entryPrice": "10",
+        }
+    )
+    assert sell is not None and sell.side == "short" and sell.position_id == "HYPEUSDT:short"
+    assert (
+        parse_open_position(
+            {
+                "symbol": "HYPEUSDT",
+                "qty": 0,
+                "side": "SHORT",
+                "avgOpenPrice": 80,
+            }
+        )
+        is None
+    )
+
+
+def _live_scanner(tmp_path, rows):
+    scanner, decision = scanner_with_entry(tmp_path)
+    scanner.client.api_key = "key"
+    scanner.client.secret_key = "secret"
+    scanner.client.pending_positions.return_value = rows
+    return scanner, decision
+
+
+def test_live_short_is_imported_and_never_sends_orders(tmp_path):
+    row = {
+        "positionId": "HYPE1",
+        "symbol": "HYPEUSDT",
+        "qty": "36.59",
+        "side": "SHORT",
+        "avgOpenPrice": "80.37",
+        "markPrice": "80.574",
+        "unrealizedPNL": "-7.318",
+        "leverage": 40,
+        "ctime": (NOW - 120) * 1000,
+    }
+    scanner, _ = _live_scanner(tmp_path, [row])
+    parsed = parse_open_position(row)
+    assert parsed is not None
+    with patch("time.time", return_value=NOW):
+        scanner._sync_exchange_positions([parsed], scanner.decisions, NOW, fetch_ok=True)
+        snapshot = scanner.snapshot()
+    trades = snapshot["trades"]
+    assert len(trades) == 1
+    trade = trades[0]
+    assert trade["kind"] == "exchange"
+    assert trade["symbol"] == "HYPEUSDT"
+    assert trade["plan"]["side"] == "short"
+    assert trade["plan"]["quantity"] == pytest.approx(36.59)
+    assert trade["unrealized_pnl"] == pytest.approx(-7.318)
+    assert trade["mark_price"] == pytest.approx(80.574)
+    assert snapshot["positions"]["connected"] is True
+    assert snapshot["positions"]["imported"] == 1
+    scanner.client.place_order.assert_not_called()
+    scanner.client.flash_close_position.assert_not_called()
+
+
+def test_vanished_exchange_position_closes_tracking(tmp_path):
+    row = {
+        "positionId": "HYPE1",
+        "symbol": "HYPEUSDT",
+        "qty": "36.59",
+        "side": "SHORT",
+        "avgOpenPrice": "80.37",
+        "markPrice": "80.57",
+        "unrealizedPNL": "-7.3",
+        "leverage": 40,
+    }
+    scanner, _ = _live_scanner(tmp_path, [row])
+    parsed = parse_open_position(row)
+    assert parsed is not None
+    with patch("time.time", return_value=NOW):
+        scanner._sync_exchange_positions([parsed], {}, NOW, fetch_ok=True)
+        scanner._sync_exchange_positions([], {}, NOW + 15, fetch_ok=True)
+    closed = scanner.store.trades()[0]
+    assert closed.closed_at == NOW + 15
+    assert closed.state == "CLOSED"
+    assert "no longer open" in closed.reason
+
+
+def test_failed_position_read_does_not_close_live_track(tmp_path):
+    row = {
+        "positionId": "HYPE1",
+        "symbol": "HYPEUSDT",
+        "qty": "36.59",
+        "side": "SHORT",
+        "avgOpenPrice": "80.37",
+        "unrealizedPNL": "-7.3",
+        "leverage": 40,
+    }
+    scanner, _ = _live_scanner(tmp_path, [row])
+    parsed = parse_open_position(row)
+    assert parsed is not None
+    scanner._sync_exchange_positions([parsed], {}, NOW, fetch_ok=True)
+    scanner.client.pending_positions.side_effect = RuntimeError("signed read failed")
+    with patch("time.time", return_value=NOW + 30), patch("time.sleep"):
+        positions, ok = scanner._load_positions()
+        scanner._sync_exchange_positions(positions, {}, NOW + 30, fetch_ok=ok)
+    assert ok is False
+    assert scanner.store.trades(active_only=True)[0].kind == "exchange"
+    assert "paused" in (scanner._positions_error or "")
+
+
+def test_manual_track_is_enriched_instead_of_duplicated(tmp_path):
+    scanner, decision = _live_scanner(tmp_path, [])
+    with patch("time.time", return_value=NOW):
+        recorded = scanner.track(
+            {
+                "signal_id": decision.signal_id,
+                "kind": "manual",
+                "entry": decision.plan.entry,
+                "quantity": decision.plan.quantity,
+            }
+        )
+        parsed = parse_open_position(
+            {
+                "positionId": "BTC1",
+                "symbol": decision.symbol,
+                "qty": str(decision.plan.quantity),
+                "side": "LONG",
+                "avgOpenPrice": str(decision.plan.entry),
+                "markPrice": str(decision.price),
+                "unrealizedPNL": "1.25",
+                "leverage": 25,
+            }
+        )
+        assert parsed is not None
+        scanner._sync_exchange_positions([parsed], scanner.decisions, NOW, fetch_ok=True)
+    trades = scanner.store.trades(active_only=True)
+    assert len(trades) == 1
+    assert trades[0].id == recorded.id
+    assert trades[0].kind == "manual"
+    assert trades[0].exchange_position_id == "BTC1"
+    assert trades[0].unrealized_pnl == pytest.approx(1.25)
+
+
+def test_imported_position_gates_same_symbol_entry(tmp_path):
+    scanner, decision = _live_scanner(tmp_path, [])
+    parsed = parse_open_position(
+        {
+            "positionId": "BTC1",
+            "symbol": "BTCUSDT",
+            "qty": "0.01",
+            "side": "LONG",
+            "avgOpenPrice": str(decision.plan.entry),
+            "markPrice": str(decision.price),
+            "unrealizedPNL": "0.1",
+            "leverage": 25,
+        }
+    )
+    assert parsed is not None
+    with patch("time.time", return_value=NOW):
+        scanner._sync_exchange_positions([parsed], scanner.decisions, NOW, fetch_ok=True)
+        snapshot = scanner.snapshot()
+    assert snapshot["symbols"]["BTCUSDT"]["state"] == "WATCH_LONG"
+    assert any(
+        check["label"] == "Tracked exposure" and not check["passed"]
+        for check in snapshot["symbols"]["BTCUSDT"]["checks"]
+    )
+
+
+def test_snapshot_explains_missing_position_keys(tmp_path):
+    scanner, _ = scanner_with_entry(tmp_path)
+    with patch("time.time", return_value=NOW):
+        snapshot = scanner.snapshot()
+    assert snapshot["positions"]["connected"] is False
+    assert snapshot["positions"]["imported"] == 0
+    assert "API keys" in snapshot["positions"]["error"]
+    scanner.client.pending_positions.assert_not_called()
+
+
+def test_refresh_imports_open_position_outside_liquid_universe(tmp_path):
+    scanner, _decision = scanner_with_entry(tmp_path)
+    _, market, frames = ready_decision()
+    scanner.client.api_key = "key"
+    scanner.client.secret_key = "secret"
+    scanner.client.pending_positions.return_value = [
+        {
+            "positionId": "HYPE1",
+            "symbol": "HYPEUSDT",
+            "qty": "36.59",
+            "side": "SHORT",
+            "avgOpenPrice": "80.37",
+            "markPrice": "80.574",
+            "unrealizedPNL": "-7.318",
+            "leverage": 40,
+        }
+    ]
+    scanner.client.trading_pairs.return_value = [
+        {
+            "symbol": "BTCUSDT",
+            "symbolStatus": "OPEN",
+            "basePrecision": 3,
+            "quotePrecision": 2,
+            "minTradeVolume": 0.001,
+        }
+    ]
+    scanner.client.tickers.return_value = [
+        {"symbol": "BTCUSDT", "quoteVol": 100_000_000}
+    ]
+    scanner.client.klines.side_effect = lambda symbol, interval, limit: candle_rows(
+        frames[interval]
+    )
+    scanner.client.funding_rate.return_value = {
+        "lastPrice": market.price,
+        "markPrice": market.mark,
+        "fundingRate": 0,
+        "fundingInterval": 8,
+        "nextFundingTime": (NOW + 3600) * 1000,
+    }
+    scanner.client.depth.return_value = {
+        "bids": [[market.bid, 10000]],
+        "asks": [[market.ask, 10000]],
+    }
+    scanner.client.position_tiers.return_value = [
+        {
+            "startValue": 0,
+            "endValue": 50000,
+            "maintenanceMarginRate": 0.004,
+            "leverage": 125,
+        }
+    ]
+    with patch("time.time", return_value=NOW), patch("time.sleep"):
+        scanner.refresh(force=True)
+        snapshot = scanner.snapshot()
+    assert any(
+        trade["symbol"] == "HYPEUSDT" and trade["kind"] == "exchange"
+        for trade in snapshot["trades"]
+    )
+    scanner.client.pending_positions.assert_called()
+    scanner.client.place_order.assert_not_called()
+    scanner.client.flash_close_position.assert_not_called()

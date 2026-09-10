@@ -22,8 +22,9 @@ responses; no candles were interpolated or fabricated.
 
 The shipped baseline exits at the first structural target. A second target is
 context only; partial-profit schemes are not enabled without separate testing.
-There is no news feed or automatic exchange-position import. Recorded trade
-state needs a persistent volume for continuity across Railway deployments.
+Live Bitunix positions are imported read-only when API keys are present. The
+scanner still never places or closes orders. Recorded trade state needs a
+persistent volume for continuity across Railway deployments.
 
 ## 24h / 25-40x methodology revision
 

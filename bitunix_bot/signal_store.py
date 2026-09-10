@@ -1,4 +1,4 @@
-"""Durable alert and manually recorded trade state; never places exchange orders."""
+"""Durable alert, recorded, and imported live-position state; never places orders."""
 
 from __future__ import annotations
 
@@ -28,6 +28,9 @@ class TrackedTrade:
     exit_price: float | None = None
     estimated_net_pnl: float | None = None
     stop_updated_at: int = 0
+    mark_price: float | None = None
+    unrealized_pnl: float | None = None
+    exchange_position_id: str = ""
 
 
 def evaluate_exit(
