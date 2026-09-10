@@ -69,6 +69,9 @@ class SignalsCfg:
     max_target_4h_atr_multiple: float = 3.0
     impulse_atr_min: float = 1.1
     max_funding_cost_pct: float = 0.40
+    queue_size: int = 5
+    handoff_seconds: int = 20
+    expiry_warn_seconds: int = 45
 
     def validate(self) -> None:
         if type(self.enabled) is not bool:
@@ -79,6 +82,9 @@ class SignalsCfg:
             "max_symbols",
             "stale_trade_hours",
             "max_same_direction",
+            "queue_size",
+            "handoff_seconds",
+            "expiry_warn_seconds",
         ):
             if type(getattr(self, name)) is not int:
                 raise ValueError(f"signals.{name} must be a whole number")
@@ -102,3 +108,9 @@ class SignalsCfg:
             )
         if type(self.max_symbols) is not int or not 1 <= self.max_symbols <= 30:
             raise ValueError("signals.max_symbols must be an integer from 1 to 30")
+        if not 1 <= self.queue_size <= 8:
+            raise ValueError("signals.queue_size must be an integer from 1 to 8")
+        if not 5 <= self.handoff_seconds <= 60:
+            raise ValueError("signals.handoff_seconds must be between 5 and 60")
+        if not 15 <= self.expiry_warn_seconds <= 180:
+            raise ValueError("signals.expiry_warn_seconds must be between 15 and 180")

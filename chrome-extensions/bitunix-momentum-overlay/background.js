@@ -10,7 +10,8 @@ function validateSnapshot(payload) {
   const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
   if (!object(payload.settings) || !object(payload.symbols) ||
       !['planning_equity', 'risk_pct', 'leverage', 'hold_hours'].every(key => Number.isFinite(payload.settings[key])) ||
-      !['trades', 'history', 'closed_trades'].every(key => Array.isArray(payload[key])) ||
+      !['trades', 'history', 'closed_trades', 'queue'].every(key => Array.isArray(payload[key])) ||
+      (payload.handoff != null && (typeof payload.handoff !== 'object' || Array.isArray(payload.handoff))) ||
       !Object.values(payload.symbols).every(row => object(row) && typeof row.state === 'string' &&
         typeof row.symbol === 'string' && Array.isArray(row.checks) && object(row.metrics))) {
     throw new Error('Signal data is incomplete. Update or restart the backend, then retry.');

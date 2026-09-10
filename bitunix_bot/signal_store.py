@@ -178,7 +178,15 @@ class SignalStore:
             )
 
     def record_alert(
-        self, key: str, state: str, symbol: str, reason: str, now: int
+        self,
+        key: str,
+        state: str,
+        symbol: str,
+        reason: str,
+        now: int,
+        *,
+        setup: str = "",
+        side: str = "",
     ) -> None:
         payload = {
             "id": key,
@@ -186,6 +194,8 @@ class SignalStore:
             "symbol": symbol,
             "reason": reason,
             "time": now,
+            "setup": setup,
+            "side": side,
         }
         with self.lock, self.connection:
             self.connection.execute(
@@ -199,6 +209,6 @@ class SignalStore:
     def history(self) -> list[dict[str, object]]:
         with self.lock:
             rows = self.connection.execute(
-                "SELECT payload FROM alerts ORDER BY time DESC, rowid DESC LIMIT 30"
+                "SELECT payload FROM alerts ORDER BY time DESC, rowid DESC LIMIT 50"
             ).fetchall()
         return [json.loads(row[0]) for row in rows]

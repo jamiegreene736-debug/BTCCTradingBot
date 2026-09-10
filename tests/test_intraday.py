@@ -615,8 +615,68 @@ def test_scanner_reads_current_public_schema_and_deduplicates_alerts(tmp_path):
         snapshot = scanner.snapshot()
     assert snapshot["symbols"]["BTCUSDT"]["state"] == "ENTER_LONG"
     assert len(snapshot["history"]) == 1
+    assert snapshot["history"][0]["time"] == NOW
+    assert snapshot["queue"][0]["symbol"] == "BTCUSDT"
+    assert snapshot["queue"][0]["state_since"] == NOW
     scanner.client.place_order.assert_not_called()
     scanner.client.pending_positions.assert_not_called()
+
+
+def test_watch_alerts_are_timestamped_and_not_duplicated(tmp_path):
+    scanner, decision = scanner_with_entry(tmp_path)
+    decision.state = "WATCH_LONG"
+    decision.signal_id = ""
+    scanner._record_signal_alert(decision, NOW)
+    scanner._record_signal_alert(decision, NOW + 10)
+    history = scanner.store.history()
+    assert len(history) == 1
+    assert history[0]["state"] == "WATCH_LONG"
+    assert history[0]["time"] == NOW
+    assert history[0]["setup"] == "Trend pullback"
+    assert history[0]["side"] == "long"
+
+
+def test_queue_ranks_top_setups_and_warns_before_switch(tmp_path):
+    scanner, first = scanner_with_entry(tmp_path)
+    second, _, _ = ready_decision("short")
+    second.symbol = "ETHUSDT"
+    second.state = "WATCH_SHORT"
+    first.as_of = second.as_of = NOW
+    first.state_since = NOW - 30
+    scanner.decisions = {first.symbol: first, second.symbol: second}
+    with patch("time.time", return_value=NOW):
+        snap = scanner.snapshot()
+    assert [row["symbol"] for row in snap["queue"]] == ["BTCUSDT", "ETHUSDT"]
+    assert snap["best_symbol"] == "BTCUSDT"
+    assert snap["queue"][0]["state_since"] == NOW - 30
+    first.state = "WAIT"
+    second.state = "ENTER_SHORT"
+    with patch("time.time", return_value=NOW + 1):
+        held = scanner.snapshot()
+    assert held["best_symbol"] == "BTCUSDT"
+    assert held["handoff"]["to_symbol"] == "ETHUSDT"
+    assert held["handoff"]["reason"] == "A higher-ranked setup is ready"
+    assert held["handoff"]["seconds_remaining"] == 20
+    with patch("time.time", return_value=NOW + 22):
+        switched = scanner.snapshot()
+    assert switched["best_symbol"] == "ETHUSDT"
+    assert switched["handoff"] is None
+
+
+def test_entry_expiry_warns_before_window_closes(tmp_path):
+    scanner, decision = scanner_with_entry(tmp_path)
+    other, _, _ = ready_decision("short")
+    other.symbol = "ETHUSDT"
+    other.state = "WATCH_SHORT"
+    decision.as_of = other.as_of = NOW
+    decision.plan.expires_at = NOW + 30
+    scanner.decisions = {decision.symbol: decision, other.symbol: other}
+    with patch("time.time", return_value=NOW):
+        snap = scanner.snapshot()
+    assert snap["handoff"]["reason"] == "Entry window ending"
+    assert snap["handoff"]["to_symbol"] == "ETHUSDT"
+    assert snap["handoff"]["seconds_remaining"] == 30
+    assert snap["queue"][0]["seconds_remaining"] == 30
 
 
 def test_trailing_stop_is_not_applied_to_an_earlier_wick():

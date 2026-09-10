@@ -30,6 +30,9 @@ signals:
   max_target_4h_atr_multiple: 3.0
   impulse_atr_min: 1.1
   max_funding_cost_pct: 0.40
+  queue_size: 5
+  handoff_seconds: 20
+  expiry_warn_seconds: 45
 
 trading:
   # User trades these four manually; bot only computes signals for the overlay.
