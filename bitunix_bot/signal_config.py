@@ -58,8 +58,17 @@ class SignalsCfg:
     stale_trade_hours: int = 4
     stale_progress_r: float = 0.25
     trailing_activate_r: float = 1.5
+    breakeven_at_r: float = 1.0
     max_total_risk_pct: float = 1.5
     max_same_direction: int = 2
+    # 24h / 25-40x planning: skip dead or blow-off hours, keep targets inside
+    # a hold-window travel budget, and reject funding that eats the edge.
+    min_hourly_atr_pct: float = 0.12
+    max_hourly_atr_pct: float = 5.0
+    max_target_atr_multiple: float = 8.0
+    max_target_4h_atr_multiple: float = 3.0
+    impulse_atr_min: float = 1.1
+    max_funding_cost_pct: float = 0.40
 
     def validate(self) -> None:
         if type(self.enabled) is not bool:

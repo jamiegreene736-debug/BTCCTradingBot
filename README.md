@@ -27,20 +27,28 @@ requires the matching backend release; it does not interpret old pump-fade score
 
 ## Signals
 
-1. Both 4h and 1h must have matching confirmed swing structure, a matching
-   20/50 EMA stack, and matching EMA slope. A swing needs two completed bars
-   on each side. Mixed direction means WAIT.
-2. A 15m trend pullback must touch the hourly EMA/support or UTC-session VWAP,
-   then close beyond the previous bar in the trend direction with relative volume.
+1. 4h supplies directional bias only (20/50 EMA stack and slope). Confirmed 4h
+   swings take 16 hours to print and arrive too late for a 12/24h hold. 1h must
+   still show matching confirmed swing structure, EMA stack, and slope. Mixed
+   1h structure or an opposite 4h bias means WAIT.
+2. A 15m trend pullback must touch the hourly or 15m EMA, hourly support, or
+   UTC-session VWAP, then reclaim the prior close in the trend direction with
+   relative volume. Entries do not wait for a break of the prior high.
 3. Alternatively, a volume-backed breakout must precede a separate retest that
-   holds the old range boundary. Long and short rules are symmetric.
+   holds the old range boundary, or a 15m impulse of at least 1.1 ATR must
+   pull back without breaking its origin and then reclaim. Long and short
+   rules are symmetric.
 4. The stop sits beyond the setup's structural low/high plus an ATR allowance.
    It must accommodate at least 0.75 ATR. The nearest confirmed structural
-   target must provide at least 2R after estimated costs. A second target is
-   contextual only; the default exit is the first target.
+   target that still provides 2R after estimated costs, and that sits inside a
+   ≤24h travel budget (8× 1h ATR or 3× 4h ATR), is used. Near swings that fail
+   2R are skipped instead of blocking the trade. A second target is contextual
+   only; the default exit is the first target.
 5. Altcoins additionally require aligned BTC direction and matching relative
-   strength over six hours. Spread, 24h USDT volume, planned order size, depth,
-   and an estimated isolated-margin liquidation buffer must pass.
+   strength over six hours. Spread, 24h USDT volume, 1h ATR (not dead, not
+   blow-off), planned order size, depth, projected funding drag, and an
+   estimated isolated-margin liquidation buffer must pass. The intended
+   isolated-margin band is 25-40x; leverage never narrows the stop.
 
 The scanner ranks the twelve most liquid eligible USDT perpetuals, plus BTC and
 any actively tracked symbols. All gates are visible in the signal checklist.
@@ -71,8 +79,9 @@ extra collateral, not the exchange's exact liquidation price or a guarantee.
   entry zone and planned size/risk. It does not detect/import exchange positions.
 - Original stop, target, risk and holding limit are frozen when recorded.
 - Exit alerts cover stop/target touches, opposite completed 1h structure, failure
-  to make 0.25R progress within four hours, and maximum age. A trailing stop can
-  advance after 1.5R and never widen. Stop changes are suggestions to apply manually.
+  to make 0.25R progress within four hours, and maximum age. After 1R the stop
+  can advance to cover estimated costs; a trailing stop can advance after 1.5R
+  and never widen. Stop changes are suggestions to apply manually.
 - Exit alerts remain latched until you record closure. They do not reverse into
   an opposite entry or assume that an exchange order filled.
 - **Record closure** ends tracking only. Estimated net results use the recorded

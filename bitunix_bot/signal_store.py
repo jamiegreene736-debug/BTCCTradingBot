@@ -100,15 +100,25 @@ def evaluate_exit(
                 f"HOLD_{side.upper()}",
                 "Original setup remains active",
             )
+            proposed = trade.current_stop
+            if progress_r >= cfg.breakeven_at_r:
+                covered = (
+                    trade.plan.entry
+                    + sign * trade.plan.entry * trade.plan.cost_pct / 100
+                )
+                if sign * (covered - proposed) > 0:
+                    proposed = covered
             if progress_r >= cfg.trailing_activate_r:
                 # Ratchet on observed closes; keep at least the original risk distance.
-                proposed = price - sign * initial_risk
-                if sign * (proposed - trade.current_stop) > 0:
-                    trade.current_stop = proposed
-                    trade.stop_updated_at = now
-                    trade.reason = (
-                        "Trailing stop advanced; update the exchange-side stop manually"
-                    )
+                trail = price - sign * initial_risk
+                if sign * (trail - proposed) > 0:
+                    proposed = trail
+            if sign * (proposed - trade.current_stop) > 0:
+                trade.current_stop = proposed
+                trade.stop_updated_at = now
+                trade.reason = (
+                    "Protective stop advanced; update the exchange-side stop manually"
+                )
     # Retain the start of the current 15m candle so its full range is examined once closed.
     trade.checked_at = max(trade.opened_at, now // 900 * 900)
     return trade

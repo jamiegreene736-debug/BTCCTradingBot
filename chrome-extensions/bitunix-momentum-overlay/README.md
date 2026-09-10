@@ -10,6 +10,8 @@ No extension action sends an exchange order or modifies a position.
    and click **Save and test connection**. Wait for **Connected**.
 4. Reload the Bitunix tab. For an existing installation, reload the extension first.
 5. Edit the displayed planning equity, risk, leverage and maximum holding time.
+   The scanner is built for isolated 25-40x and a 12h or 24h hold. Leverage
+   never tightens the stop.
 
 ## If the panel is empty
 
