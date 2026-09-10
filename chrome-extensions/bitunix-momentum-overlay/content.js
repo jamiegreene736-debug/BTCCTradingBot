@@ -14,9 +14,28 @@
   const ago = timestamp => timestamp ? Math.max(0, Math.floor(Date.now() / 1000 - timestamp)) + 's ago' : 'Waiting for data';
   function fresh(row) { return !payload?.error && row?.as_of > 0 && Date.now() / 1000 - row.as_of <= (payload?.data_max_age || 60); }
   function actionable(row) { return fresh(row) && row?.state?.startsWith('ENTER_') && row.plan?.expires_at > Date.now() / 1000; }
-  const send = (type, body) => chrome.runtime.sendMessage({ type, body });
+  const connectionError = 'Extension connection interrupted. Reload the extension, then this Bitunix tab.';
+  async function send(type, body) {
+    let timer;
+    try {
+      return await Promise.race([
+        chrome.runtime.sendMessage({ type, body }),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(connectionError)), 12000); }),
+      ]);
+    } finally { clearTimeout(timer); }
+  }
   host.innerHTML = `<header><div><span class="bis-eyebrow">BITUNIX · INTRADAY</span><strong>Trade signals</strong></div><div class="bis-actions"><button data-action="settings" title="Connection settings" aria-label="Connection settings">⚙</button><button data-action="collapse" aria-label="Collapse panel">−</button></div></header><div id="bis-body"><div id="bis-status" role="status"></div><div id="bis-planning"></div><div id="bis-selection"></div><div id="bis-card"></div><div id="bis-trades"></div><details><summary>Recent alerts</summary><div id="bis-history"></div></details><details><summary>Recorded closures</summary><div id="bis-closed"></div></details><footer>Alerts only · Orders and stops stay on Bitunix.<br>Candidate rules under evaluation; no measured win probability.</footer></div><div id="bis-form"></div>`;
   function render() {
+    try { renderContent(); }
+    catch {
+      // Discard an incompatible response instead of leaving a partially drawn entry.
+      payload = { error: 'Signal data is incomplete or incompatible. Update the backend, then retry.' };
+      formOpen = false;
+      host.querySelector('#bis-form').replaceChildren();
+      renderContent();
+    }
+  }
+  function renderContent() {
     if (formOpen) {
       const exit = payload?.trades?.find(t => t.state.startsWith('EXIT_'));
       host.querySelector('.bis-form-live').textContent = payload?.error || (exit ? `${exit.symbol}: ${label(exit.state)} — ${exit.reason}` : '');
@@ -27,6 +46,7 @@
     if (!payload || (payload.error && !payload.symbols)) {
       status.className = 'bis-notice'; status.textContent = payload?.error || 'Connecting to your signal scanner…';
       for (const id of ['card', 'selection', 'planning', 'trades', 'history', 'closed']) host.querySelector('#bis-' + id).replaceChildren();
+      host.querySelector('#bis-card').innerHTML = '<div class="bis-buttons"><button data-action="settings">Open Settings</button><button data-action="refresh">Retry connection</button></div><p class="bis-empty">Signals need a running intraday backend and its dashboard password. Use Save and test connection in Settings.</p>';
       return;
     }
     const settings = payload.settings;
@@ -87,7 +107,7 @@
     const button = event.target.closest('button[data-action]');
     if (!button || button.disabled) return;
     const action = button.dataset.action;
-    if (action === 'settings') send('open-options');
+    if (action === 'settings') send('open-options').catch(() => { payload = { error: connectionError }; render(); });
     if (action === 'refresh') refresh(true);
     if (action === 'cancel') closeForm();
     if (action === 'collapse') {
@@ -109,12 +129,26 @@
       openForm('Record trade closure', '<p>This ends tracking only. Close any real position on Bitunix first.</p><label>Recorded exit price<input name="exit_price" type="number" min="0.000000001" step="any" value="' + current + '" required></label>', 'Record closure', data => send('close-track', { id: trade.id, exit_price: Number(data.get('exit_price')) }));
     }
   });
+  let refreshing = false;
   async function refresh(force = false) {
-    try { const response = await send(force ? 'force-refresh' : 'request-latest'); payload = response.payload; }
-    catch { payload = { error: 'Extension connection interrupted. Reload this Bitunix tab.' }; }
-    render();
+    if (refreshing) return;
+    refreshing = true;
+    try {
+      const response = await send(force ? 'force-refresh' : 'request-latest');
+      if (!response?.payload) throw new Error(connectionError);
+      payload = response.payload;
+    } catch { payload = { ...(payload?.symbols ? payload : {}), error: connectionError }; }
+    finally { refreshing = false; render(); }
   }
-  chrome.runtime.onMessage.addListener(message => { if (message.type === 'signals-update') { payload = message.payload; render(); } });
+  render();
+  try {
+    chrome.runtime.onMessage.addListener(message => {
+      if (message.type === 'signals-update') {
+        payload = message.payload || { error: 'Signal data is incomplete. Retry the connection.' };
+        render();
+      }
+    });
+  } catch { payload = { error: connectionError }; render(); }
   setInterval(() => refresh(), 5000);
   refresh();
 })();
