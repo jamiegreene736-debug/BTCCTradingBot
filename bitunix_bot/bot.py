@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import logging.handlers
+import os
 import signal
 import time
 from collections import deque
@@ -25,6 +26,8 @@ import numpy as np
 
 from .client import BitunixClient, BitunixError
 from .config import Config
+from .signal_scanner import SignalScanner
+from .signal_store import SignalStore
 from .indicators import adx as adx_fn
 from .indicators import atr as atr_fn
 from .journal import TradeJournal
@@ -82,6 +85,8 @@ class BitunixBot:
             cfg.creds.api_key,
             cfg.creds.secret_key,
             margin_coin=cfg.trading.margin_coin,
+            read_only=cfg.signals.enabled,
+            timeout=5.0 if cfg.signals.enabled else 10.0,
         )
         self.metas: dict[str, SymbolMeta] = {}
         self._configured_symbols = [s.upper() for s in cfg.trading.symbols]
@@ -169,6 +174,12 @@ class BitunixBot:
         # flip long/short on one aggressive tape burst; the API should publish
         # a stable call that every Chrome tab sees consistently.
         self._overlay_decision_memory: dict[str, dict[str, Any]] = {}
+        self.signal_scanner: SignalScanner | None = None
+        if cfg.signals.enabled:
+            self.signal_scanner = SignalScanner(
+                self.client, cfg.signals,
+                SignalStore(os.environ.get("SIGNAL_STATE_PATH", "logs/intraday-signals.sqlite3")),
+            )
 
     # ------------------------------------------------------------------ setup
 
@@ -326,14 +337,14 @@ class BitunixBot:
     def run_forever(self) -> None:
         """Loop without installing signal handlers (safe in a worker thread)."""
         # Start the order-book feed if not already running.
-        if self.ob_feed is None:
+        if self.ob_feed is None and not self.cfg.signals.enabled:
             self.ob_feed = OrderBookFeed(
                 symbols=self.cfg.trading.symbols,
                 depth_levels=self.cfg.strategy.ob_depth_levels,
             )
             self.ob_feed.start()
         # Start the trade-tape feed alongside.
-        if self.tape_feed is None:
+        if self.tape_feed is None and not self.cfg.signals.enabled:
             self.tape_feed = TradeFeed(symbols=self.cfg.trading.symbols)
             self.tape_feed.start()
         while not self.stop_flag:
@@ -2550,6 +2561,9 @@ class BitunixBot:
         Errors per symbol/horizon are swallowed (logged at debug) so a
         single failing fetch doesn't take down the whole tick.
         """
+        if self.signal_scanner is not None:
+            self.signal_scanner.refresh()
+            return
         for sym in self.cfg.trading.symbols:
             sym_u = sym.upper()
             meta = self.metas.get(sym_u, _DEFAULT_META)
@@ -3231,6 +3245,10 @@ class BitunixBot:
         return cached_acct, n_open, short_count
 
     def _tick(self) -> None:
+        if self.signal_scanner is not None:
+            self.signal_scanner.refresh()
+            self.state.record_tick(None, len(self.signal_scanner.decisions))
+            return
         # 0. Update streak-loss state from newly-closed positions.
         self._update_streak_state()
 

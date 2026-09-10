@@ -1,9 +1,26 @@
-# Bitunix TraderBot — aggressive multi-symbol futures.
-# 100% technical. No news / sentiment inputs are used.
+# Intraday signals are alerts-only, regardless of legacy mode/auto settings.
+mode: paper
 
-mode: live               # paper | live  (paper never sends orders)
-                         # Live because the bot now auto-executes only the
-                         # strongest parabolic pump-fade SHORT setup.
+signals:
+  enabled: true
+  refresh_seconds: 15
+  max_data_age_seconds: 60
+  min_quote_volume: 10000000
+  max_symbols: 12
+  min_reward_risk: 2.0
+  relative_volume_min: 1.2
+  breakout_volume_min: 1.5
+  stop_atr_buffer: 0.2
+  max_spread_pct: 0.08
+  round_trip_fee_pct: 0.12   # Conservative estimate; reconcile against your fee tier.
+  slippage_pct: 0.06        # Round trip estimate, additional to fees.
+  min_depth_ratio: 5.0
+  liquidation_buffer_pct: 0.5
+  stale_trade_hours: 4
+  stale_progress_r: 0.25
+  trailing_activate_r: 1.5
+  max_total_risk_pct: 1.5
+  max_same_direction: 2
 
 trading:
   # User trades these four manually; bot only computes signals for the overlay.
@@ -21,8 +38,7 @@ trading:
   # change: makes the maker-fee economics actually work.
   timeframe: 5m          # was 15m — Grok strategy review: 5m is sweet spot for
                          # high-leverage scalping; 15m holds too long at 10x
-  leverage: 100          # Pump-fade scalps are deliberately high leverage and
-                         # short-lived; symbol caps still apply.
+  leverage: 25           # Legacy fallback; intraday planning settings are separate.
   margin_coin: USDT
   margin_mode: ISOLATION # ISOLATION isolates loss per position; CROSS shares margin
   # Reverted 2.0 → 0.75 per Grok DD-halt review. 2.0% triggered the 8%
@@ -49,12 +65,12 @@ trading:
   # to a few minutes after the peak; anything still open after this clock has
   # lost the original timing edge. The manager shortens this cap automatically
   # when the live tape activity multiplier is high.
-  max_position_age_seconds: 120
+  max_position_age_seconds: 0
   time_exit_only_if_losing: false
-  auto_execute_pump_fade_shorts: true
+  auto_execute_pump_fade_shorts: false
   auto_execute_pump_fade_only: true
   pump_fade_auto_min_confidence: 96
-  pump_fade_auto_leverage: 200
+  pump_fade_auto_leverage: 25
   # Grok/xAI review 2026-05-10: a 98/100 UI signal still must clear live
   # execution friction. The last-20 fills showed 8 right-direction fee losers,
   # so auto MARKET shorts now require a fresh order book, tight spread, enough

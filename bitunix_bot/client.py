@@ -51,12 +51,14 @@ class BitunixClient:
         base_url: str = BASE_URL,
         margin_coin: str = "USDT",
         timeout: float = 10.0,
+        read_only: bool = False,
     ):
         self.api_key = api_key
         self.secret_key = secret_key
         self.base_url = base_url
         self.margin_coin = margin_coin
         self.timeout = timeout
+        self.read_only = read_only
         self.session = requests.Session()
 
     # ------------------------------------------------------------------ signing
@@ -101,6 +103,8 @@ class BitunixClient:
         return self._parse(r)
 
     def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        if self.read_only:
+            raise ValueError("Exchange writes are disabled in alerts-only mode")
         body_str = json.dumps(body, separators=(",", ":"), sort_keys=True)
         headers = self._headers("", body_str, is_post=True)
         url = f"{self.base_url}{path}"
@@ -151,10 +155,12 @@ class BitunixClient:
         interval: str,
         limit: int = 200,
         price_type: str = "LAST_PRICE",
+        end_time: int | None = None,
     ) -> list[dict[str, Any]]:
         data = self._get(
             "/api/v1/futures/market/kline",
-            {"symbol": symbol, "interval": interval, "limit": limit, "type": price_type},
+            {"symbol": symbol, "interval": interval, "limit": limit, "type": price_type,
+             "endTime": end_time},
         )
         return data.get("data") or []
 
@@ -168,6 +174,14 @@ class BitunixClient:
 
     def trading_pairs(self) -> list[dict[str, Any]]:
         data = self._get("/api/v1/futures/market/trading_pairs")
+        return data.get("data") or []
+
+    def depth(self, symbol: str) -> dict[str, Any]:
+        data = self._get("/api/v1/futures/market/depth", {"symbol": symbol, "limit": "5"})
+        return data.get("data") or {}
+
+    def position_tiers(self, symbol: str) -> list[dict[str, Any]]:
+        data = self._get("/api/v1/futures/position/get_position_tiers", {"symbol": symbol})
         return data.get("data") or []
 
     def funding_rate(self, symbol: str) -> dict[str, Any]:

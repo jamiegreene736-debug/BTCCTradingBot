@@ -1,775 +1,120 @@
-// Bitunix pump-fade overlay content script.
-// Renders the floating scanner panel and receives data from the MV3
-// background worker. All DOM/CSS names are prefixed with bxm-.
-
-(function () {
-  if (window.__bxmOverlayInstalled) return;
-  window.__bxmOverlayInstalled = true;
-
-  let latest = null;
-  let fetchedAt = 0;
-  let activeSymbol = localStorage.getItem("bxm-active-symbol") || "";
-  const AUTO_FOLLOW_KEY = "bxm-auto-follow-v2";
-  let autoFollow = localStorage.getItem(AUTO_FOLLOW_KEY) !== "0";
-  let collapsed = localStorage.getItem("bxm-collapsed") === "1";
-  let panelEl = null;
-  let lastAutoSwitchAt = 0;
-  let manualHoldUntil = 0;
-  let titleFlashTimer = null;
-  let titleFlashKey = "";
-  let titleFlashPrefix = "";
-  let titleFlashOn = false;
-  let cleanPageTitle = document.title;
-  let pollMs = 0;
-  const ALERT_HISTORY_KEY = "bxm-pump-alert-history-v1";
-  let alertHistory = loadAlertHistory();
-  let activeAlertStages = {};
-  let lastAlertScanAt = 0;
-
-  function pick(obj, ...keys) {
-    for (const key of keys) {
-      if (obj && obj[key] !== undefined && obj[key] !== null) return obj[key];
-    }
-    return null;
-  }
-
-  function num(value, fallback = 0) {
-    const out = Number(value);
-    return Number.isFinite(out) ? out : fallback;
-  }
-
-  function normSymbol(value) {
-    return String(value || "").trim().toUpperCase();
-  }
-
-  function escapeHtml(value) {
-    return String(value ?? "").replace(/[&<>"']/g, (ch) => ({
-      "&": "&amp;",
-      "<": "&lt;",
-      ">": "&gt;",
-      "\"": "&quot;",
-      "'": "&#39;",
-    }[ch]));
-  }
-
-  function fmtPrice(value) {
-    const p = Number(value);
-    if (!Number.isFinite(p) || p <= 0) return "--";
-    if (p >= 1000) return p.toLocaleString(undefined, { maximumFractionDigits: 1 });
-    if (p >= 1) return p.toLocaleString(undefined, { maximumFractionDigits: 3 });
-    return p.toLocaleString(undefined, { maximumFractionDigits: 6 });
-  }
-
-  function fmtMoney(value) {
-    const n = Number(value);
-    if (!Number.isFinite(n)) return "--";
-    const sign = n > 0 ? "+" : n < 0 ? "-" : "";
-    return `${sign}$${Math.abs(n).toFixed(4)}`;
-  }
-
-  function fmtPct(value) {
-    if (value === null || value === undefined || value === "") return "--";
-    const n = Number(value);
-    if (!Number.isFinite(n)) return "--";
-    return `${n.toFixed(2)}%`;
-  }
-
-  function fmtAge(secs) {
-    const s = Math.max(0, Math.floor(Number(secs) || 0));
-    if (s < 60) return `${s}s ago`;
-    if (s < 3600) return `${Math.floor(s / 60)}m ago`;
-    return `${Math.floor(s / 3600)}h ago`;
-  }
-
-  function fmtCountdown(secs) {
-    const s = Math.max(0, Math.floor(Number(secs) || 0));
-    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
-  }
-
-  function fmtClock(ts) {
-    const d = new Date(Number(ts) || Date.now());
-    return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
-  }
-
-  function loadAlertHistory() {
-    try {
-      const rows = JSON.parse(localStorage.getItem(ALERT_HISTORY_KEY) || "[]");
-      return Array.isArray(rows) ? rows.slice(0, 5) : [];
-    } catch {
-      return [];
-    }
-  }
-
-  function saveAlertHistory() {
-    localStorage.setItem(ALERT_HISTORY_KEY, JSON.stringify(alertHistory.slice(0, 5)));
-  }
-
-  function positionCountdown(pos) {
-    const rawCloseAt = Number(pick(pos, "auto_close_at", "autoCloseAt"));
-    if (Number.isFinite(rawCloseAt) && rawCloseAt > 0) {
-      const closeAtMs = rawCloseAt < 1_000_000_000_000 ? rawCloseAt * 1000 : rawCloseAt;
-      return Math.max(0, Math.ceil((closeAtMs - Date.now()) / 1000));
-    }
-    const rawRemaining = Number(pick(pos, "seconds_remaining", "secondsRemaining"));
-    if (Number.isFinite(rawRemaining)) {
-      const elapsed = fetchedAt ? (Date.now() - fetchedAt) / 1000 : 0;
-      return Math.max(0, Math.ceil(rawRemaining - elapsed));
-    }
-    return null;
-  }
-
-  function activeOpenPosition(symData, symbol) {
-    const sym = normSymbol(symbol);
-    const rows = [];
-    const add = (value) => {
-      if (!value) return;
-      if (Array.isArray(value)) rows.push(...value);
-      else rows.push(value);
-    };
-    add(symData?.open_position);
-    add(symData?.openPosition);
-    add(symData?.open_positions);
-    add(symData?.openPositions);
-    add(latest?.open_positions);
-    add(latest?.openPositions);
-
-    for (const pos of rows) {
-      const posSym = normSymbol(pick(pos, "symbol"));
-      if (posSym && posSym !== sym) continue;
-      const qty = Number(pick(pos, "qty", "size", "volume"));
-      if (Number.isFinite(qty) && qty === 0) continue;
-      return pos;
-    }
-    return null;
-  }
-
-  function decisionFor(symData) {
-    return symData?.decision || symData?.recommendation || symData?.next_1h ||
-      symData?.next1h || symData?.next_15m || symData?.next15m || {};
-  }
-
-  function tradePlanFor(decision, symData) {
-    return decision?.trade_plan || decision?.tradePlan || symData?.trade_plan || symData?.tradePlan || null;
-  }
-
-  function simulationFromPlan(plan) {
-    return plan?.max_leverage_simulation || plan?.maxLeverageSimulation ||
-      plan?.estimated_pnl || plan?.estimatedPnl || plan?.simulation || null;
-  }
-
-  function stageFor(decision) {
-    const action = String(decision?.action || "wait").toLowerCase();
-    const setup = String(decision?.setup || "");
-    const stage = String(decision?.setup_stage || decision?.setupStage || "").toLowerCase();
-    if (action === "short" && setup === "parabolic_pump_fade") return "short";
-    if (stage === "pump_building" || decision?.pre_pump_building || decision?.prePumpBuilding) return "building";
-    if (stage === "pump_watch") return "watch";
-    return "hunting";
-  }
-
-  function scoreFor(decision) {
-    const stage = stageFor(decision);
-    if (stage === "short") return num(pick(decision, "confidence_score", "confidenceScore"), 0);
-    if (stage === "building") return num(pick(decision, "pre_pump_score", "prePumpScore", "checklist_score", "checklistScore"), 0);
-    if (stage === "watch") return num(pick(decision, "checklist_score", "checklistScore"), 0);
-    return num(pick(decision, "checklist_score", "checklistScore"), 0);
-  }
-
-  function stagePriority(stage) {
-    return { short: 4, watch: 3, building: 2, hunting: 1 }[stage] || 0;
-  }
-
-  function candidateFor(symbol, symData) {
-    const decision = decisionFor(symData);
-    const stage = stageFor(decision);
-    const score = scoreFor(decision);
-    const priority = stagePriority(stage);
-    const blocked = Boolean(
-      symData?.symbol_trade_quality_gate ||
-      symData?.symbolTradeQualityGate ||
-      pick(decision, "blocked_by", "blockedBy")
-    );
-    const rankScore = (priority * 100) + score - (blocked ? 1000 : 0);
-    return {
-      symbol,
-      decision,
-      stage,
-      score,
-      priority,
-      rankScore,
-      blocked,
-    };
-  }
-
-  function rankedCandidates(symbols) {
-    return symbols
-      .map((s) => candidateFor(s, latest?.symbols?.[s] || {}))
-      .sort((a, b) => {
-        if (b.rankScore !== a.rankScore) return b.rankScore - a.rankScore;
-        if (b.score !== a.score) return b.score - a.score;
-        return a.symbol.localeCompare(b.symbol);
-      });
-  }
-
-  function bestCandidate(candidates) {
-    return candidates.find((c) => !c.blocked && c.stage !== "hunting") || candidates[0] || null;
-  }
-
-  function isPumpAlertStage(stage) {
-    return stage === "building" || stage === "watch" || stage === "short";
-  }
-
-  function candidateScoreText(c) {
-    if (!c) return "";
-    if (c.stage === "short") return `${Math.round(c.score)}/100`;
-    if (c.stage === "watch" || c.stage === "building") return `${Math.round(c.score)}/49`;
-    return c.score ? `${Math.round(c.score)}/49` : "0/49";
-  }
-
-  function alertStageLabel(stage) {
-    if (stage === "short") return "FADE SHORT";
-    if (stage === "watch") return "PUMP WATCH";
-    if (stage === "building") return "PUMP BUILDING";
-    return "HUNTING";
-  }
-
-  function rememberPumpAlerts(candidates) {
-    if (!latest || !fetchedAt || lastAlertScanAt === fetchedAt) return;
-    lastAlertScanAt = fetchedAt;
-    const now = Date.now();
-    const currentAlerts = new Set();
-    let changed = false;
-
-    for (const c of candidates) {
-      if (!c || !isPumpAlertStage(c.stage)) continue;
-      currentAlerts.add(c.symbol);
-      if (activeAlertStages[c.symbol] === c.stage) continue;
-
-      const recentDuplicate = alertHistory.some((row) =>
-        row.symbol === c.symbol && row.stage === c.stage && now - Number(row.ts || 0) < 120000
-      );
-      activeAlertStages[c.symbol] = c.stage;
-      if (recentDuplicate) continue;
-
-      const symData = latest.symbols?.[c.symbol] || {};
-      const eta = c.decision?.fade_eta || c.decision?.fadeEta || {};
-      const plan = tradePlanFor(c.decision, symData);
-      const sim = simulationFromPlan(plan);
-      alertHistory.unshift({
-        ts: now,
-        symbol: c.symbol,
-        stage: c.stage,
-        label: alertStageLabel(c.stage),
-        scoreText: candidateScoreText(c),
-        price: symData.price,
-        eta: eta.label || "",
-        simEntryPrice: pick(sim, "entry_price", "entryPrice", "limit_price", "limitPrice") || pick(plan, "entry_price", "entryPrice"),
-        simTakeProfit: pick(sim, "take_profit", "takeProfit", "target_exit_price", "targetExitPrice") || pick(plan, "take_profit", "takeProfit", "target_exit_price", "targetExitPrice"),
-        simStopLoss: pick(sim, "recommended_stop_loss", "recommendedStopLoss", "stop_loss", "stopLoss") || pick(plan, "stop_loss", "stopLoss"),
-      });
-      changed = true;
-    }
-
-    for (const symbol of Object.keys(activeAlertStages)) {
-      if (!currentAlerts.has(symbol)) delete activeAlertStages[symbol];
-    }
-
-    if (changed) {
-      alertHistory = alertHistory.slice(0, 5);
-      saveAlertHistory();
-    }
-  }
-
-  function maybeAutoSelectBest(candidates) {
-    const best = bestCandidate(candidates);
-    if (!autoFollow || !best) return best;
-    const now = Date.now();
-    if (best.symbol === activeSymbol) return best;
-
-    // Pump-fade scalps are time-sensitive. In AUTO mode, any live
-    // building/watch/ready candidate should take over the panel immediately;
-    // the old cooldown/manual-hold behavior was too slow for the pump phase.
-    if (isPumpAlertStage(best.stage) && !best.blocked) {
-      activeSymbol = best.symbol;
-      localStorage.setItem("bxm-active-symbol", activeSymbol);
-      manualHoldUntil = 0;
-      lastAutoSwitchAt = now;
-      return best;
-    }
-
-    const current = candidateFor(activeSymbol, latest?.symbols?.[activeSymbol] || {});
-    if (manualHoldUntil > now) return best;
-    const actionable = best.stage !== "hunting";
-    const cooledDown = now - lastAutoSwitchAt >= (actionable ? 5000 : 15000);
-    const stageUpgrade = best.priority > current.priority;
-    const scoreUpgrade = best.priority === current.priority && best.rankScore - current.rankScore >= 15;
-    const huntingUpgrade = !actionable && current.stage === "hunting" && best.score >= current.score + 20;
-    const currentIsDead = !current.symbol || !latest?.symbols?.[activeSymbol];
-    if (cooledDown && (stageUpgrade || scoreUpgrade || huntingUpgrade || currentIsDead)) {
-      activeSymbol = best.symbol;
-      localStorage.setItem("bxm-active-symbol", activeSymbol);
-      lastAutoSwitchAt = now;
-    }
-    return best;
-  }
-
-  function stopTitleFlash() {
-    if (titleFlashTimer) clearInterval(titleFlashTimer);
-    titleFlashTimer = null;
-    titleFlashKey = "";
-    titleFlashPrefix = "";
-    titleFlashOn = false;
-    if (
-      document.title.startsWith("[PUMP BUILDING ")
-      || document.title.startsWith("[PUMP WATCH ")
-      || document.title.startsWith("[FADE SHORT ")
-    ) {
-      document.title = cleanPageTitle;
-    }
-  }
-
-  function ensureTitleFlash(candidate) {
-    if (!candidate || !isPumpAlertStage(candidate.stage)) {
-      stopTitleFlash();
-      return;
-    }
-    const key = `${candidate.stage}:${candidate.symbol}`;
-    const label = candidate.stage === "short"
-      ? "FADE SHORT"
-      : candidate.stage === "watch"
-        ? "PUMP WATCH"
-        : "PUMP BUILDING";
-    const symbol = candidate.symbol.replace("USDT", "");
-    titleFlashPrefix = `[${label} ${symbol}]`;
-    if (titleFlashKey !== key) {
-      cleanPageTitle = document.title
-        .replace(/^\[PUMP BUILDING [^\]]+\] /, "")
-        .replace(/^\[PUMP WATCH [^\]]+\] /, "")
-        .replace(/^\[FADE SHORT [^\]]+\] /, "");
-      titleFlashKey = key;
-      titleFlashOn = false;
-    }
-    if (titleFlashTimer) return;
-    titleFlashTimer = setInterval(() => {
-      titleFlashOn = !titleFlashOn;
-      document.title = titleFlashOn ? `${titleFlashPrefix} ${cleanPageTitle}` : cleanPageTitle;
-    }, 700);
-  }
-
-  function stageCopy(stage, score) {
-    if (stage === "short") return {
-      title: "FADE SHORT",
-      kicker: score >= 95 ? "AUTO-TRADE READY" : "SHORT READY",
-      detail: "pump has stalled and bearish rejection is confirmed",
-      icon: "v",
-    };
-    if (stage === "building") return {
-      title: "PUMP BUILDING",
-      kicker: "WATCH NOW",
-      detail: "buyers are pressing before the fade; no short until rejection",
-      icon: "^",
-    };
-    if (stage === "watch") return {
-      title: "PUMP WATCH",
-      kicker: "GET READY",
-      detail: "pump detected now; prepare for the fast fade-short entry",
-      icon: "||",
-    };
-    return {
-      title: "HUNTING",
-      kicker: "NO TRADE",
-      detail: "waiting for a small fast pump before looking for the short",
-      icon: "||",
-    };
-  }
-
-  function checkRows(decision) {
-    const rows = decision?.pump_fade_checks || decision?.pumpFadeChecks || [];
-    if (!rows.length) return "";
-    return `<div class="bxm-checks">
-      <div class="bxm-section-title">Pump fade checklist</div>
-      ${rows.slice(0, 7).map((row) => `
-        <div class="bxm-check ${row.passed ? "passed" : ""}">
-          <div>
-            <strong>${escapeHtml(row.label || row.key || "Check")}</strong>
-            <span>${escapeHtml(row.detail || "")}</span>
-          </div>
-          <em>${row.passed ? "OK" : "WAIT"}</em>
-        </div>
-      `).join("")}
-    </div>`;
-  }
-
-  function tradePlanHtml(decision, symData) {
-    const plan = tradePlanFor(decision, symData);
-    if (!plan || !["ready", "preview"].includes(String(plan.status || ""))) return "";
-    const preview = plan.status === "preview" || plan.preview === true;
-    const orderType = String(pick(plan, "order_type", "orderType") || "MARKET").replace(/_/g, " ");
-    const entry = Number(pick(plan, "entry_price", "entryPrice"));
-    const target = Number(pick(plan, "target_exit_price", "targetExitPrice", "max_exit_price", "maxExitPrice", "take_profit", "takeProfit"));
-    const stop = Number(pick(plan, "stop_loss", "stopLoss"));
-    const rewardPct = pick(plan, "reward_pct", "rewardPct");
-    const riskPct = pick(plan, "risk_pct", "riskPct");
-    const entryLabel = preview ? "Suggested short entry trigger" : "Suggested short entry";
-    const targetLabel = preview ? "Preview take profit" : "Take profit / suggested exit";
-    const stopLabel = preview ? "Preview stop loss" : "Stop loss";
-    const rewardLabel = "Target move";
-    const riskLabel = "Stop distance";
-    return `<div class="bxm-plan ${preview ? "preview" : ""}">
-      <div class="bxm-plan-head">
-        <span>${entryLabel}</span>
-        <strong>${escapeHtml(orderType)}</strong>
-      </div>
-      <div class="bxm-plan-price">${fmtPrice(entry)}</div>
-      <div class="bxm-plan-grid">
-        <div><span>${targetLabel}</span><strong class="good">${fmtPrice(target)}</strong></div>
-        <div><span>${stopLabel}</span><strong class="bad">${fmtPrice(stop)}</strong></div>
-        <div><span>${rewardLabel}</span><strong>${fmtPct(rewardPct)}</strong></div>
-        <div><span>${riskLabel}</span><strong>${fmtPct(riskPct)}</strong></div>
-      </div>
-      ${plan.rationale ? `<div class="bxm-note">${escapeHtml(plan.rationale)}</div>` : ""}
-    </div>`;
-  }
-
-  function fadeEtaHtml(decision) {
-    const eta = decision?.fade_eta || decision?.fadeEta;
-    if (!eta || !eta.label || eta.label === "--") return "";
-    const status = String(eta.status || "watch");
-    const reason = eta.reason || "rough timing estimate from pump speed and tape";
-    return `<div class="bxm-eta status-${escapeHtml(status)}">
-      <span>Fade ETA</span>
-      <strong>${escapeHtml(eta.label)}</strong>
-      <em>${escapeHtml(reason)}</em>
-    </div>`;
-  }
-
-  function countdownHtml(symData, symbol) {
-    const pos = activeOpenPosition(symData, symbol);
-    if (!pos) return "";
-    const remaining = positionCountdown(pos);
-    const closeAfter = Number(pick(pos, "auto_close_after_seconds", "autoCloseAfterSeconds"));
-    const timedCloseEnabled = Number.isFinite(closeAfter) && closeAfter > 0 && remaining !== null;
-    const expired = timedCloseEnabled && remaining <= 0;
-    const urgent = timedCloseEnabled && remaining <= 30;
-    const status = timedCloseEnabled
-      ? "Timed auto-close armed"
-      : "Timed auto-close disabled";
-    const side = pick(pos, "side") || "POSITION";
-    const qty = pick(pos, "qty", "size", "volume");
-    const entry = pick(pos, "avg_open_price", "avgOpenPrice", "entryPrice", "openPrice");
-    return `<div class="bxm-countdown ${urgent ? "urgent" : ""} ${expired ? "expired" : ""}">
-      <div><span>Open position</span><strong>${timedCloseEnabled ? fmtCountdown(remaining) : "manual"}</strong></div>
-      <p>${escapeHtml(side)} ${qty ? escapeHtml(qty) : ""}${entry ? ` @ ${fmtPrice(entry)}` : ""} - ${escapeHtml(status)}</p>
-    </div>`;
-  }
-
-  function closedTradesHtml(symData) {
-    const stats = symData?.closed_trade_stats || symData?.closedTradeStats;
-    const rows = symData?.closed_trades || symData?.closedTrades || symData?.trade_history || symData?.tradeHistory || [];
-    if (!stats && !rows.length) return "";
-    const total = stats?.count ?? rows.length;
-    const winRate = stats?.win_rate ?? stats?.winRate;
-    const net = stats?.net_pnl ?? stats?.netPnl;
-    return `<div class="bxm-history">
-      <div class="bxm-history-head">
-        <div>
-          <div class="bxm-section-title">Closed trades</div>
-          <span>${total || 0} trades${winRate !== null && winRate !== undefined ? ` - ${Number(winRate).toFixed(1)}% win` : ""}</span>
-        </div>
-        <strong class="${num(net) >= 0 ? "good" : "bad"}">P&L ${fmtMoney(net)}</strong>
-      </div>
-      ${rows.slice(0, 4).map((r) => `
-        <div class="bxm-trade">
-          <strong class="${num(r.net_pnl ?? r.netPnl) >= 0 ? "good" : "bad"}">${fmtMoney(r.net_pnl ?? r.netPnl)}</strong>
-          <span>${escapeHtml(r.side || "")} ${fmtPrice(r.entry_price ?? r.entryPrice)} -> ${fmtPrice(r.exit_price ?? r.exitPrice)} - ${fmtPct(r.price_pnl_pct ?? r.pricePnlPct)}</span>
-        </div>
-      `).join("")}
-    </div>`;
-  }
-
-  function alertHistoryHtml() {
-    return `<div class="bxm-alert-history">
-      <div class="bxm-alert-history-head">
-        <div class="bxm-section-title">Signal history - no P&L</div>
-        <span>last 5</span>
-      </div>
-      <p class="bxm-alert-disclaimer">Alerts only. Estimated or actual P&L is shown only after a trade is closed.</p>
-      ${alertHistory.length ? alertHistory.map((row) => `
-        <div class="bxm-alert-event stage-${escapeHtml(row.stage || "")}">
-          <time>${escapeHtml(fmtClock(row.ts))}</time>
-          <div>
-            <strong>${escapeHtml((row.symbol || "").replace("USDT", ""))} ${escapeHtml(row.label || alertStageLabel(row.stage))}</strong>
-            <span>${escapeHtml(row.scoreText || "")}${row.eta ? ` - ETA ${escapeHtml(row.eta)}` : ""}${row.price ? ` - @ ${fmtPrice(row.price)}` : ""}</span>
-            ${(row.simEntryPrice || row.simTakeProfit || row.simStopLoss) ? `<small>
-              Levels: entry ${fmtPrice(row.simEntryPrice)} - TP ${fmtPrice(row.simTakeProfit)} - stop ${fmtPrice(row.simStopLoss)}
-            </small>` : ""}
-          </div>
-        </div>
-      `).join("") : `<div class="bxm-alert-empty">No pump warnings logged yet.</div>`}
-    </div>`;
-  }
-
-  function subRowsHtml(symData) {
-    const h = symData?.horizons || {};
-    const keys = ["h_15m", "h_30m", "h_1h"];
-    return `<div class="bxm-subrows">
-      ${keys.map((key) => {
-        const row = h[key];
-        if (!row) return "";
-        const ls = Math.round(num(row.long_score) * 100);
-        const ss = Math.round(num(row.short_score) * 100);
-        const side = ss > ls ? "SHORT" : ls > ss ? "LONG" : "MIXED";
-        const fill = Math.max(ls, ss);
-        return `<div class="bxm-subrow">
-          <span>${escapeHtml(row.label || key)}</span>
-          <strong class="${side === "SHORT" ? "bad" : side === "LONG" ? "good" : ""}">${side}</strong>
-          <em>L ${ls} / S ${ss}</em>
-          <b><i style="width:${Math.min(100, fill)}%"></i></b>
-        </div>`;
-      }).join("")}
-    </div>`;
-  }
-
-  function buildPanel() {
-    const root = document.createElement("div");
-    root.id = "bxm-overlay";
-    if (collapsed) root.classList.add("bxm-collapsed");
-    root.innerHTML = `
-      <div class="bxm-header" id="bxm-drag">
-        <span class="bxm-title">Pump Fade Radar</span>
-        <span class="bxm-actions">
-          <button id="bxm-auto" title="Auto-select strongest pump-fade candidate">AUTO</button>
-          <button id="bxm-refresh" title="Refresh now">R</button>
-          <button id="bxm-settings" title="Settings">S</button>
-          <button id="bxm-toggle" title="Collapse / expand">${collapsed ? "+" : "-"}</button>
-        </span>
-      </div>
-      <div class="bxm-banner"></div>
-      <div class="bxm-body">
-        <div id="bxm-tabs" class="bxm-tabs"></div>
-        <div id="bxm-symbol"></div>
-      </div>
-      <div class="bxm-footer"><span id="bxm-status">Connecting...</span><span id="bxm-fresh"></span></div>
-    `;
-    document.body.appendChild(root);
-
-    let dragOff = null;
-    const drag = root.querySelector("#bxm-drag");
-    drag.addEventListener("mousedown", (e) => {
-      const r = root.getBoundingClientRect();
-      dragOff = { x: e.clientX - r.left, y: e.clientY - r.top };
-      e.preventDefault();
-    });
-    document.addEventListener("mousemove", (e) => {
-      if (!dragOff) return;
-      const x = Math.max(0, Math.min(window.innerWidth - 80, e.clientX - dragOff.x));
-      const y = Math.max(0, Math.min(window.innerHeight - 40, e.clientY - dragOff.y));
-      root.style.left = `${x}px`;
-      root.style.top = `${y}px`;
-      root.style.right = "auto";
-    });
-    document.addEventListener("mouseup", () => {
-      if (!dragOff) return;
-      localStorage.setItem("bxm-pos", JSON.stringify({ left: root.style.left, top: root.style.top, width: root.style.width, height: root.style.height }));
-      dragOff = null;
-    });
-
-    try {
-      const pos = JSON.parse(localStorage.getItem("bxm-pos") || "null");
-      if (pos) {
-        root.style.left = pos.left || "";
-        root.style.top = pos.top || "";
-        root.style.right = "auto";
-        if (pos.width) root.style.width = pos.width;
-        if (pos.height) root.style.height = pos.height;
-      }
-    } catch {}
-
-    root.querySelector("#bxm-toggle").addEventListener("click", () => {
-      collapsed = !collapsed;
-      localStorage.setItem("bxm-collapsed", collapsed ? "1" : "0");
-      root.classList.toggle("bxm-collapsed", collapsed);
-      root.querySelector("#bxm-toggle").textContent = collapsed ? "+" : "-";
-    });
-    root.querySelector("#bxm-settings").addEventListener("click", () => {
-      chrome.runtime.sendMessage({ type: "open-options" }).catch(() => {});
-    });
-    const autoBtn = root.querySelector("#bxm-auto");
-    autoBtn.classList.toggle("active", autoFollow);
-    autoBtn.addEventListener("click", () => {
-      autoFollow = !autoFollow;
-      localStorage.setItem(AUTO_FOLLOW_KEY, autoFollow ? "1" : "0");
-      manualHoldUntil = 0;
-      autoBtn.classList.toggle("active", autoFollow);
-      render();
-    });
-    root.querySelector("#bxm-refresh").addEventListener("click", () => {
-      chrome.runtime.sendMessage({ type: "force-refresh" }, (resp) => {
-        if (resp) {
-          latest = resp.payload;
-          fetchedAt = resp.fetchedAt || Date.now();
-          pollMs = resp.pollMs || pollMs;
-          render();
-        }
-      });
-    });
-    return root;
-  }
-
+(() => {
+  if (document.getElementById('bis-panel')) return;
+  const host = document.createElement('aside');
+  host.id = 'bis-panel';
+  host.setAttribute('aria-label', 'Bitunix intraday signals');
+  document.documentElement.appendChild(host);
+  let payload = null, selected = '', collapsed = false, formOpen = false, lastAlert = '', alertsInitialized = false;
+  const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+  const money = value => Number.isFinite(value) ? '$' + value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—';
+  const price = value => Number.isFinite(value) ? value.toLocaleString('en-US', { maximumFractionDigits: value < 1 ? 8 : value < 100 ? 5 : 2 }) : '—';
+  const fixed = (value, digits = 2) => Number.isFinite(value) ? value.toFixed(digits) : '—';
+  const label = value => String(value || 'WAIT').replaceAll('_', ' ');
+  const tone = state => state?.startsWith('EXIT') ? 'exit' : state?.includes('LONG') ? 'long' : state?.includes('SHORT') ? 'short' : 'wait';
+  const ago = timestamp => timestamp ? Math.max(0, Math.floor(Date.now() / 1000 - timestamp)) + 's ago' : 'Waiting for data';
+  function fresh(row) { return !payload?.error && row?.as_of > 0 && Date.now() / 1000 - row.as_of <= (payload?.data_max_age || 60); }
+  function actionable(row) { return fresh(row) && row?.state?.startsWith('ENTER_') && row.plan?.expires_at > Date.now() / 1000; }
+  const send = (type, body) => chrome.runtime.sendMessage({ type, body });
+  host.innerHTML = `<header><div><span class="bis-eyebrow">BITUNIX · INTRADAY</span><strong>Trade signals</strong></div><div class="bis-actions"><button data-action="settings" title="Connection settings" aria-label="Connection settings">⚙</button><button data-action="collapse" aria-label="Collapse panel">−</button></div></header><div id="bis-body"><div id="bis-status" role="status"></div><div id="bis-planning"></div><div id="bis-selection"></div><div id="bis-card"></div><div id="bis-trades"></div><details><summary>Recent alerts</summary><div id="bis-history"></div></details><details><summary>Recorded closures</summary><div id="bis-closed"></div></details><footer>Alerts only · Orders and stops stay on Bitunix.<br>Candidate rules under evaluation; no measured win probability.</footer></div><div id="bis-form"></div>`;
   function render() {
-    if (!panelEl) panelEl = buildPanel();
-    const tabs = panelEl.querySelector("#bxm-tabs");
-    const block = panelEl.querySelector("#bxm-symbol");
-    const status = panelEl.querySelector("#bxm-status");
-    const fresh = panelEl.querySelector("#bxm-fresh");
-    const banner = panelEl.querySelector(".bxm-banner");
-
-    if (!latest) {
-      status.textContent = "Waiting for first tick...";
-      tabs.innerHTML = "";
-      block.innerHTML = "";
+    if (formOpen) {
+      const exit = payload?.trades?.find(t => t.state.startsWith('EXIT_'));
+      host.querySelector('.bis-form-live').textContent = payload?.error || (exit ? `${exit.symbol}: ${label(exit.state)} — ${exit.reason}` : '');
       return;
     }
-
-    if (latest.error) {
-      tabs.innerHTML = "";
-      block.innerHTML = `<div class="bxm-error">
-        <strong>${escapeHtml(latest.error)}</strong>
-        <p>${escapeHtml(latest.message || "")}</p>
-        ${latest.error === "not_configured" ? `<button id="bxm-open-settings">Open settings</button>` : ""}
-      </div>`;
-      const btn = block.querySelector("#bxm-open-settings");
-      if (btn) btn.addEventListener("click", () => chrome.runtime.sendMessage({ type: "open-options" }));
-      status.textContent = "Error";
-      fresh.textContent = "";
+    const checksOpen = host.querySelector('#bis-card details')?.open || false;
+    const status = host.querySelector('#bis-status');
+    if (!payload || (payload.error && !payload.symbols)) {
+      status.className = 'bis-notice'; status.textContent = payload?.error || 'Connecting to your signal scanner…';
+      for (const id of ['card', 'selection', 'planning', 'trades', 'history', 'closed']) host.querySelector('#bis-' + id).replaceChildren();
       return;
     }
-
-    const symbols = Object.keys(latest.symbols || {});
-    if (!symbols.length) {
-      block.innerHTML = `<div class="bxm-error">No overlay data yet. The bot may still be warming up.</div>`;
-      tabs.innerHTML = "";
-      status.textContent = "No data";
-      return;
+    const settings = payload.settings;
+    status.className = payload.error ? 'bis-notice' : 'bis-status';
+    status.textContent = payload.error || payload.status?.error || (payload.status?.ready ? '● Monitoring liquid USDT perpetuals' : 'Waiting for complete market data');
+    host.querySelector('#bis-planning').innerHTML = `<div><small>Planning equity</small><b>${money(settings.planning_equity)}</b></div><div><small>Risk / trade</small><b>${fixed(settings.risk_pct)}%</b></div><div><small>Leverage / hold</small><b>${settings.leverage}x · ≤${settings.hold_hours}h</b></div><button data-action="planning">Edit</button>`;
+    const rows = Object.values(payload.symbols || {});
+    if (selected && !payload.symbols[selected]) selected = '';
+    const symbol = selected && payload.symbols[selected] ? selected : payload.best_symbol;
+    const row = payload.symbols[symbol];
+    if (document.activeElement?.id !== 'bis-symbol') host.querySelector('#bis-selection').innerHTML = `<label>Market <select id="bis-symbol"><option value="">Best setup</option>${rows.map(r => `<option value="${esc(r.symbol)}" ${selected === r.symbol ? 'selected' : ''}>${esc(r.symbol)} · ${esc(fresh(r) ? label(r.state) : 'WAIT')}</option>`).join('')}</select></label><button data-action="refresh" title="Refresh signals">↻</button>`;
+    if (row) {
+      const state = fresh(row) && (!row.plan || row.plan.expires_at > Date.now() / 1000) ? row.state : 'WAIT';
+      const plan = row.plan;
+      host.querySelector('#bis-card').innerHTML = `<article class="bis-signal ${tone(state)}"><div class="bis-row"><strong>${esc(row.symbol)}</strong><span>${price(row.price)}</span></div><div class="bis-state" aria-live="polite">${esc(label(state))}</div><p>${esc(fresh(row) ? row.reasons?.[0] : 'Data is stale. Entry alerts are paused.')}</p><div class="bis-meta">${esc(row.setup || '4h direction → 1h setup → 15m entry')} · ${esc(ago(row.as_of))}</div>${plan ? `<div class="bis-levels"><div><small>Entry zone</small><b>${price(plan.entry_low)} – ${price(plan.entry_high)}</b></div><div><small>Stop loss</small><b>${price(plan.stop)}</b></div><div><small>Profit target</small><b>${price(plan.target)}</b></div><div><small>Net reward / risk</small><b>${fixed(plan.net_reward_risk)}R</b></div><div><small>Planned loss incl. costs</small><b>${money(plan.risk_usdt)} · ${fixed(plan.risk_pct)}%</b></div><div><small>Notional / margin</small><b>${money(plan.notional)} / ${money(plan.margin)}</b></div></div><div class="bis-meta">Entry expires ${new Date(plan.expires_at * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} · Estimated leverage ceiling ${plan.max_leverage}x</div><div class="bis-buttons"><button data-action="paper" ${actionable(row) ? '' : 'disabled'}>Track paper trade</button><button data-action="manual" ${actionable(row) ? '' : 'disabled'}>Record my fill</button></div>` : ''}<details><summary>Why this signal · ${row.checks.filter(c => c.passed).length}/${row.checks.length} checks</summary><ul class="bis-checks">${row.checks.map(c => `<li class="${c.passed ? 'pass' : 'fail'}"><span>${c.passed ? '✓' : '○'}</span><div><b>${esc(c.label)}</b><small>${esc(c.detail)}</small></div></li>`).join('')}</ul><div class="bis-meta">4h: ${esc(row.metrics.trend_4h || '—')} · 1h: ${esc(row.metrics.trend_1h || '—')}<br>ATR: ${fixed(row.metrics.atr_pct)}% · Volume: ${fixed(row.metrics.relative_volume)}×<br>UTC session VWAP: ${price(row.metrics.vwap)}<br>BTC relative strength (6h): ${fixed(row.metrics.relative_strength_pct)}%<br>Funding / interval: ${fixed(row.metrics.funding_rate_pct, 4)}%<br>Open interest: ${row.metrics.open_interest == null ? 'Unavailable' : price(row.metrics.open_interest)}</div>${plan ? `<p class="bis-meta">Estimated liquidation: ${price(plan.liquidation_estimate)}. Isolated margin, no extra collateral; verify on Bitunix. Estimated total costs ${fixed(plan.cost_pct)}%, including ${plan.funding_payments} projected funding payments. Future rates can change. Target 2 (context only): ${price(plan.target2)}.</p>` : ''}</details></article>`;
+    } else host.querySelector('#bis-card').innerHTML = '<p class="bis-empty">Scanner warming up. Missing data blocks entries.</p>';
+    host.querySelector('#bis-trades').innerHTML = `<h3>Tracked trades <span>${payload.trades.length}</span></h3>${payload.trades.length ? payload.trades.map(t => payload.error && !t.state.startsWith('EXIT_') ? { ...t, state: 'REVIEW', reason: 'Connection unavailable. Check Bitunix; this is the last recorded plan.' } : t).map(t => `<article class="bis-trade ${tone(t.state)}"><div class="bis-row"><b>${esc(t.symbol)} · ${esc(t.plan.side.toUpperCase())}</b><small>${t.kind === 'paper' ? 'PAPER' : 'USER RECORDED'}</small></div><strong class="bis-trade-state">${esc(label(t.state))}</strong><p>${esc(t.reason)}</p><div class="bis-meta">Entry ${price(t.plan.entry)} · Stop ${price(t.current_stop)} · Target ${price(t.plan.target)}<br>Held ${fixed((Date.now() / 1000 - t.opened_at) / 3600, 1)}h / ${t.plan.hold_hours}h max</div><button data-action="close" data-id="${esc(t.id)}">Record closure</button></article>`).join('') : '<p class="bis-empty">Record an entry to receive hold and exit guidance. Tracking never submits an order.</p>'}`;
+    host.querySelector('#bis-history').innerHTML = payload.history.slice(0, 10).map(event => `<div class="bis-history-row"><div><b>${esc(event.symbol)}</b> · ${esc(label(event.state))}<small>${esc(event.reason)}</small></div><time>${new Date(event.time * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time></div>`).join('') || '<p class="bis-empty">Confirmed entries and exit changes appear here.</p>';
+    host.querySelector('#bis-closed').innerHTML = payload.closed_trades.slice(0, 10).map(t => `<div class="bis-history-row"><div><b>${esc(t.symbol)}</b> · ${esc(t.kind)}<small>Recorded exit ${price(t.exit_price)} · estimated net</small></div><b>${money(t.estimated_net_pnl)}</b></div>`).join('') || '<p class="bis-empty">No recorded closures. Signal alerts are not completed trades.</p>';
+    if (host.querySelector('#bis-card details')) host.querySelector('#bis-card details').open = checksOpen;
+    const alert = payload.history[0];
+    if (alert && alert.id !== lastAlert) {
+      if (alertsInitialized && Date.now() / 1000 - alert.time < 90) {
+        host.classList.remove('bis-flash'); void host.offsetWidth; host.classList.add('bis-flash');
+      }
+      lastAlert = alert.id;
     }
-
-    if (!activeSymbol || !symbols.includes(activeSymbol)) {
-      activeSymbol = symbols[0];
-      localStorage.setItem("bxm-active-symbol", activeSymbol);
-    }
-
-    const candidates = rankedCandidates(symbols);
-    rememberPumpAlerts(candidates);
-    const best = maybeAutoSelectBest(candidates);
-    const orderedSymbols = candidates.map((c) => c.symbol);
-    panelEl.querySelector("#bxm-auto")?.classList.toggle("active", autoFollow);
-    const autoSelected = Boolean(autoFollow && best && best.symbol === activeSymbol);
-    panelEl.classList.toggle("bxm-auto-selected", autoSelected);
-
-    tabs.innerHTML = orderedSymbols.map((s) => {
-      const c = candidateFor(s, latest.symbols[s]);
-      return `<button class="${s === activeSymbol ? "active" : ""} ${best && s === best.symbol ? "best" : ""} ${c.stage}" data-sym="${escapeHtml(s)}" title="${escapeHtml(c.stage.toUpperCase())} ${escapeHtml(candidateScoreText(c))}">
-        <i></i>${escapeHtml(s.replace("USDT", ""))}
-      </button>`;
-    }).join("");
-    tabs.querySelectorAll("button").forEach((btn) => {
-      btn.addEventListener("click", () => {
-        activeSymbol = btn.dataset.sym;
-        localStorage.setItem("bxm-active-symbol", activeSymbol);
-        manualHoldUntil = Date.now() + 60000;
-        render();
-      });
-    });
-
-    const symData = latest.symbols[activeSymbol] || {};
-    const decision = decisionFor(symData);
-    const stage = stageFor(decision);
-    const score = scoreFor(decision);
-    const copy = stageCopy(stage, score);
-    const ageSecs = Math.max(0, Math.floor(Date.now() / 1000 - num(symData.as_of)));
-    const warnings = decision?.warnings || [];
-    const gate = symData?.symbol_trade_quality_gate || symData?.symbolTradeQualityGate;
-    const bestStage = best?.stage || "";
-    const bestText = best
-      ? `${best.symbol.replace("USDT", "")} - ${best.stage.toUpperCase()} - ${candidateScoreText(best)}`
-      : "";
-    const bestLabel = autoSelected ? "AUTO SELECTED" : (autoFollow ? "AUTO BEST" : "BEST NOW");
-    const alertCandidate = best && isPumpAlertStage(best.stage) ? best : null;
-
-    panelEl.classList.toggle("bxm-alert", alertCandidate?.stage === "short");
-    panelEl.classList.toggle("bxm-watch", alertCandidate?.stage === "watch");
-    panelEl.classList.toggle("bxm-building", alertCandidate?.stage === "building" || (!alertCandidate && stage === "building"));
-    banner.textContent = alertCandidate?.stage === "short"
-      ? `FADE SHORT READY - ${alertCandidate.symbol.replace("USDT", "")} - ${candidateScoreText(alertCandidate)} - ${alertCandidate.decision?.suggested_lev || alertCandidate.decision?.suggestedLev || 100}x`
-      : alertCandidate?.stage === "watch"
-        ? `PUMP WATCH - ${alertCandidate.symbol.replace("USDT", "")} - ${candidateScoreText(alertCandidate)} - GET READY`
-        : alertCandidate?.stage === "building"
-          ? `PUMP BUILDING - ${alertCandidate.symbol.replace("USDT", "")} - ${candidateScoreText(alertCandidate)} - WATCH NOW`
-        : stage === "building"
-          ? `PUMP BUILDING - ${score}/49`
-          : "";
-    ensureTitleFlash(alertCandidate);
-
-    block.innerHTML = `
-      ${best ? `<button id="bxm-best-pick" class="bxm-best stage-${escapeHtml(bestStage)} ${best.symbol === activeSymbol ? "active" : ""}" title="Select the strongest current candidate">
-        <span>${escapeHtml(bestLabel)}</span>
-        <strong>${escapeHtml(bestText)}</strong>
-      </button>` : ""}
-      <div class="bxm-symbol-row">
-        <span>${escapeHtml(activeSymbol)} @ ${fmtPrice(symData.price)}</span>
-        <em>${fmtAge(ageSecs)}</em>
-      </div>
-      <div class="bxm-card stage-${stage}">
-        <div class="bxm-card-main">
-          <span>${escapeHtml(copy.icon)}</span>
-          <strong>${escapeHtml(copy.title)}</strong>
-          <b>${stage === "short" ? `${score}/100` : score ? `${score}/49` : ""}</b>
-        </div>
-        <p><strong>${escapeHtml(copy.kicker)}</strong> - ${escapeHtml(copy.detail)}</p>
-      </div>
-      ${fadeEtaHtml(decision)}
-      ${warnings.length ? `<div class="bxm-warning">${escapeHtml(warnings[0])}</div>` : ""}
-      ${gate?.reason ? `<div class="bxm-warning bad">${escapeHtml(gate.reason)}</div>` : ""}
-      ${tradePlanHtml(decision, symData)}
-      ${alertHistoryHtml()}
-      ${countdownHtml(symData, activeSymbol)}
-      ${closedTradesHtml(symData)}
-      ${subRowsHtml(symData)}
-      ${checkRows(decision)}
-    `;
-    const bestBtn = block.querySelector("#bxm-best-pick");
-    if (bestBtn && best) {
-      bestBtn.addEventListener("click", () => {
-        activeSymbol = best.symbol;
-        localStorage.setItem("bxm-active-symbol", activeSymbol);
-        manualHoldUntil = 0;
-        render();
-      });
-    }
-
-    const refreshText = pollMs ? `refresh ${(pollMs / 1000).toFixed(pollMs < 2000 ? 1 : 0)}s` : "refresh --";
-    status.textContent = `${symbols.length} symbols - ${autoFollow ? "auto-best on" : "manual select"} - ${refreshText} - bot ${latest.tick_seconds || 5}s`;
-    fresh.textContent = fetchedAt ? `Fetched ${fmtAge(Math.floor((Date.now() - fetchedAt) / 1000))}` : "";
+    alertsInitialized = true;
   }
-
-  panelEl = buildPanel();
-  render();
-
-  chrome.runtime.onMessage.addListener((msg) => {
-    if (msg?.type !== "momentum-update") return;
-    latest = msg.payload;
-    fetchedAt = msg.fetchedAt || Date.now();
-    pollMs = msg.pollMs || pollMs;
-    render();
+  function openForm(title, contents, submitLabel, onSubmit) {
+    formOpen = true;
+    const container = host.querySelector('#bis-form');
+    container.innerHTML = `<div class="bis-modal" role="dialog" aria-modal="true" aria-label="${esc(title)}"><form><h3>${esc(title)}</h3><p class="bis-form-live" role="alert"></p>${contents}<p class="bis-form-error" role="alert"></p><div class="bis-buttons"><button type="button" data-action="cancel">Cancel</button><button type="submit">${esc(submitLabel)}</button></div></form></div>`;
+    const form = container.querySelector('form');
+    form.querySelector('input, select')?.focus();
+    form.addEventListener('submit', async event => {
+      event.preventDefault();
+      const button = form.querySelector('[type="submit"]'); button.disabled = true;
+      try {
+        const response = await onSubmit(new FormData(form));
+        if (!response?.ok) throw new Error(response?.error || 'Could not save.');
+        closeForm(); await refresh();
+      } catch (error) { form.querySelector('.bis-form-error').textContent = error.message; button.disabled = false; }
+    });
+  }
+  function closeForm() { formOpen = false; host.querySelector('#bis-form').replaceChildren(); render(); }
+  host.addEventListener('change', event => { if (event.target.id === 'bis-symbol') { selected = event.target.value; render(); } });
+  host.addEventListener('keydown', event => {
+    if (event.key === 'Escape' && formOpen) closeForm();
+    if (event.key === 'Tab' && formOpen) {
+      const elements = [...host.querySelectorAll('.bis-modal input, .bis-modal select, .bis-modal button:not(:disabled)')];
+      const first = elements[0], last = elements.at(-1);
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    }
   });
-
-  chrome.runtime.sendMessage({ type: "request-latest" }, (resp) => {
-    if (!resp) return;
-    latest = resp.payload;
-    fetchedAt = resp.fetchedAt || 0;
-    pollMs = resp.pollMs || pollMs;
-    render();
+  host.addEventListener('click', event => {
+    const button = event.target.closest('button[data-action]');
+    if (!button || button.disabled) return;
+    const action = button.dataset.action;
+    if (action === 'settings') send('open-options');
+    if (action === 'refresh') refresh(true);
+    if (action === 'cancel') closeForm();
+    if (action === 'collapse') {
+      collapsed = !collapsed; host.classList.toggle('bis-collapsed', collapsed); button.textContent = collapsed ? '+' : '−';
+      button.setAttribute('aria-label', collapsed ? 'Expand panel' : 'Collapse panel');
+    }
+    if (action === 'planning') {
+      const s = payload.settings;
+      openForm('Planning settings', `<p>These are planning values, not your exchange balance. Existing tracked plans remain unchanged.</p><label>Planning equity (USDT)<input name="planning_equity" type="number" min="10" max="100000000" step="0.01" value="${s.planning_equity}" required></label><label>Risk per trade (%)<input name="risk_pct" type="number" min="0.01" max="2" step="0.01" value="${s.risk_pct}" required></label><label>Leverage (isolated margin)<input name="leverage" type="number" min="1" max="40" step="1" value="${s.leverage}" required></label><label>Maximum hold<select name="hold_hours"><option value="12" ${s.hold_hours === 12 ? 'selected' : ''}>12 hours</option><option value="24" ${s.hold_hours === 24 ? 'selected' : ''}>24 hours</option></select></label>`, 'Save settings', data => send('save-planning', Object.fromEntries([...data].map(([k, v]) => [k, Number(v)]))));
+    }
+    if (action === 'paper' || action === 'manual') {
+      const row = payload.symbols[selected || payload.best_symbol];
+      if (!actionable(row)) return;
+      openForm(action === 'paper' ? 'Track a paper trade' : 'Record your Bitunix fill', `<p>${action === 'paper' ? 'Simulated tracking only. No order is submitted.' : 'Enter the fill you already executed on Bitunix. This records it for alerts; it does not place an order or attach a stop.'}</p><label>Entry price<input name="entry" type="number" min="${row.plan.entry_low}" max="${row.plan.entry_high}" step="any" value="${row.plan.entry}" required></label><label>Quantity<input name="quantity" type="number" min="0.000000001" max="${row.plan.quantity}" step="any" value="${row.plan.quantity}" required></label><p>Stop ${price(row.plan.stop)} · Target ${price(row.plan.target)}. For a real trade, set your stop on Bitunix.</p>`, 'Start tracking', data => send('track-entry', { signal_id: row.signal_id, kind: action, entry: Number(data.get('entry')), quantity: Number(data.get('quantity')) }));
+    }
+    if (action === 'close') {
+      const trade = payload.trades.find(t => t.id === button.dataset.id);
+      const current = payload.symbols[trade.symbol]?.price || trade.plan.entry;
+      openForm('Record trade closure', '<p>This ends tracking only. Close any real position on Bitunix first.</p><label>Recorded exit price<input name="exit_price" type="number" min="0.000000001" step="any" value="' + current + '" required></label>', 'Record closure', data => send('close-track', { id: trade.id, exit_price: Number(data.get('exit_price')) }));
+    }
   });
-
-  setInterval(render, 1000);
+  async function refresh(force = false) {
+    try { const response = await send(force ? 'force-refresh' : 'request-latest'); payload = response.payload; }
+    catch { payload = { error: 'Extension connection interrupted. Reload this Bitunix tab.' }; }
+    render();
+  }
+  chrome.runtime.onMessage.addListener(message => { if (message.type === 'signals-update') { payload = message.payload; render(); } });
+  setInterval(() => refresh(), 5000);
+  refresh();
 })();

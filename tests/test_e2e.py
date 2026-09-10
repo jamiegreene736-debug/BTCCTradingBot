@@ -116,6 +116,8 @@ def fresh_cfg():
     """Loose-defaults config so 'should fire' tests work on synthetic data
     regardless of how aggressively production config has been tuned."""
     cfg = load("config.yaml", "/dev/null")
+    # This suite verifies the retained legacy strategy in isolation.
+    cfg.signals.enabled = False
     cfg.mode = "paper"
     # Override strategy to permissive values so synthetic uptrends/downtrends
     # reliably produce signals. Production tightness is verified separately.

@@ -1,5 +1,5 @@
 async function loadStatus() {
-  const stored = await chrome.storage.sync.get(["dashboardUrl", "password"]);
+  const stored = await chrome.storage.local.get(["dashboardUrl", "password"]);
   const configured = Boolean(stored.dashboardUrl && stored.password);
   document.getElementById("status").textContent = configured
     ? "Configured. Open bitunix.com and refresh the page if the panel is not visible."
