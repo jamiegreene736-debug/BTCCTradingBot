@@ -3,6 +3,20 @@ const POLL_MS = 5000;
 let latest = null, fetchedAt = 0, inFlight = null;
 let settings = { dashboardUrl: '', password: '' };
 
+function validateSnapshot(payload) {
+  if (payload?.strategy !== 'intraday' || payload?.mode !== 'alerts_only') {
+    throw new Error('Update the backend to the intraday signals release.');
+  }
+  const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+  if (!object(payload.settings) || !object(payload.symbols) ||
+      !['planning_equity', 'risk_pct', 'leverage', 'hold_hours'].every(key => Number.isFinite(payload.settings[key])) ||
+      !['trades', 'history', 'closed_trades'].every(key => Array.isArray(payload[key])) ||
+      !Object.values(payload.symbols).every(row => object(row) && typeof row.state === 'string' &&
+        typeof row.symbol === 'string' && Array.isArray(row.checks) && object(row.metrics))) {
+    throw new Error('Signal data is incomplete. Update or restart the backend, then retry.');
+  }
+}
+
 function validDashboardUrl(raw) {
   const url = new URL(raw);
   if (url.protocol !== 'https:' || !url.hostname.endsWith('.up.railway.app') || url.username || url.password || url.search || url.hash || !['', '/'].includes(url.pathname)) {
@@ -25,14 +39,22 @@ async function request(path, body) {
   if (!settings.dashboardUrl || !settings.password) throw new Error('Open Settings and connect your dashboard.');
   const origin = validDashboardUrl(settings.dashboardUrl);
   const bytes = new TextEncoder().encode('admin:' + settings.password);
-  const response = await fetch(origin + path, {
+  let response;
+  try { response = await fetch(origin + path, {
     method: body === undefined ? 'GET' : 'POST',
     headers: { Authorization: 'Basic ' + btoa(String.fromCharCode(...bytes)), 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
     signal: AbortSignal.timeout(8000), cache: 'no-store', redirect: 'error',
-  });
-  const payload = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(payload.error || (response.status === 401 ? 'Dashboard password rejected.' : `Dashboard returned ${response.status}.`));
+  }); } catch (error) {
+    throw new Error(error.name === 'TimeoutError' || error.name === 'AbortError'
+      ? 'Dashboard timed out. Check that the backend is running, then retry.'
+      : 'Cannot reach the dashboard. Check its address and deployment in Settings.');
+  }
+  const payload = await response.json().catch(() => null);
+  if (response.status === 401) throw new Error('Dashboard password rejected. Update it in Settings.');
+  if (response.status === 404) throw new Error('Signal endpoint not found. Check the dashboard URL and deploy the intraday backend.');
+  if (!response.ok) throw new Error(typeof payload?.error === 'string' ? payload.error : `Dashboard unavailable (HTTP ${response.status}). Check the backend deployment.`);
+  if (!payload || typeof payload !== 'object') throw new Error('Dashboard did not return signal data. Check its address and backend version.');
   return payload;
 }
 async function refresh() {
@@ -40,7 +62,7 @@ async function refresh() {
   inFlight = (async () => {
     try {
       const payload = await request('/api/signals');
-      if (payload.strategy !== 'intraday' || payload.mode !== 'alerts_only') throw new Error('Update the backend to the intraday signals release.');
+      validateSnapshot(payload);
       latest = payload;
     } catch (error) { latest = { ...(latest?.strategy === 'intraday' ? latest : {}), error: error.message || 'Dashboard unavailable' }; }
     fetchedAt = Date.now();
@@ -54,6 +76,16 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (sender.id !== chrome.runtime.id) return false;
   if (message.type === 'open-options') {
     chrome.runtime.openOptionsPage(); respond({ ok: true }); return false;
+  }
+  if (message.type === 'check-connection') {
+    // Finish any old request before testing freshly saved credentials.
+    Promise.resolve(inFlight).then(async () => {
+      settingsReady = loadSettings();
+      await settingsReady;
+      latest = null;
+      return refresh();
+    }).then(respond).catch(error => respond({ payload: { error: error.message } }));
+    return true;
   }
   if (message.type === 'request-latest' || message.type === 'force-refresh') {
     const result = !latest || Date.now() - fetchedAt >= POLL_MS || message.type === 'force-refresh'

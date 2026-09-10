@@ -42,7 +42,8 @@
         font-weight: 800;
         cursor: pointer;
       }
-      #status { margin-left: 12px; color: #157f3b; font-weight: 700; }
+      #status { display: block; margin-top: 12px; color: #374151; font-weight: 700; }
+      button:disabled { opacity: .6; cursor: wait; }
     </style>
   </head>
   <body>
@@ -53,8 +54,8 @@
       <input id="dashboardUrl" placeholder="https://btcc-trading-bot-production.up.railway.app">
       <label for="password">Dashboard password</label>
       <input id="password" type="password" autocomplete="current-password">
-      <button id="save">Save settings</button>
-      <span id="status"></span>
+      <button id="save">Save and test connection</button>
+      <span id="status" role="status" aria-live="polite"></span>
     </main>
     <script src="options.js"></script>
   </body>
