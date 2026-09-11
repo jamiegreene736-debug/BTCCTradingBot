@@ -76,9 +76,11 @@ and maximum hold (12h/24h). Initial planning defaults are explicitly hypothetica
 
 The overlay shows a ranked queue of the top five markets, each with the time
 the current state started. WATCH and ENTER alerts are stored with that
-timestamp so you can look back. When the featured setup is about to change —
-a higher-ranked market is ready, or the entry window is under 45 seconds —
-the panel counts down before switching.
+timestamp so you can look back. When a setup flips to ENTER, the laptop
+speakers say “Trade entry waiting” plus the market and side. Click the panel
+once if Chrome blocks speech until a gesture. When the featured setup is about
+to change — a higher-ranked market is ready, or the entry window is under 45
+seconds — the panel counts down before switching.
 
 Position size accounts for the structural stop plus estimated costs. The scanner
 counts funding settlements over the maximum hold using the provider's actual

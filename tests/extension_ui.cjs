@@ -23,7 +23,7 @@ async function main() {
       window.listeners = [];
       window.savedLayout = {};
       window.chrome = { runtime: {
-        getManifest: () => ({ version: '1.4.2' }),
+        getManifest: () => ({ version: '1.4.3' }),
         sendMessage: async message => {
           window.messages.push(message);
           if (['save-planning', 'track-entry', 'close-track'].includes(message.type)) return { ok: true };
@@ -55,7 +55,7 @@ async function main() {
     });
     await page.addStyleTag({ path: path.join(root, 'content.css') });
     await page.addScriptTag({ path: path.join(root, 'content.js') });
-    assert.equal(await page.locator('#bis-panel').getAttribute('data-bis-version'), '1.4.2');
+    assert.equal(await page.locator('#bis-panel').getAttribute('data-bis-version'), '1.4.3');
     assert.equal(await page.locator('#bis-panel').evaluate(el => el.textContent.includes('OLD IMMOVABLE PANEL')), false);
     assert.match(await page.locator('#bis-status').textContent(), /Connecting/);
     await page.evaluate(() => {
@@ -64,6 +64,22 @@ async function main() {
     });
     await page.locator('.bis-state').waitFor();
     assert.equal(await page.locator('.bis-state').textContent(), 'ENTER LONG');
+    assert.equal(await page.evaluate(() => window.__bisLastSpeak || ''), '');
+    await page.evaluate(() => {
+      const now = Math.floor(Date.now() / 1000);
+      const template = structuredClone(window.testPayload.symbols.ETHUSDT);
+      template.symbol = 'SOLUSDT';
+      template.state = 'ENTER_SHORT';
+      template.side = 'short';
+      template.signal_id = 'SOLUSDT:short:spoken:' + now;
+      template.as_of = now;
+      template.plan.expires_at = now + 900;
+      window.testPayload.symbols.SOLUSDT = template;
+      window.listeners[0]({ type: 'signals-update', payload: window.testPayload });
+    });
+    assert.match(await page.evaluate(() => window.__bisLastSpeak || ''), /Trade entry waiting/);
+    assert.match(await page.evaluate(() => window.__bisLastSpeak || ''), /Enter short/);
+    assert.match(await page.locator('#bis-panel footer').textContent(), /Trade entry waiting/);
     assert.match(await page.locator('#bis-queue').textContent(), /Top setups/);
     assert.match(await page.locator('#bis-queue').textContent(), /BTCUSDT/);
     await page.locator('#bis-history-wrap summary').click();
@@ -217,13 +233,13 @@ async function main() {
     await popup.setContent(fs.readFileSync(path.join(root, 'popup.html'), 'utf8').replace(/<script[^>]*><\/script>/g, ''));
     await popup.evaluate(() => {
       window.chrome = { runtime: {
-        getManifest: () => ({ version: '1.4.2' }),
+        getManifest: () => ({ version: '1.4.3' }),
         sendMessage: async () => ({ payload: { error: 'Cannot reach the dashboard.' } }),
       } };
     });
     await popup.addScriptTag({ path: path.join(root, 'popup.js') });
     assert.match(await popup.locator('#status').textContent(), /Cannot reach/);
-    assert.equal(await popup.locator('#version').textContent(), 'Version 1.4.2');
+    assert.equal(await popup.locator('#version').textContent(), 'Version 1.4.3');
     const stalled = await browser.newPage();
     stalled.on('pageerror', error => errors.push(error.message));
     await stalled.clock.install();

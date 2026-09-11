@@ -10,6 +10,8 @@
   if (version) host.dataset.bisVersion = version;
   document.documentElement.appendChild(host);
   let payload = null, selected = '', collapsed = false, formOpen = false, lastAlert = '', alertsInitialized = false;
+  const spokenEnter = new Set();
+  let pendingSpeech = '';
   const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
   const money = value => Number.isFinite(value) ? '$' + value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—';
   const price = value => Number.isFinite(value) ? value.toLocaleString('en-US', { maximumFractionDigits: value < 1 ? 8 : value < 100 ? 5 : 2 }) : '—';
@@ -28,6 +30,43 @@
   };
   function fresh(row) { return !payload?.error && row?.as_of > 0 && Date.now() / 1000 - row.as_of <= (payload?.data_max_age || 60); }
   function actionable(row) { return fresh(row) && row?.state?.startsWith('ENTER_') && row.plan?.expires_at > Date.now() / 1000; }
+  function enterKey(row) {
+    return row?.signal_id || `${row?.symbol}:${row?.state}:${row?.bar_time || row?.as_of || ''}`;
+  }
+  function speak(text) {
+    pendingSpeech = text;
+    try { window.__bisLastSpeak = text; } catch { /* tests */ }
+    try {
+      const synth = window.speechSynthesis;
+      if (!synth) return;
+      synth.cancel();
+      let utterance = { text, rate: 1, volume: 1 };
+      try {
+        if (typeof SpeechSynthesisUtterance === 'function') {
+          utterance = new SpeechSynthesisUtterance(text);
+          utterance.rate = 1;
+          utterance.volume = 1;
+        }
+      } catch { /* headless or mocked speech uses the plain object */ }
+      synth.speak(utterance);
+    } catch { /* laptop speech is best-effort */ }
+  }
+  function announceNewEntries() {
+    if (!payload?.symbols || payload.error) return;
+    const rows = Object.values(payload.symbols).filter(row => fresh(row) && row.state?.startsWith('ENTER_') && row.plan);
+    if (!alertsInitialized) {
+      rows.forEach(row => spokenEnter.add(enterKey(row)));
+      return;
+    }
+    for (const row of rows) {
+      const key = enterKey(row);
+      if (spokenEnter.has(key)) continue;
+      spokenEnter.add(key);
+      const side = row.state.includes('SHORT') ? 'short' : 'long';
+      const market = String(row.symbol || '').replace(/USDT$/i, ' U S D T');
+      speak(`Trade entry waiting. ${market}. Enter ${side}.`);
+    }
+  }
   const connectionError = 'Extension connection interrupted. Reload the extension, then this Bitunix tab.';
   async function send(type, body) {
     let timer;
@@ -38,7 +77,7 @@
       ]);
     } finally { clearTimeout(timer); }
   }
-  host.innerHTML = `<header title="Drag the title or grip to move. Double-click or use Reset to restore the default position."><div class="bis-drag"><span class="bis-grip" aria-hidden="true"></span><div><span class="bis-eyebrow">BITUNIX · INTRADAY${version ? ' · v' + version : ''}</span><strong>Trade signals</strong></div></div><div class="bis-actions"><button data-action="reset-layout" title="Reset size and position" aria-label="Reset size and position">⤢</button><button data-action="settings" title="Connection settings" aria-label="Connection settings">⚙</button><button data-action="collapse" aria-label="Collapse panel">−</button></div></header><div id="bis-body"><div id="bis-status" role="status"></div><div id="bis-planning"></div><div id="bis-handoff" hidden></div><div id="bis-queue"></div><div id="bis-selection"></div><div id="bis-card"></div><div id="bis-trades"></div><details id="bis-history-wrap"><summary>Recent alerts</summary><div id="bis-history"></div></details><details><summary>Recorded closures</summary><div id="bis-closed"></div></details><footer>Alerts only · Live positions import read-only. Orders and stops stay on Bitunix.<br>Candidate rules under evaluation; no measured win probability.</footer></div><div id="bis-form"></div><div class="bis-resize" role="separator" aria-orientation="horizontal" aria-label="Resize panel" title="Drag the corner to resize"></div>`;
+  host.innerHTML = `<header title="Drag the title or grip to move. Double-click or use Reset to restore the default position."><div class="bis-drag"><span class="bis-grip" aria-hidden="true"></span><div><span class="bis-eyebrow">BITUNIX · INTRADAY${version ? ' · v' + version : ''}</span><strong>Trade signals</strong></div></div><div class="bis-actions"><button data-action="reset-layout" title="Reset size and position" aria-label="Reset size and position">⤢</button><button data-action="settings" title="Connection settings" aria-label="Connection settings">⚙</button><button data-action="collapse" aria-label="Collapse panel">−</button></div></header><div id="bis-body"><div id="bis-status" role="status"></div><div id="bis-planning"></div><div id="bis-handoff" hidden></div><div id="bis-queue"></div><div id="bis-selection"></div><div id="bis-card"></div><div id="bis-trades"></div><details id="bis-history-wrap"><summary>Recent alerts</summary><div id="bis-history"></div></details><details><summary>Recorded closures</summary><div id="bis-closed"></div></details><footer>Alerts only · Live positions import read-only. Orders and stops stay on Bitunix.<br>Speakers say “Trade entry waiting” when a setup flips to ENTER. Click the panel once if Chrome blocks speech.<br>Candidate rules under evaluation; no measured win probability.</footer></div><div id="bis-form"></div><div class="bis-resize" role="separator" aria-orientation="horizontal" aria-label="Resize panel" title="Drag the corner to resize"></div>`;
   const MIN_W = 280, MIN_H = 200, EDGE = 8;
   let layout = null;
   function box() {
@@ -240,6 +279,7 @@
     host.querySelector('#bis-history').innerHTML = payload.history.slice(0, 30).map(event => `<div class="bis-history-row"><div><b>${esc(event.symbol)}</b> · ${esc(label(event.state))}${event.setup ? ' · ' + esc(event.setup) : ''}<small>${esc(event.reason)}</small></div><time datetime="${esc(event.time ? new Date(event.time * 1000).toISOString() : '')}">${esc(clock(event.time))}<small>${esc(ago(event.time))}</small></time></div>`).join('') || '<p class="bis-empty">WATCH and ENTER alerts appear here with timestamps.</p>';
     host.querySelector('#bis-closed').innerHTML = payload.closed_trades.slice(0, 10).map(t => `<div class="bis-history-row"><div><b>${esc(t.symbol)}</b> · ${esc(t.kind)}<small>Recorded exit ${price(t.exit_price)} · estimated net</small></div><b>${money(t.estimated_net_pnl)}</b></div>`).join('') || '<p class="bis-empty">No recorded closures. Signal alerts are not completed trades.</p>';
     if (host.querySelector('#bis-card details')) host.querySelector('#bis-card details').open = checksOpen;
+    announceNewEntries();
     const alert = payload.history[0];
     if (alert && alert.id !== lastAlert) {
       if (alertsInitialized && Date.now() / 1000 - alert.time < 90) {
@@ -266,6 +306,23 @@
     });
   }
   function closeForm() { formOpen = false; host.querySelector('#bis-form').replaceChildren(); render(); }
+  let speechUnlocked = false;
+  host.addEventListener('pointerdown', () => {
+    if (speechUnlocked) return;
+    speechUnlocked = true;
+    try {
+      const synth = window.speechSynthesis;
+      if (!synth) return;
+      let warm = { text: pendingSpeech || ' ', volume: pendingSpeech ? 1 : 0 };
+      try {
+        if (typeof SpeechSynthesisUtterance === 'function') {
+          warm = new SpeechSynthesisUtterance(pendingSpeech || ' ');
+          warm.volume = pendingSpeech ? 1 : 0;
+        }
+      } catch { /* mocked speech */ }
+      synth.speak(warm);
+    } catch { /* gesture unlock for Chrome speech */ }
+  }, true);
   host.addEventListener('change', event => { if (event.target.id === 'bis-symbol') { selected = event.target.value; render(); } });
   host.addEventListener('keydown', event => {
     if (event.key === 'Escape' && formOpen) closeForm();

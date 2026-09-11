@@ -1,4 +1,4 @@
-# Bitunix Intraday Signals — Chrome extension v1.4.2
+# Bitunix Intraday Signals — Chrome extension v1.4.3
 
 Long and short entry, hold, review and exit alerts for trades lasting up to
 12–24 hours. The backend computes the strategy; this extension displays it.
@@ -18,10 +18,10 @@ No extension action sends an exchange order or modifies a position.
 - **Pump Fade Radar** or version **0.3.16** means old files or an old tab are
   still loaded. Reload the extension from this folder in `chrome://extensions`,
   then reload the Bitunix tab. The popup must say **Bitunix Intraday Signals**,
-  version **1.4.2**. Unpacked extensions do not refresh themselves after a git pull.
+  version **1.4.3**. Unpacked extensions do not refresh themselves after a git pull.
   Click **Reload** on this extension in `chrome://extensions`, then reload the
   Bitunix tab. A Bitunix in-page refresh is not enough. The panel header must
-  show **v1.4.2**, a drag grip, and ⤢. Drag the title to move; drag the
+  show **v1.4.3**, a drag grip, and ⤢. Drag the title to move; drag the
   bottom-right corner to resize.
 - Use the complete extension folder from one release. Mixing the old manifest
   and panel with the new worker breaks message delivery and omits its alarms permission.
@@ -47,6 +47,8 @@ structural stop, profit target, estimated net reward/risk, planning size and
 estimated leverage ceiling. Open the checklist for the underlying evidence. Every card lists the same
 19 gates, grouped as market / setup / plan / book.
 Stale data disables entry tracking. The Best setup selector ranks eligible markets.
+The laptop speakers say “Trade entry waiting” plus the market and side when a
+setup flips to ENTER. Click the overlay once if Chrome blocks speech until a gesture.
 
 Track paper trade simulates a record. Record my fill records a trade you already
 executed, within the currently confirmed plan. Neither button places an order.
