@@ -1,0 +1,11 @@
+{
+  "name": "Bitunix Intraday Signals",
+  "install": "bash .cursor/install.sh",
+  "terminals": [
+    {
+      "name": "backend",
+      "command": "DASHBOARD_PASSWORD=\"${DASHBOARD_PASSWORD:-devpass123}\" PORT=8080 .venv/bin/python run.py"
+    }
+  ],
+  "ports": [8080]
+}
