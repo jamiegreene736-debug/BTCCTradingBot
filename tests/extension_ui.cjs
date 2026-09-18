@@ -155,6 +155,7 @@ async function main() {
     assert.match(await page.locator('#bis-trades').textContent(), /Set the Bitunix stop/);
     assert.match(await page.locator('#bis-trades').textContent(), /I placed the Bitunix stop/);
     assert.match(await page.evaluate(() => window.__bisLastSpeak || ''), /Set the Bitunix stop now/);
+    await page.screenshot({ path: path.join(output, 'set-stop.png'), fullPage: true });
     await page.locator('[data-action="confirm-stop"]').click();
     assert.equal(await page.evaluate(() => window.messages.find(m => m.type === 'confirm-stop').body.id), 'exchange:HYPE1');
     await page.evaluate(() => {
@@ -166,6 +167,7 @@ async function main() {
     assert.match(await page.locator('#bis-trades').textContent(), /Close on Bitunix now/);
     assert.match(await page.locator('#bis-trades').textContent(), /Do not wait for a reversal/);
     assert.match(await page.evaluate(() => window.__bisLastSpeak || ''), /Close the trade now/);
+    await page.screenshot({ path: path.join(output, 'close-now.png'), fullPage: true });
     await page.locator('[data-action="paper"]').click();
     assert.match(await page.locator('.bis-modal').textContent(), /No order is submitted/);
     await page.locator('.bis-modal [type="submit"]').click();

@@ -286,7 +286,7 @@
       const holdPass = holdChecks.filter(item => item.passed).length;
       const conf = Number.isFinite(t.hold_confidence) ? t.hold_confidence : (holdChecks.length ? Math.round(100 * holdPass / holdChecks.length) : null);
       const mustClose = suggestion.startsWith('CLOSE_') || String(t.state || '').startsWith('EXIT_');
-      const needsStop = !mustClose && (suggestion === 'SET_STOP' || (t.kind !== 'paper' && !t.exchange_stop_confirmed));
+      const needsStop = !mustClose && suggestion === 'SET_STOP';
       const banner = mustClose
         ? `<div class="bis-get-out" role="alert"><strong>Close on Bitunix now</strong><span>Do not wait for a reversal. Overlay alerts cannot prevent liquidation.</span><b>Working stop ${price(t.current_stop)}</b></div>`
         : needsStop
