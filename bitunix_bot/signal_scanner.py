@@ -1079,10 +1079,6 @@ class SignalScanner:
     def place_stop(self, values: dict[str, object]) -> TrackedTrade:
         if set(values) != {"id"}:
             raise ValueError("Provide id")
-        if not self._has_account_keys():
-            raise ValueError(
-                "Add Bitunix API keys with Trade permission to place the stop"
-            )
         with self.lock:
             trade = next((t for t in self.store.trades() if t.id == values["id"]), None)
             if not trade:
@@ -1091,6 +1087,10 @@ class SignalScanner:
                 raise ValueError("Trade is already closed")
             if trade.kind == "paper":
                 raise ValueError("Paper tracks do not place an exchange stop")
+            if not self._has_account_keys():
+                raise ValueError(
+                    "Add Bitunix API keys with Trade permission to place the stop"
+                )
             if trade.current_stop <= 0:
                 raise ValueError("Working stop is missing")
             positions, ok = self._load_positions()
