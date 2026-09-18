@@ -918,9 +918,12 @@ class SignalScanner:
             self._handoff_until = 0
 
     def track(self, values: dict[str, object]) -> TrackedTrade:
-        if set(values) != {"signal_id", "kind", "entry", "quantity"} or values[
-            "kind"
-        ] not in ("paper", "manual"):
+        allowed = {"signal_id", "kind", "entry", "quantity"}
+        extra = {"exchange_stop_confirmed"}
+        if (
+            not allowed <= set(values) <= allowed | extra
+            or values["kind"] not in ("paper", "manual")
+        ):
             raise ValueError(
                 "Provide signal_id, kind (paper/manual), entry and quantity"
             )
@@ -1022,6 +1025,30 @@ class SignalScanner:
                 entry,
                 state=f"HOLD_{decision.side.upper()}",
                 checked_at=now,
+                exchange_stop_confirmed=(
+                    str(values["kind"]) == "paper"
+                    or values.get("exchange_stop_confirmed") is True
+                ),
+            )
+            self.store.save_trade(trade)
+            return trade
+
+    def confirm_stop(self, values: dict[str, object]) -> TrackedTrade:
+        if set(values) != {"id"}:
+            raise ValueError("Provide id")
+        with self.lock:
+            trade = next((t for t in self.store.trades() if t.id == values["id"]), None)
+            if not trade:
+                raise ValueError("Tracked trade not found")
+            if trade.closed_at:
+                return trade
+            trade.exchange_stop_confirmed = True
+            evaluate_exit(
+                trade,
+                self.decisions.get(trade.symbol),
+                self.frames.get(trade.symbol, {}).get("15m", []),
+                int(time.time()),
+                self.cfg,
             )
             self.store.save_trade(trade)
             return trade

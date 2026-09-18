@@ -16,6 +16,7 @@ signals:
   slippage_pct: 0.06        # Round trip estimate, additional to fees.
   min_depth_ratio: 5.0
   liquidation_buffer_pct: 0.5
+  hope_exit_r: 0.75          # Hard EXIT before the structural stop; do not wait for a bounce.
   stale_trade_hours: 4
   stale_progress_r: 0.25
   trailing_activate_r: 1.5

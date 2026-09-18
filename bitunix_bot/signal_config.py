@@ -55,6 +55,7 @@ class SignalsCfg:
     slippage_pct: float = 0.06
     min_depth_ratio: float = 5.0
     liquidation_buffer_pct: float = 0.5
+    hope_exit_r: float = 0.75
     stale_trade_hours: int = 4
     stale_progress_r: float = 0.25
     trailing_activate_r: float = 1.5

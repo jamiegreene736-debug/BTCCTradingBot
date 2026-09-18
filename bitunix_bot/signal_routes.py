@@ -35,6 +35,8 @@ def register_signal_routes(app: Flask, scanner: SignalScanner | None) -> None:
                 return jsonify({"ok": True})
             if action == "track":
                 return jsonify({"ok": True, "trade": asdict(scanner.track(body))})
+            if action == "confirm-stop":
+                return jsonify({"ok": True, "trade": asdict(scanner.confirm_stop(body))})
             if action == "close":
                 return jsonify({"ok": True, "trade": asdict(scanner.close_track(body))})
             return jsonify({"error": "Unknown tracking action"}), 404

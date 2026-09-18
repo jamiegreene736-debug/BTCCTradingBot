@@ -36,6 +36,7 @@ class TrackedTrade:
     suggestion: str = ""
     hold_confidence: int | None = None
     checks: list[Check] = field(default_factory=list)
+    exchange_stop_confirmed: bool = False
 
 
 HOLD_CHECK_GROUPS: dict[str, str] = {
@@ -46,6 +47,7 @@ HOLD_CHECK_GROUPS: dict[str, str] = {
     "Drawdown contained": "risk",
     "Room to stop": "risk",
     "Liquidation buffer": "risk",
+    "Exchange protective stop": "risk",
     "1h structure": "structure",
     "4h bias": "structure",
     "Progress vs review window": "structure",
@@ -75,6 +77,10 @@ def _finite(value: object) -> float | None:
     return number if math.isfinite(number) else None
 
 
+def exchange_stop_ok(trade: TrackedTrade) -> bool:
+    return trade.kind == "paper" or trade.exchange_stop_confirmed
+
+
 def _apply_live_suggestion(trade: TrackedTrade) -> None:
     side = trade.plan.side.upper()
     passed = sum(1 for item in trade.checks if item.passed)
@@ -83,6 +89,13 @@ def _apply_live_suggestion(trade: TrackedTrade) -> None:
     if trade.state.startswith("EXIT_"):
         trade.suggestion = f"CLOSE_{side}"
         trade.hold_confidence = min(trade.hold_confidence, 10)
+    elif not exchange_stop_ok(trade):
+        trade.suggestion = "SET_STOP"
+        trade.hold_confidence = min(trade.hold_confidence, 20)
+        trade.reason = (
+            f"Set the Bitunix stop at {trade.current_stop:.5g} now. "
+            "The overlay cannot prevent liquidation. Do not wait for a reversal."
+        )
     elif trade.state == "REVIEW":
         trade.suggestion = "REVIEW"
     elif trade.hold_confidence >= 70:
@@ -248,6 +261,22 @@ def evaluate_exit(
                 ),
             ),
             hold_check(
+                "Exchange protective stop",
+                exchange_stop_ok(trade),
+                (
+                    "Paper track; no Bitunix stop required"
+                    if trade.kind == "paper"
+                    else (
+                        f"Confirmed Bitunix stop at {trade.current_stop:.5g}"
+                        if trade.exchange_stop_confirmed
+                        else (
+                            f"Bitunix stop at {trade.current_stop:.5g} is not confirmed. "
+                            "A reversal will not save an unprotected position"
+                        )
+                    )
+                ),
+            ),
+            hold_check(
                 "1h structure",
                 trend_1h == side,
                 (
@@ -325,6 +354,31 @@ def evaluate_exit(
         trade.state, trade.reason = (
             f"EXIT_{side.upper()}",
             "Completed 1h structure reversed against the trade",
+        )
+    elif (
+        liq_room_pct is not None
+        and liq_room_pct < cfg.liquidation_buffer_pct
+    ):
+        trade.state, trade.reason = (
+            f"EXIT_{side.upper()}",
+            "Estimated liquidation buffer is gone. Close on Bitunix now. "
+            "A reversal will not beat liquidation.",
+        )
+    elif current_r is not None and current_r <= -cfg.hope_exit_r:
+        trade.state, trade.reason = (
+            f"EXIT_{side.upper()}",
+            f"Do not wait for a reversal. Live {current_r:+.2f}R; the structural "
+            "stop is next. Close on Bitunix now.",
+        )
+    elif (
+        not exchange_stop_ok(trade)
+        and current_r is not None
+        and current_r <= -0.5
+    ):
+        trade.state, trade.reason = (
+            f"EXIT_{side.upper()}",
+            "Unprotected position is already losing. Do not wait for a bounce; "
+            "close on Bitunix or the exchange will liquidate you.",
         )
     else:
         trade.best_price = candidate_best

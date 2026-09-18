@@ -451,6 +451,87 @@ def test_soft_hold_failures_suggest_close_without_latching_exit():
     assert trade.suggestion == "CONSIDER_CLOSE"
 
 
+@pytest.mark.parametrize("side", ["long", "short"])
+def test_hope_hold_and_liquidation_latch_exit(side):
+    trade, decision, _ = new_trade(side)
+    sign = 1 if side == "long" else -1
+    risk = abs(trade.plan.entry - trade.plan.stop)
+    decision.price = trade.plan.entry - sign * 0.8 * risk
+    decision.as_of = NOW + 10
+    evaluate_exit(trade, decision, [], NOW + 10, SignalsCfg())
+    assert trade.state == f"EXIT_{side.upper()}"
+    assert trade.suggestion == f"CLOSE_{side.upper()}"
+    assert "Do not wait for a reversal" in trade.reason
+    decision.price = trade.plan.entry
+    evaluate_exit(trade, decision, [], NOW + 15, SignalsCfg())
+    assert trade.state == f"EXIT_{side.upper()}"
+
+    trade, decision, _ = new_trade(side)
+    trade.plan = replace(
+        trade.plan, liquidation_estimate=decision.price - sign * decision.price * 0.001
+    )
+    evaluate_exit(trade, decision, [], NOW + 10, SignalsCfg())
+    assert trade.state == f"EXIT_{side.upper()}"
+    assert "liquidation" in trade.reason.lower()
+
+
+def test_unconfirmed_stop_blocks_hold_and_losing_unprotected_exits():
+    trade, decision, _ = new_trade()
+    trade.kind = "manual"
+    trade.exchange_stop_confirmed = False
+    evaluate_exit(trade, decision, [], NOW + 10, SignalsCfg())
+    assert trade.state == "HOLD_LONG"
+    assert trade.suggestion == "SET_STOP"
+    assert "Set the Bitunix stop" in trade.reason
+    assert any(
+        item.label == "Exchange protective stop" and not item.passed
+        for item in trade.checks
+    )
+
+    risk = abs(trade.plan.entry - trade.plan.stop)
+    decision.price = trade.plan.entry - 0.55 * risk
+    evaluate_exit(trade, decision, [], NOW + 15, SignalsCfg())
+    assert trade.state == "EXIT_LONG"
+    assert "Unprotected" in trade.reason
+
+
+def test_confirm_stop_allows_hold_on_manual_track(tmp_path):
+    scanner, decision = scanner_with_entry(tmp_path)
+    with patch("time.time", return_value=NOW):
+        trade = scanner.track(
+            {
+                "signal_id": decision.signal_id,
+                "kind": "manual",
+                "entry": decision.plan.entry,
+                "quantity": decision.plan.quantity,
+            }
+        )
+    assert trade.exchange_stop_confirmed is False
+    with patch("time.time", return_value=NOW + 10):
+        confirmed = scanner.confirm_stop({"id": trade.id})
+        evaluate_exit(
+            confirmed, decision, [], NOW + 10, SignalsCfg()
+        )
+    assert confirmed.exchange_stop_confirmed is True
+    assert confirmed.suggestion == "HOLD_LONG"
+
+
+def test_paper_track_does_not_require_exchange_stop(tmp_path):
+    scanner, decision = scanner_with_entry(tmp_path)
+    with patch("time.time", return_value=NOW):
+        trade = scanner.track(
+            {
+                "signal_id": decision.signal_id,
+                "kind": "paper",
+                "entry": decision.plan.entry,
+                "quantity": decision.plan.quantity,
+            }
+        )
+    evaluate_exit(trade, decision, [], NOW + 10, SignalsCfg())
+    assert trade.exchange_stop_confirmed is True
+    assert trade.suggestion == "HOLD_LONG"
+
+
 def test_trailing_stop_never_widens():
     trade, decision, _ = new_trade()
     original = trade.current_stop
@@ -818,6 +899,8 @@ def test_live_short_is_imported_and_never_sends_orders(tmp_path):
     assert trade["mark_price"] == pytest.approx(80.574)
     assert snapshot["positions"]["connected"] is True
     assert snapshot["positions"]["imported"] == 1
+    assert trade["suggestion"] == "SET_STOP"
+    assert trade["exchange_stop_confirmed"] is False
     scanner.client.place_order.assert_not_called()
     scanner.client.flash_close_position.assert_not_called()
 

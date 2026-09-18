@@ -80,6 +80,17 @@ test('legacy close requests and foreign senders cannot reach the backend', () =>
   assert.equal(message({ type: 'close-symbol' }, { id: 'extension-id' }, () => {}), false);
   assert.equal(message({ type: 'track-entry' }, { id: 'foreign' }, () => {}), false);
 });
+test('confirm-stop posts only the tracking id', async () => {
+  const { requests, message } = worker();
+  const result = await new Promise(resolve => message(
+    { type: 'confirm-stop', body: { id: 'exchange:HYPE1' } },
+    { id: 'extension-id' },
+    resolve,
+  ));
+  assert.equal(result.error, undefined);
+  assert.equal(requests.some(item => item.url.endsWith('/api/signals/confirm-stop')), true);
+  assert.equal(requests.find(item => item.url.endsWith('/api/signals/confirm-stop')).options.method, 'POST');
+});
 test('polling is deduplicated and refuses redirects', async () => {
   const { context, requests } = worker();
   await vm.runInContext('Promise.all([refresh(), refresh(), refresh()])', context);

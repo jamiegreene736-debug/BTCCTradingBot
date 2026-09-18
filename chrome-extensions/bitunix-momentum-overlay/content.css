@@ -44,7 +44,11 @@
 #bis-panel h3{font-size:13px;font-weight:650;margin:18px 0 9px}#bis-panel h3 span{color:#93a8bf;margin-left:5px}
 #bis-panel .bis-empty{font-size:11px;color:#91a4bb;margin:10px 0}
 #bis-panel .bis-trade{border:1px solid #3e516a;border-radius:9px;padding:12px;margin:8px 0;background:#182534}
-#bis-panel .bis-trade.exit{border-color:#e9ac69;background:#352b24}#bis-panel .bis-trade p{font-size:11px}
+#bis-panel .bis-trade.exit{border-color:#e26b6b;background:#3d1f22}#bis-panel .bis-trade.stop{border-color:#f08a8a;background:#3a2228}#bis-panel .bis-trade p{font-size:11px}
+#bis-panel .bis-get-out{margin:10px 0;padding:10px 12px;border:1px solid #f08a8a;background:#4a1f24;border-radius:8px;color:#ffd0d0}
+#bis-panel .bis-get-out strong{display:block;font-size:16px;letter-spacing:-.3px}
+#bis-panel .bis-get-out span{display:block;margin-top:4px;font-size:11px;color:#efd3ad}
+#bis-panel .bis-get-out b{display:block;margin-top:8px;font-size:20px;color:#fff}
 #bis-panel .bis-live{display:block;margin-top:8px;font-size:10px;letter-spacing:1.4px;color:#8fb7a8;font-weight:700}
 #bis-panel .bis-trade.exit .bis-live{color:#efd3ad}
 #bis-panel .bis-trade-state{display:block;margin-top:2px}#bis-panel .bis-trade button{margin-top:6px;font-size:11px}
@@ -62,6 +66,8 @@
 #bis-panel .bis-modal h3{margin:0 0 10px;font-size:17px}#bis-panel .bis-modal label{display:block;font-size:11px;margin:12px 0;color:#b7cadf}
 #bis-panel .bis-modal input,#bis-panel .bis-modal select{display:block;width:100%;margin-top:5px}
 #bis-panel .bis-modal p{font-size:11px;color:#b4c4d7}#bis-panel .bis-modal .bis-form-error{color:#ffbd9c}
+#bis-panel .bis-check{display:flex;gap:8px;align-items:flex-start}
+#bis-panel .bis-check input{width:auto;margin-top:3px}
 #bis-panel.bis-collapsed{width:230px}#bis-panel.bis-collapsed #bis-body{display:none}#bis-panel.bis-collapsed .bis-resize{display:none}
 #bis-panel.bis-placed{max-width:none;max-height:none}
 #bis-panel.bis-placed #bis-body{max-height:none}

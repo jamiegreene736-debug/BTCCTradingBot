@@ -77,7 +77,9 @@ and maximum hold (12h/24h). Initial planning defaults are explicitly hypothetica
 The overlay shows a ranked queue of the top five markets, each with the time
 the current state started. WATCH and ENTER alerts are stored with that
 timestamp so you can look back. When a setup flips to ENTER, the laptop
-speakers say “Trade entry waiting” plus the market and side. Click the panel
+speakers say “Trade entry waiting” plus the market and side. When a tracked
+trade needs an exchange stop or a latched exit, they say “Set the Bitunix stop
+now” or “Close the trade now. Do not wait for a reversal.” Click the panel
 once if Chrome blocks speech until a gesture. When the featured setup is about
 to change — a higher-ranked market is ready, or the entry window is under 45
 seconds — the panel counts down before switching.
@@ -95,22 +97,27 @@ extra collateral, not the exchange's exact liquidation price or a guarantee.
 
 - **Track paper trade** records a simulated entry without placing an order.
 - **Record my fill** records a fill you already executed, within the confirmed
-  entry zone and planned size/risk.
+  entry zone and planned size/risk. You must confirm that the Bitunix stop is
+  already placed. Until that is confirmed, the card shows SET STOP instead of
+  HOLD. Imported live positions start the same way.
 - **Live Bitunix positions** are imported read-only when `BITUNIX_API_KEY` and
   `BITUNIX_SECRET_KEY` are set. The scanner never places, amends, or closes
   orders; it only tracks size, mark, unrealized P&L, and hold/exit alerts.
   A vanished position closes that live track automatically.
 - Original stop, target, risk and holding limit are frozen when recorded.
 - Tracked cards show a live hold/close suggestion, a hold-confidence checklist
-  score (not a measured win rate), and a fixed 12-gate close-out list: fresh
+  score (not a measured win rate), and a fixed 13-gate close-out list: fresh
   data, stop, target, hold time, drawdown, room to the working stop, liquidation
-  buffer, 1h structure, 4h bias, stale progress, session VWAP, and funding
-  carry. Hard EXIT alerts still latch on stop/target touches, opposite completed
-  1h structure, failure to make 0.25R progress within four hours, and maximum
-  age. Soft failures drop hold confidence and can switch the live suggestion to
+  buffer, confirmed exchange stop, 1h structure, 4h bias, stale progress,
+  session VWAP, and funding carry. Hard EXIT alerts latch on stop/target
+  touches, opposite completed 1h structure, failure to make 0.25R progress
+  within four hours, maximum age, a missing liquidation buffer, −0.75R (do not
+  wait for a reversal), and an unprotected position that is already −0.5R.
+  Soft failures drop hold confidence and can switch the live suggestion to
   CONSIDER CLOSE without latching an exit. After 1R the stop can advance to
   cover estimated costs; a trailing stop can advance after 1.5R and never widen.
-  Stop changes are suggestions to apply manually.
+  Stop changes are suggestions to apply manually. SET STOP and CLOSE hide the
+  confidence bar so a checklist percentage cannot talk you into holding.
 - Exit alerts remain latched until you record closure. They do not reverse into
   an opposite entry or assume that an exchange order filled.
 - **Record closure** ends tracking only. Estimated net results use the recorded
