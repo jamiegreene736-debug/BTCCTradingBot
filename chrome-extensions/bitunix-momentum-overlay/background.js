@@ -95,7 +95,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
     result.then(respond).catch(error => respond({ payload: { error: error.message } }));
     return true;
   }
-  const paths = { 'save-planning': '/api/signals/settings', 'track-entry': '/api/signals/track', 'close-track': '/api/signals/close' };
+  const paths = { 'save-planning': '/api/signals/settings', 'track-entry': '/api/signals/track', 'close-track': '/api/signals/close', 'confirm-stop': '/api/signals/confirm-stop' };
   if (Object.hasOwn(paths, message.type)) {
     request(paths[message.type], message.body).then(async result => {
       await refresh(); respond(result);

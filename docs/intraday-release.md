@@ -54,9 +54,27 @@ treating signals as profitable.
 ## Live hold suggestion
 
 Open tracked trades now carry a live hold/close suggestion, a hold-confidence
-checklist score, and a fixed 12-gate close-out list. Hard EXIT rules are
-unchanged and still latch. Soft failures only change the suggestion to
-CONSIDER CLOSE. The score is a checklist percentage, not a measured win rate.
+checklist score, and a fixed 13-gate close-out list. Hard EXIT rules latch on
+the original stop/target/time/structure/stale gates plus liquidation-buffer
+loss, −0.75R (do not wait for a reversal), and an unprotected losing position.
+Missing exchange-stop confirmation shows SET STOP instead of HOLD. Soft
+failures only change the suggestion to CONSIDER CLOSE. The score is a
+checklist percentage, not a measured win rate; SET STOP and CLOSE hide it.
+
+## Exit discipline — 1.5.0
+
+The blank-panel and hold-suggestion work still left one failure mode open:
+waiting for a bounce without a Bitunix stop, then getting liquidated. This
+release does not place that stop. It makes the missing stop and the “get out”
+call impossible to treat as optional.
+
+- Recording a real fill requires a checkbox that the Bitunix stop is already
+  placed at the planned price.
+- Imported live positions start as SET STOP until that confirmation.
+- The overlay speaks “Set the Bitunix stop now” and “Close the trade now. Do
+  not wait for a reversal.”
+- Hard EXIT now includes estimated liquidation-buffer loss and −0.75R, with
+  copy that a reversal will not beat liquidation.
 
 ## Signal queue, timestamps and handoff
 

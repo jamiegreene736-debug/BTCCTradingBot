@@ -11,13 +11,14 @@
   document.documentElement.appendChild(host);
   let payload = null, selected = '', collapsed = false, formOpen = false, lastAlert = '', alertsInitialized = false;
   const spokenEnter = new Set();
+  const spokenRisk = new Set();
   let pendingSpeech = '';
   const esc = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
   const money = value => Number.isFinite(value) ? '$' + value.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '—';
   const price = value => Number.isFinite(value) ? value.toLocaleString('en-US', { maximumFractionDigits: value < 1 ? 8 : value < 100 ? 5 : 2 }) : '—';
   const fixed = (value, digits = 2) => Number.isFinite(value) ? value.toFixed(digits) : '—';
   const label = value => String(value || 'WAIT').replaceAll('_', ' ');
-  const tone = state => state?.startsWith('EXIT') || state?.startsWith('CLOSE') || state === 'CONSIDER_CLOSE' ? 'exit' : state?.includes('LONG') ? 'long' : state?.includes('SHORT') ? 'short' : 'wait';
+  const tone = state => state === 'SET_STOP' ? 'stop' : state?.startsWith('EXIT') || state?.startsWith('CLOSE') || state === 'CONSIDER_CLOSE' ? 'exit' : state?.includes('LONG') ? 'long' : state?.includes('SHORT') ? 'short' : 'wait';
   const ago = timestamp => timestamp ? Math.max(0, Math.floor(Date.now() / 1000 - timestamp)) + 's ago' : 'Waiting for data';
   const clock = timestamp => Number.isFinite(timestamp) && timestamp > 0
     ? new Date(timestamp * 1000).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' })
@@ -67,6 +68,23 @@
       speak(`Trade entry waiting. ${market}. Enter ${side}.`);
     }
   }
+  function announceRisk() {
+    if (!payload?.trades) return;
+    for (const trade of payload.trades) {
+      const suggestion = trade.suggestion || trade.state || '';
+      const urgent = suggestion === 'SET_STOP' || suggestion.startsWith('CLOSE_') || String(trade.state || '').startsWith('EXIT_');
+      if (!urgent) continue;
+      const key = `${trade.id}:${suggestion}`;
+      if (spokenRisk.has(key)) continue;
+      spokenRisk.add(key);
+      const market = String(trade.symbol || '').replace(/USDT$/i, ' U S D T');
+      if (suggestion === 'SET_STOP') {
+        speak(`Set the Bitunix stop now. ${market}. Stop at ${trade.current_stop}. Do not wait for a reversal.`);
+      } else {
+        speak(`Close the trade now. ${market}. Do not wait for a reversal.`);
+      }
+    }
+  }
   const connectionError = 'Extension connection interrupted. Reload the extension, then this Bitunix tab.';
   async function send(type, body) {
     let timer;
@@ -77,7 +95,7 @@
       ]);
     } finally { clearTimeout(timer); }
   }
-  host.innerHTML = `<header title="Drag the title or grip to move. Double-click or use Reset to restore the default position."><div class="bis-drag"><span class="bis-grip" aria-hidden="true"></span><div><span class="bis-eyebrow">BITUNIX · INTRADAY${version ? ' · v' + version : ''}</span><strong>Trade signals</strong></div></div><div class="bis-actions"><button data-action="reset-layout" title="Reset size and position" aria-label="Reset size and position">⤢</button><button data-action="settings" title="Connection settings" aria-label="Connection settings">⚙</button><button data-action="collapse" aria-label="Collapse panel">−</button></div></header><div id="bis-body"><div id="bis-status" role="status"></div><div id="bis-planning"></div><div id="bis-handoff" hidden></div><div id="bis-queue"></div><div id="bis-selection"></div><div id="bis-card"></div><div id="bis-trades"></div><details id="bis-history-wrap"><summary>Recent alerts</summary><div id="bis-history"></div></details><details><summary>Recorded closures</summary><div id="bis-closed"></div></details><footer>Alerts only · Live positions import read-only. Orders and stops stay on Bitunix.<br>Speakers say “Trade entry waiting” when a setup flips to ENTER. Click the panel once if Chrome blocks speech.<br>Candidate rules under evaluation; no measured win probability.</footer></div><div id="bis-form"></div><div class="bis-resize" role="separator" aria-orientation="horizontal" aria-label="Resize panel" title="Drag the corner to resize"></div>`;
+  host.innerHTML = `<header title="Drag the title or grip to move. Double-click or use Reset to restore the default position."><div class="bis-drag"><span class="bis-grip" aria-hidden="true"></span><div><span class="bis-eyebrow">BITUNIX · INTRADAY${version ? ' · v' + version : ''}</span><strong>Trade signals</strong></div></div><div class="bis-actions"><button data-action="reset-layout" title="Reset size and position" aria-label="Reset size and position">⤢</button><button data-action="settings" title="Connection settings" aria-label="Connection settings">⚙</button><button data-action="collapse" aria-label="Collapse panel">−</button></div></header><div id="bis-body"><div id="bis-status" role="status"></div><div id="bis-planning"></div><div id="bis-handoff" hidden></div><div id="bis-queue"></div><div id="bis-selection"></div><div id="bis-card"></div><div id="bis-trades"></div><details id="bis-history-wrap"><summary>Recent alerts</summary><div id="bis-history"></div></details><details><summary>Recorded closures</summary><div id="bis-closed"></div></details><footer>Alerts only · Live positions import read-only. Orders and stops stay on Bitunix.<br>Speakers say “Trade entry waiting” on ENTER and “Close the trade now” or “Set the Bitunix stop” on exits. Click the panel once if Chrome blocks speech.<br>Do not wait for a reversal without an exchange stop. Overlay alerts cannot prevent liquidation.</footer></div><div id="bis-form"></div><div class="bis-resize" role="separator" aria-orientation="horizontal" aria-label="Resize panel" title="Drag the corner to resize"></div>`;
   const MIN_W = 280, MIN_H = 200, EDGE = 8;
   let layout = null;
   function box() {
@@ -267,19 +285,33 @@
       const holdChecks = Array.isArray(t.checks) ? t.checks : [];
       const holdPass = holdChecks.filter(item => item.passed).length;
       const conf = Number.isFinite(t.hold_confidence) ? t.hold_confidence : (holdChecks.length ? Math.round(100 * holdPass / holdChecks.length) : null);
+      const mustClose = suggestion.startsWith('CLOSE_') || String(t.state || '').startsWith('EXIT_');
+      const needsStop = !mustClose && suggestion === 'SET_STOP';
+      const banner = mustClose
+        ? `<div class="bis-get-out" role="alert"><strong>Close on Bitunix now</strong><span>Do not wait for a reversal. Overlay alerts cannot prevent liquidation.</span><b>Working stop ${price(t.current_stop)}</b></div>`
+        : needsStop
+        ? `<div class="bis-get-out" role="alert"><strong>Set the Bitunix stop</strong><span>Place this stop on Bitunix before you hope for a bounce.</span><b>${price(t.current_stop)}</b></div>`
+        : '';
       const groups = [['risk', 'Risk'], ['structure', 'Structure'], ['tape', 'Tape'], ['cost', 'Cost']].map(([key, title]) => {
         const items = holdChecks.filter(item => (item.group || 'risk') === key);
         if (!items.length) return '';
         const pass = items.filter(item => item.passed).length;
         return `<li class="bis-check-group">${esc(title)} ${pass}/${items.length}</li>` + items.map(item => `<li class="${item.passed ? 'pass' : 'fail'}"><span>${item.passed ? '✓' : '○'}</span><div><b>${esc(item.label)}</b><small>${esc(item.detail)}</small></div></li>`).join('');
       }).join('');
-      return `<article class="bis-trade ${tone(suggestion)}" data-id="${esc(t.id)}"><div class="bis-row"><b>${esc(t.symbol)} · ${esc(t.plan.side.toUpperCase())}</b><small>${kindLabel(t.kind)}</small></div><small class="bis-live">LIVE SUGGESTION</small><strong class="bis-trade-state" aria-live="polite">${esc(label(suggestion))}</strong>${conf == null ? '' : `<div class="bis-confidence"><small>Hold confidence</small><b>${conf}%</b><div class="bis-confidence-bar" role="meter" aria-label="Hold confidence" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${conf}"><i style="width:${conf}%"></i></div><small>Checklist score from the close-out gates. Not a measured win rate.</small></div>`}<p>${esc(t.reason)}</p><div class="bis-meta">Entry ${price(t.plan.entry)}${Number.isFinite(t.mark_price) ? ' · Mark ' + price(t.mark_price) : ''} · Stop ${price(t.current_stop)} · Target ${price(t.plan.target)}${Number.isFinite(t.unrealized_pnl) ? '<br>Unrealized ' + pnlText(t.unrealized_pnl) : ''}<br>Held ${fixed((Date.now() / 1000 - t.opened_at) / 3600, 1)}h / ${t.plan.hold_hours}h max${t.checked_at ? `<br>Checked ${esc(ago(t.checked_at))}` : ''}</div>${holdChecks.length ? `<details${openTradeChecks.has(t.id) ? ' open' : ''}><summary>Hold / close checks · ${holdPass}/${holdChecks.length}</summary><p class="bis-empty">Same 12 gates on every open trade. Failures are reasons to close or review, not exchange orders.</p><ul class="bis-checks">${groups}</ul></details>` : ''}<button data-action="close" data-id="${esc(t.id)}">Record closure</button></article>`;
+      const confidence = mustClose || needsStop || conf == null
+        ? ''
+        : `<div class="bis-confidence"><small>Hold confidence</small><b>${conf}%</b><div class="bis-confidence-bar" role="meter" aria-label="Hold confidence" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${conf}"><i style="width:${conf}%"></i></div><small>Checklist score from the close-out gates. Not a measured win rate.</small></div>`;
+      const stopButton = needsStop
+        ? `<button data-action="confirm-stop" data-id="${esc(t.id)}">I placed the Bitunix stop</button>`
+        : '';
+      return `<article class="bis-trade ${tone(suggestion)}" data-id="${esc(t.id)}"><div class="bis-row"><b>${esc(t.symbol)} · ${esc(t.plan.side.toUpperCase())}</b><small>${kindLabel(t.kind)}</small></div><small class="bis-live">LIVE SUGGESTION</small><strong class="bis-trade-state" aria-live="polite">${esc(label(suggestion))}</strong>${banner}${confidence}<p>${esc(t.reason)}</p><div class="bis-meta">Entry ${price(t.plan.entry)}${Number.isFinite(t.mark_price) ? ' · Mark ' + price(t.mark_price) : ''} · Stop ${price(t.current_stop)} · Target ${price(t.plan.target)}${Number.isFinite(t.unrealized_pnl) ? '<br>Unrealized ' + pnlText(t.unrealized_pnl) : ''}<br>Held ${fixed((Date.now() / 1000 - t.opened_at) / 3600, 1)}h / ${t.plan.hold_hours}h max${t.checked_at ? `<br>Checked ${esc(ago(t.checked_at))}` : ''}</div>${holdChecks.length ? `<details${openTradeChecks.has(t.id) ? ' open' : ''}><summary>Hold / close checks · ${holdPass}/${holdChecks.length}</summary><p class="bis-empty">Same 13 gates on every open trade. Failures are reasons to close or review, not exchange orders.</p><ul class="bis-checks">${groups}</ul></details>` : ''}${stopButton}<button data-action="close" data-id="${esc(t.id)}">Record closure</button></article>`;
     }
     host.querySelector('#bis-trades').innerHTML = `<h3>Tracked trades <span>${payload.trades.length}</span></h3>${payload.trades.length ? payload.trades.map(tradeArticle).join('') : `<p class="bis-empty">${esc(tradesEmpty)}</p>`}`;
     host.querySelector('#bis-history').innerHTML = payload.history.slice(0, 30).map(event => `<div class="bis-history-row"><div><b>${esc(event.symbol)}</b> · ${esc(label(event.state))}${event.setup ? ' · ' + esc(event.setup) : ''}<small>${esc(event.reason)}</small></div><time datetime="${esc(event.time ? new Date(event.time * 1000).toISOString() : '')}">${esc(clock(event.time))}<small>${esc(ago(event.time))}</small></time></div>`).join('') || '<p class="bis-empty">WATCH and ENTER alerts appear here with timestamps.</p>';
     host.querySelector('#bis-closed').innerHTML = payload.closed_trades.slice(0, 10).map(t => `<div class="bis-history-row"><div><b>${esc(t.symbol)}</b> · ${esc(t.kind)}<small>Recorded exit ${price(t.exit_price)} · estimated net</small></div><b>${money(t.estimated_net_pnl)}</b></div>`).join('') || '<p class="bis-empty">No recorded closures. Signal alerts are not completed trades.</p>';
     if (host.querySelector('#bis-card details')) host.querySelector('#bis-card details').open = checksOpen;
     announceNewEntries();
+    announceRisk();
     const alert = payload.history[0];
     if (alert && alert.id !== lastAlert) {
       if (alertsInitialized && Date.now() / 1000 - alert.time < 90) {
@@ -354,7 +386,26 @@
     if (action === 'paper' || action === 'manual') {
       const row = payload.symbols[selected || payload.best_symbol];
       if (!actionable(row)) return;
-      openForm(action === 'paper' ? 'Track a paper trade' : 'Record your Bitunix fill', `<p>${action === 'paper' ? 'Simulated tracking only. No order is submitted.' : 'Enter the fill you already executed on Bitunix. This records it for alerts; it does not place an order or attach a stop.'}</p><label>Entry price<input name="entry" type="number" min="${row.plan.entry_low}" max="${row.plan.entry_high}" step="any" value="${row.plan.entry}" required></label><label>Quantity<input name="quantity" type="number" min="0.000000001" max="${row.plan.quantity}" step="any" value="${row.plan.quantity}" required></label><p>Stop ${price(row.plan.stop)} · Target ${price(row.plan.target)}. For a real trade, set your stop on Bitunix.</p>`, 'Start tracking', data => send('track-entry', { signal_id: row.signal_id, kind: action, entry: Number(data.get('entry')), quantity: Number(data.get('quantity')) }));
+      const stopCopy = `Stop ${price(row.plan.stop)} · Target ${price(row.plan.target)}.`;
+      const intro = action === 'paper'
+        ? `<p>Simulated tracking only. No order is submitted.</p>`
+        : `<p>Enter the fill you already executed on Bitunix. This records it for alerts; it does not place an order or attach a stop.</p>`;
+      const stopField = action === 'manual'
+        ? `<p>${stopCopy} Without an exchange stop, hoping for a reversal is how this account gets liquidated.</p><label class="bis-check"><input name="exchange_stop_confirmed" type="checkbox" required> I placed the Bitunix stop-loss at ${price(row.plan.stop)}</label>`
+        : `<p>${stopCopy} Paper tracking does not place an exchange stop.</p>`;
+      openForm(action === 'paper' ? 'Track a paper trade' : 'Record your Bitunix fill', `${intro}<label>Entry price<input name="entry" type="number" min="${row.plan.entry_low}" max="${row.plan.entry_high}" step="any" value="${row.plan.entry}" required></label><label>Quantity<input name="quantity" type="number" min="0.000000001" max="${row.plan.quantity}" step="any" value="${row.plan.quantity}" required></label>${stopField}`, 'Start tracking', data => send('track-entry', {
+        signal_id: row.signal_id,
+        kind: action,
+        entry: Number(data.get('entry')),
+        quantity: Number(data.get('quantity')),
+        ...(action === 'manual' ? { exchange_stop_confirmed: data.get('exchange_stop_confirmed') === 'on' } : {}),
+      }));
+    }
+    if (action === 'confirm-stop') {
+      send('confirm-stop', { id: button.dataset.id }).then(response => {
+        if (!response?.ok) throw new Error(response?.error || 'Could not confirm the stop.');
+        return refresh();
+      }).catch(error => { payload = { ...(payload || {}), error: error.message }; render(); });
     }
     if (action === 'close') {
       const trade = payload.trades.find(t => t.id === button.dataset.id);
