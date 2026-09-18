@@ -1,4 +1,4 @@
-# Bitunix Intraday Signals — Chrome extension v1.5.0
+# Bitunix Intraday Signals — Chrome extension v1.5.1
 
 Long and short entry, hold, review and exit alerts for trades lasting up to
 12–24 hours. The backend computes the strategy; this extension displays it.
@@ -18,10 +18,10 @@ No extension action sends an exchange order or modifies a position.
 - **Pump Fade Radar** or version **0.3.16** means old files or an old tab are
   still loaded. Reload the extension from this folder in `chrome://extensions`,
   then reload the Bitunix tab. The popup must say **Bitunix Intraday Signals**,
-  version **1.5.0**. Unpacked extensions do not refresh themselves after a git pull.
+  version **1.5.1**. Unpacked extensions do not refresh themselves after a git pull.
   Click **Reload** on this extension in `chrome://extensions`, then reload the
   Bitunix tab. A Bitunix in-page refresh is not enough. The panel header must
-  show **v1.5.0**, a drag grip, and ⤢. Drag the title to move; drag the
+  show **v1.5.1**, a drag grip, and ⤢. Drag the title to move; drag the
   bottom-right corner to resize.
 - Use the complete extension folder from one release. Mixing the old manifest
   and panel with the new worker breaks message delivery and omits its alarms permission.
@@ -54,18 +54,19 @@ reversal.” when an exit latches. Click the overlay once if Chrome blocks speec
 until a gesture.
 
 Track paper trade simulates a record. Record my fill records a trade you already
-executed, within the currently confirmed plan, and requires a checkbox that you
-placed the Bitunix stop at the planned price. Neither button places an order.
+executed, within the currently confirmed plan. **Set Bitunix stop** then places
+a position-level stop at the working price; if it hits, Bitunix closes the whole
+position at market. That is the only exchange write. It does not open a trade
+or flatten immediately. You can still mark a stop you already placed by hand.
 Tracked trades show a live hold/close suggestion (HOLD, CONSIDER CLOSE, SET STOP,
 CLOSE, or REVIEW). SET STOP and CLOSE hide the hold-confidence bar and show the
 working stop in a get-out banner. The close-out list is 13 gates, including
 whether the exchange stop is confirmed. Imported live positions start as SET STOP
-until you mark the Bitunix stop as placed.
-Stops and closures on Bitunix remain manual. The overlay cannot prevent
-liquidation. Open futures positions are imported read-only from the backend when
-API keys are configured, labeled **LIVE**, and show mark and unrealized P&L.
-Set protective stops on the exchange. Record closure only ends overlay tracking;
-a still-open Bitunix position is imported again on the next scan.
+until the stop is placed or confirmed.
+Open futures positions are imported read-only from the backend when API keys are
+configured, labeled **LIVE**, and show mark and unrealized P&L. Record closure
+only ends overlay tracking; a still-open Bitunix position is imported again on
+the next scan.
 
 Alert history does not claim trading P&L. Recorded closures show estimated net
 results with paper/user-recorded/live labels; fees and funding are not actual settlement.

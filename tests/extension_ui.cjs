@@ -23,10 +23,10 @@ async function main() {
       window.listeners = [];
       window.savedLayout = {};
       window.chrome = { runtime: {
-        getManifest: () => ({ version: '1.5.0' }),
+        getManifest: () => ({ version: '1.5.1' }),
         sendMessage: async message => {
           window.messages.push(message);
-          if (['save-planning', 'track-entry', 'close-track', 'confirm-stop'].includes(message.type)) return { ok: true };
+          if (['save-planning', 'track-entry', 'close-track', 'confirm-stop', 'place-stop'].includes(message.type)) return { ok: true };
           return { payload: structuredClone(window.testPayload) };
         },
         onMessage: { addListener: listener => window.listeners.push(listener) },
@@ -55,7 +55,7 @@ async function main() {
     });
     await page.addStyleTag({ path: path.join(root, 'content.css') });
     await page.addScriptTag({ path: path.join(root, 'content.js') });
-    assert.equal(await page.locator('#bis-panel').getAttribute('data-bis-version'), '1.5.0');
+    assert.equal(await page.locator('#bis-panel').getAttribute('data-bis-version'), '1.5.1');
     assert.equal(await page.locator('#bis-panel').evaluate(el => el.textContent.includes('OLD IMMOVABLE PANEL')), false);
     assert.match(await page.locator('#bis-status').textContent(), /Connecting/);
     await page.evaluate(() => {
@@ -153,9 +153,12 @@ async function main() {
       window.listeners[0]({ type: 'signals-update', payload: window.testPayload });
     });
     assert.match(await page.locator('#bis-trades').textContent(), /Set the Bitunix stop/);
-    assert.match(await page.locator('#bis-trades').textContent(), /I placed the Bitunix stop/);
+    assert.match(await page.locator('#bis-trades').textContent(), /Set Bitunix stop at/);
+    assert.match(await page.locator('#bis-trades').textContent(), /I already placed it/);
     assert.match(await page.evaluate(() => window.__bisLastSpeak || ''), /Set the Bitunix stop now/);
     await page.screenshot({ path: path.join(output, 'set-stop.png'), fullPage: true });
+    await page.locator('[data-action="place-stop"]').click();
+    assert.equal(await page.evaluate(() => window.messages.find(m => m.type === 'place-stop').body.id), 'exchange:HYPE1');
     await page.locator('[data-action="confirm-stop"]').click();
     assert.equal(await page.evaluate(() => window.messages.find(m => m.type === 'confirm-stop').body.id), 'exchange:HYPE1');
     await page.evaluate(() => {
@@ -174,13 +177,10 @@ async function main() {
     await page.locator('.bis-modal').waitFor({ state: 'detached' });
     assert.equal(await page.evaluate(() => window.messages.find(m => m.type === 'track-entry').body.kind), 'paper');
     await page.locator('[data-action="manual"]').click();
-    assert.match(await page.locator('.bis-modal').textContent(), /I placed the Bitunix stop-loss/);
-    await page.locator('.bis-modal [type="submit"]').click();
-    assert.equal(await page.locator('.bis-modal').count(), 1);
-    await page.locator('[name="exchange_stop_confirmed"]').check();
+    assert.match(await page.locator('.bis-modal').textContent(), /click Set Bitunix stop/);
     await page.locator('.bis-modal [type="submit"]').click();
     await page.locator('.bis-modal').waitFor({ state: 'detached' });
-    assert.equal(await page.evaluate(() => window.messages.find(m => m.type === 'track-entry' && m.body.kind === 'manual').body.exchange_stop_confirmed), true);
+    assert.equal(await page.evaluate(() => window.messages.find(m => m.type === 'track-entry' && m.body.kind === 'manual').body.exchange_stop_confirmed), false);
     await page.locator('[data-action="planning"]').click();
     await page.locator('[name="leverage"]').fill('30');
     await page.locator('[name="hold_hours"]').selectOption('12');
@@ -263,13 +263,13 @@ async function main() {
     await popup.setContent(fs.readFileSync(path.join(root, 'popup.html'), 'utf8').replace(/<script[^>]*><\/script>/g, ''));
     await popup.evaluate(() => {
       window.chrome = { runtime: {
-        getManifest: () => ({ version: '1.5.0' }),
+        getManifest: () => ({ version: '1.5.1' }),
         sendMessage: async () => ({ payload: { error: 'Cannot reach the dashboard.' } }),
       } };
     });
     await popup.addScriptTag({ path: path.join(root, 'popup.js') });
     assert.match(await popup.locator('#status').textContent(), /Cannot reach/);
-    assert.equal(await popup.locator('#version').textContent(), 'Version 1.5.0');
+    assert.equal(await popup.locator('#version').textContent(), 'Version 1.5.1');
     const stalled = await browser.newPage();
     stalled.on('pageerror', error => errors.push(error.message));
     await stalled.clock.install();

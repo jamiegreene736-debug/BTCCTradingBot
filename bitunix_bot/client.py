@@ -33,6 +33,12 @@ SIDE_BUY = "BUY"
 SIDE_SELL = "SELL"
 TRADE_OPEN = "OPEN"
 TRADE_CLOSE = "CLOSE"
+PROTECTIVE_STOP_PATHS = frozenset(
+    {
+        "/api/v1/futures/tpsl/position/place_order",
+        "/api/v1/futures/tpsl/modify_order",
+    }
+)
 
 
 class BitunixError(RuntimeError):
@@ -103,7 +109,7 @@ class BitunixClient:
         return self._parse(r)
 
     def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
-        if self.read_only:
+        if self.read_only and path not in PROTECTIVE_STOP_PATHS:
             raise ValueError("Exchange writes are disabled in alerts-only mode")
         body_str = json.dumps(body, separators=(",", ":"), sort_keys=True)
         headers = self._headers("", body_str, is_post=True)
@@ -223,6 +229,25 @@ class BitunixClient:
             {"symbol": symbol, "limit": limit, "skip": skip},
         )
         return data.get("data") or {"orderList": [], "total": 0}
+
+    def place_position_tpsl(
+        self,
+        symbol: str,
+        position_id: str,
+        sl_price: str,
+        sl_stop_type: str = "LAST_PRICE",
+    ) -> dict[str, Any]:
+        """Attach a position-level stop. Trigger closes the whole position at market."""
+        data = self._post(
+            "/api/v1/futures/tpsl/position/place_order",
+            {
+                "symbol": symbol,
+                "positionId": str(position_id),
+                "slPrice": str(sl_price),
+                "slStopType": sl_stop_type,
+            },
+        )
+        return data.get("data") or {}
 
     def modify_tpsl_order(
         self,

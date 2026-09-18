@@ -2,8 +2,9 @@
 
 An alerts-only scanner and Chrome overlay for long and short trades with a
 maximum holding period of 12 or 24 hours. The new strategy uses completed
-4h / 1h / 15m candles. It never places orders, changes leverage, modifies stops,
-or closes exchange positions.
+4h / 1h / 15m candles. It never opens trades, changes leverage, or closes
+exchange positions. The one exception is the overlay **Set Bitunix stop**
+button, which places a position-level protective stop.
 
 ## Start the backend
 
@@ -97,12 +98,15 @@ extra collateral, not the exchange's exact liquidation price or a guarantee.
 
 - **Track paper trade** records a simulated entry without placing an order.
 - **Record my fill** records a fill you already executed, within the confirmed
-  entry zone and planned size/risk. You must confirm that the Bitunix stop is
-  already placed. Until that is confirmed, the card shows SET STOP instead of
-  HOLD. Imported live positions start the same way.
+  entry zone and planned size/risk. Until a Bitunix stop is confirmed, the card
+  shows SET STOP instead of HOLD. Imported live positions start the same way.
+- **Set Bitunix stop** places a position-level stop on Bitunix at the working
+  stop price. One click. If hit, Bitunix closes the whole position at market.
+  This is the only exchange write in signal mode. It cannot open a trade or
+  flash-close a position. API keys need Trade permission.
 - **Live Bitunix positions** are imported read-only when `BITUNIX_API_KEY` and
-  `BITUNIX_SECRET_KEY` are set. The scanner never places, amends, or closes
-  orders; it only tracks size, mark, unrealized P&L, and hold/exit alerts.
+  `BITUNIX_SECRET_KEY` are set. The scanner still does not open or flatten
+  trades. **Set Bitunix stop** can attach or tighten a position-level stop.
   A vanished position closes that live track automatically.
 - Original stop, target, risk and holding limit are frozen when recorded.
 - Tracked cards show a live hold/close suggestion, a hold-confidence checklist
