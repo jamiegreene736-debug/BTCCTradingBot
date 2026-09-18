@@ -35,8 +35,10 @@ TRADE_OPEN = "OPEN"
 TRADE_CLOSE = "CLOSE"
 PROTECTIVE_STOP_PATHS = frozenset(
     {
-        "/api/v1/futures/tpsl/position/place_order",
+        "/api/v1/futures/tpsl/place_order",
         "/api/v1/futures/tpsl/modify_order",
+        "/api/v1/futures/tpsl/position/place_order",
+        "/api/v1/futures/tpsl/position/modify_order",
     }
 )
 
@@ -230,6 +232,28 @@ class BitunixClient:
         )
         return data.get("data") or {"orderList": [], "total": 0}
 
+    def place_qty_tpsl(
+        self,
+        symbol: str,
+        position_id: str,
+        sl_price: str,
+        sl_qty: str,
+        sl_stop_type: str = "LAST_PRICE",
+    ) -> dict[str, Any]:
+        """Attach the quantity TP/SL the Bitunix ticket shows on the position."""
+        data = self._post(
+            "/api/v1/futures/tpsl/place_order",
+            {
+                "symbol": symbol,
+                "positionId": str(position_id),
+                "slPrice": str(sl_price),
+                "slStopType": sl_stop_type,
+                "slOrderType": "MARKET",
+                "slQty": str(sl_qty),
+            },
+        )
+        return data.get("data") or {}
+
     def place_position_tpsl(
         self,
         symbol: str,
@@ -240,6 +264,24 @@ class BitunixClient:
         """Attach a position-level stop. Trigger closes the whole position at market."""
         data = self._post(
             "/api/v1/futures/tpsl/position/place_order",
+            {
+                "symbol": symbol,
+                "positionId": str(position_id),
+                "slPrice": str(sl_price),
+                "slStopType": sl_stop_type,
+            },
+        )
+        return data.get("data") or {}
+
+    def modify_position_tpsl(
+        self,
+        symbol: str,
+        position_id: str,
+        sl_price: str,
+        sl_stop_type: str = "LAST_PRICE",
+    ) -> dict[str, Any]:
+        data = self._post(
+            "/api/v1/futures/tpsl/position/modify_order",
             {
                 "symbol": symbol,
                 "positionId": str(position_id),

@@ -1184,6 +1184,147 @@ class SignalScanner:
             None,
         )
 
+    def _pair_row(self, symbol: str) -> dict[str, object] | None:
+        cached = self._cache.get("pairs")
+        rows = cached[1] if cached and isinstance(cached[1], list) else None
+        if not rows:
+            try:
+                fetched = self._read("pairs", 900, self.client.trading_pairs)
+            except READ_ERRORS:
+                fetched = []
+            rows = fetched if isinstance(fetched, list) else []
+        for row in rows:
+            if isinstance(row, dict) and row_symbol(row) == symbol:
+                return row
+        return None
+
+    def _price_digits(self, symbol: str) -> int:
+        row = self._pair_row(symbol)
+        if row is None:
+            return 8
+        digits = int(parse_symbol_meta(row).price_precision)
+        return digits if 0 <= digits <= 18 else 8
+
+    def _format_price(self, symbol: str, value: float) -> str:
+        digits = self._price_digits(symbol)
+        scale = 10**digits
+        quantized = round(value * scale) / scale if scale else value
+        text = f"{quantized:.{digits}f}"
+        return text.rstrip("0").rstrip(".") if "." in text else text
+
+    def _format_qty(self, symbol: str, value: float) -> str:
+        row = self._pair_row(symbol)
+        step = parse_symbol_meta(row).base_precision if row else 0.0
+        if step <= 0:
+            text = f"{value:.8f}"
+            return text.rstrip("0").rstrip(".") if "." in text else text
+        quantized = round(value / step) * step
+        digits = max(0, min(18, len(f"{step:.16f}".rstrip("0").split(".")[-1])))
+        if step >= 1:
+            digits = 0
+        text = f"{quantized:.{digits}f}"
+        return text.rstrip("0").rstrip(".") if "." in text else text
+
+    def _pending_stop_rows(
+        self, symbol: str, position_id: str
+    ) -> list[dict[str, object]]:
+        matches: list[dict[str, object]] = []
+        for row in self.client.pending_tpsl(symbol):
+            if not isinstance(row, dict) or row.get("slPrice") in (None, ""):
+                continue
+            row_id = str(row.get("positionId") or row.get("position_id") or "")
+            if row_id and row_id != str(position_id):
+                continue
+            if not row_id and row_symbol(row) not in ("", symbol):
+                continue
+            matches.append(row)
+        return matches
+
+    def _qty_stop_rows(
+        self, rows: list[dict[str, object]]
+    ) -> list[dict[str, object]]:
+        return [row for row in rows if row.get("slQty") not in (None, "")]
+
+    def _already_exists_stop(self, exc: BitunixError) -> bool:
+        text = f"{exc.code} {exc.msg}".lower()
+        return any(
+            token in text
+            for token in ("already", "exist", "duplicate", "only one", "has tpsl")
+        )
+
+    def _stop_matches(self, current: float | None, desired: float) -> bool:
+        return current is not None and abs(current - desired) <= max(
+            abs(desired) * 1e-8, 1e-10
+        )
+
+    def _is_tighter(self, trade: TrackedTrade, current: float | None, desired: float) -> bool:
+        if current is None:
+            return True
+        return desired > current if trade.plan.side == "long" else desired < current
+
+    def _modify_qty_stop(
+        self, row: dict[str, object], stop_text: str, qty_text: str
+    ) -> None:
+        order_id = str(row.get("id") or row.get("orderId") or "")
+        if not order_id:
+            raise BitunixError(0, "Existing quantity stop is missing an order id", row)
+        self.client.modify_tpsl_order(
+            order_id,
+            sl_price=stop_text,
+            sl_qty=str(row.get("slQty") or qty_text),
+            sl_stop_type=str(row.get("slStopType") or "LAST_PRICE"),
+            sl_order_type=str(row.get("slOrderType") or "MARKET"),
+        )
+
+    def _write_exchange_stop(
+        self,
+        trade: TrackedTrade,
+        position: OpenPosition,
+        stop_text: str,
+        qty_text: str,
+    ) -> None:
+        # The Bitunix ticket shows quantity TP/SL from /tpsl/place_order.
+        # Position-level TPSL can succeed without filling that field.
+        existing = self._pending_stop_rows(trade.symbol, position.position_id)
+        qty_rows = self._qty_stop_rows(existing)
+        reference = qty_rows[0] if qty_rows else existing[0] if existing else None
+        current = None
+        if reference is not None:
+            try:
+                current = number(reference.get("slPrice"))
+            except (TypeError, ValueError):
+                current = None
+        desired = number(stop_text)
+        if qty_rows and (
+            self._stop_matches(current, desired)
+            or not self._is_tighter(trade, current, desired)
+        ):
+            return
+        if qty_rows and self._is_tighter(trade, current, desired):
+            self._modify_qty_stop(qty_rows[0], stop_text, qty_text)
+            return
+        try:
+            self.client.place_qty_tpsl(
+                trade.symbol, position.position_id, stop_text, qty_text
+            )
+            return
+        except BitunixError as exc:
+            if not self._already_exists_stop(exc):
+                raise
+        existing = self._pending_stop_rows(trade.symbol, position.position_id)
+        qty_rows = self._qty_stop_rows(existing)
+        if qty_rows:
+            self._modify_qty_stop(qty_rows[0], stop_text, qty_text)
+            return
+        if existing:
+            self.client.modify_position_tpsl(
+                trade.symbol, position.position_id, stop_text
+            )
+            return
+        self.client.place_position_tpsl(
+            trade.symbol, position.position_id, stop_text
+        )
+
     def place_stop(self, values: dict[str, object]) -> TrackedTrade:
         if set(values) != {"id"}:
             raise ValueError("Provide id")
@@ -1224,46 +1365,14 @@ class SignalScanner:
                 raise ValueError(
                     "Stop is already through the market; close on Bitunix instead of hoping"
                 )
-            stop_text = f"{trade.current_stop:.8f}".rstrip("0").rstrip(".")
-            existing: dict[str, object] | None = None
+            stop_text = self._format_price(trade.symbol, trade.current_stop)
+            qty_text = self._format_qty(trade.symbol, position.quantity)
             try:
-                pending = self.client.pending_tpsl(trade.symbol)
-            except READ_ERRORS as exc:
-                raise ValueError(f"Could not read existing Bitunix stops: {exc}") from exc
-            for row in pending:
-                if not isinstance(row, dict):
-                    continue
-                if str(row.get("positionId") or "") != position.position_id:
-                    continue
-                if row.get("slPrice") not in (None, ""):
-                    existing = row
-                    break
-            try:
-                if existing is None:
-                    self.client.place_position_tpsl(
-                        trade.symbol, position.position_id, stop_text
-                    )
-                else:
-                    current = number(existing.get("slPrice"))
-                    tighter = (
-                        trade.current_stop > current
-                        if trade.plan.side == "long"
-                        else trade.current_stop < current
-                    )
-                    if tighter:
-                        self.client.modify_tpsl_order(
-                            str(existing.get("id") or existing.get("orderId") or ""),
-                            sl_price=stop_text,
-                            sl_qty=(
-                                str(existing["slQty"])
-                                if existing.get("slQty") not in (None, "")
-                                else None
-                            ),
-                            sl_stop_type=str(existing.get("slStopType") or "LAST_PRICE"),
-                            sl_order_type=str(existing.get("slOrderType") or "MARKET"),
-                        )
+                self._write_exchange_stop(trade, position, stop_text, qty_text)
             except BitunixError as exc:
                 raise ValueError(f"Bitunix rejected the stop: {exc.msg}") from exc
+            except READ_ERRORS as exc:
+                raise ValueError(f"Could not place the Bitunix stop: {exc}") from exc
             trade.exchange_stop_confirmed = True
             trade.exchange_position_id = position.position_id
             trade.mark_price = position.mark

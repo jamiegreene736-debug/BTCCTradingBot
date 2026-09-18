@@ -36,7 +36,7 @@ async function loadSettings() {
   }
 }
 let settingsReady = loadSettings();
-async function request(path, body) {
+async function request(path, body, timeoutMs = 8000) {
   await settingsReady;
   if (!settings.dashboardUrl || !settings.password) throw new Error('Open Settings and connect your dashboard.');
   const origin = validDashboardUrl(settings.dashboardUrl);
@@ -46,7 +46,7 @@ async function request(path, body) {
     method: body === undefined ? 'GET' : 'POST',
     headers: { Authorization: 'Basic ' + btoa(String.fromCharCode(...bytes)), 'Content-Type': 'application/json' },
     body: body === undefined ? undefined : JSON.stringify(body),
-    signal: AbortSignal.timeout(8000), cache: 'no-store', redirect: 'error',
+    signal: AbortSignal.timeout(timeoutMs), cache: 'no-store', redirect: 'error',
   }); } catch (error) {
     throw new Error(error.name === 'TimeoutError' || error.name === 'AbortError'
       ? 'Dashboard timed out. Check that the backend is running, then retry.'
@@ -97,7 +97,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   }
   const paths = { 'save-planning': '/api/signals/settings', 'track-entry': '/api/signals/track', 'close-track': '/api/signals/close', 'confirm-stop': '/api/signals/confirm-stop', 'place-stop': '/api/signals/place-stop' };
   if (Object.hasOwn(paths, message.type)) {
-    request(paths[message.type], message.body).then(async result => {
+    request(paths[message.type], message.body, message.type === 'place-stop' ? 20000 : 8000).then(async result => {
       await refresh(); respond(result);
     }).catch(error => respond({ ok: false, error: error.message }));
     return true;
