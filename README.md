@@ -64,8 +64,9 @@ most liquid majors — then rotates through about 10 more universe names so the
 full list is covered every couple of minutes. Names that print a WATCH or ENTER
 are promoted onto the fast lane. The overlay still shows only the ranked top
 five. Every card uses the same 19-gate checklist
-(market, setup, plan, book). Later stages stay listed as waiting, so a WATCH
-does not jump from 4/5 to 5/7 when a 15m trigger appears. Two extra market
+(market, setup, plan, book). Later stages stay marked waiting until the prior
+stage prints, so a WATCH does not jump from 4/5 to 5/7. Once a 15m setup
+exists, all eight plan gates are scored even if the 2R target fails. Two extra market
 gates — mark vs last, and a 3-minute funding-print blackout — use data the
 scanner already has. RSI, MACD, news, and open-interest trend are not added:
 they are either redundant with the 4h/1h/15m stack or need history we do not

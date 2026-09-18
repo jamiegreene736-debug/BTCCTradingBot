@@ -23,8 +23,10 @@ from bitunix_bot.intraday import (
     evaluate_intraday,
     find_setup,
     funding_cost,
+    make_check,
     select_targets,
     trend,
+    waiting_check,
 )
 from bitunix_bot.signal_config import SignalsCfg, SignalSettings
 from bitunix_bot.signal_scanner import SignalScanner, parse_open_position
@@ -1202,6 +1204,34 @@ def test_checklist_length_is_stable_from_wait_to_entry():
     assert [c.label for c in mixed.checks] == list(CHECKLIST_LABELS)
     assert mixed.state == "WATCH_LONG"
     assert len(waiting.checks) == len(mixed.checks) == 19
+
+
+def test_waiting_checks_are_distinct_from_failed_checks():
+    waiting = waiting_check("Entry zone", "Waiting for a completed 15m setup")
+    failed = make_check(
+        "Structural target",
+        False,
+        "No confirmed target that clears 2R inside the ≤24h travel budget",
+    )
+    assert waiting.waiting and not waiting.passed
+    assert not failed.waiting and not failed.passed
+
+
+def test_missing_2r_target_still_scores_remaining_plan_gates():
+    _decision, market, frames = ready_decision()
+    with patch("bitunix_bot.intraday.select_targets", return_value=[]):
+        blocked = evaluate_intraday(
+            market, frames, None, SignalSettings(), SignalsCfg(), NOW
+        )
+    plan = [check for check in blocked.checks if check.group == "plan"]
+    assert len(plan) == 8
+    assert all(not check.waiting for check in plan)
+    assert any(
+        check.label == "Structural target" and not check.passed for check in plan
+    )
+    assert any(check.label == "Funding drag" and not check.waiting for check in plan)
+    assert blocked.state == "WATCH_LONG"
+    assert blocked.plan is None
 
 
 def test_funding_print_window_blocks_entry():

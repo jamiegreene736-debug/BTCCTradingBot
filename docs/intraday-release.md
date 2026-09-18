@@ -80,6 +80,14 @@ call impossible to treat as optional.
 - Hard EXIT now includes estimated liquidation-buffer loss and −0.75R, with
   copy that a reversal will not beat liquidation.
 
+## Plan checklist — 1.5.2
+
+WATCH cards used to show Plan 0/8 forever because later gates were left as
+unscored waiting rows, which looked the same as failed. Waiting is now a
+separate state in the overlay. After a completed 15m setup, funding, size,
+depth and leverage are scored even when the 2R target is missing. ENTER still
+requires every gate, including the 15m trigger.
+
 ## One-click protective stop — 1.5.1
 
 Waiting for a bounce without an exchange stop was still one extra step too

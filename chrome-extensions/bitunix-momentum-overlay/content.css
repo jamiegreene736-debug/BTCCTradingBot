@@ -41,7 +41,7 @@
 #bis-panel .bis-checks{padding:0;margin:10px 0;list-style:none}
 #bis-panel .bis-check-group{display:block;margin:12px 0 6px;font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:#93a8bf}
 #bis-panel .bis-checks li{display:flex;gap:8px;margin-bottom:10px;font-size:11px}
-#bis-panel .bis-checks .pass>span{color:#55d8af}#bis-panel .bis-checks .fail>span{color:#ffce83}
+#bis-panel .bis-checks .pass>span{color:#55d8af}#bis-panel .bis-checks .fail>span{color:#ffce83}#bis-panel .bis-checks .wait>span{color:#93a8bf}
 #bis-panel h3{font-size:13px;font-weight:650;margin:18px 0 9px}#bis-panel h3 span{color:#93a8bf;margin-left:5px}
 #bis-panel .bis-empty{font-size:11px;color:#91a4bb;margin:10px 0}
 #bis-panel .bis-trade{border:1px solid #3e516a;border-radius:9px;padding:12px;margin:8px 0;background:#182534}

@@ -180,6 +180,7 @@ class Check:
     passed: bool
     detail: str
     group: str = "market"
+    waiting: bool = False
 
 
 CHECK_GROUPS: dict[str, str] = {
@@ -211,12 +212,12 @@ WAITING_ALIGNMENT = "Waiting for 4h EMA bias and confirmed 1h structure"
 WAITING_SETUP = "Waiting for a completed 15m setup"
 
 
-def make_check(label: str, passed: bool, detail: str) -> Check:
-    return Check(label, passed, detail, CHECK_GROUPS[label])
+def make_check(label: str, passed: bool, detail: str, *, waiting: bool = False) -> Check:
+    return Check(label, passed, detail, CHECK_GROUPS[label], waiting)
 
 
 def waiting_check(label: str, detail: str) -> Check:
-    return make_check(label, False, detail)
+    return make_check(label, False, detail, waiting=True)
 
 
 def order_checks(checks: list[Check]) -> list[Check]:
@@ -490,7 +491,7 @@ def build_plan(
             checks[0],
             make_check("Stop outside normal noise", False, blocked),
             *[
-                waiting_check(label, blocked)
+                make_check(label, False, blocked)
                 for label in PLAN_LABELS
                 if label not in ("Entry zone", "Stop outside normal noise")
             ],
@@ -524,21 +525,16 @@ def build_plan(
         volatility(four_hour),
         cfg,
     )
+    missing_target = "No confirmed target that clears 2R inside the ≤24h travel budget"
     if not targets:
-        blocked = "No confirmed target that clears 2R inside the ≤24h travel budget"
-        return None, checks + [
-            make_check("Structural target", False, blocked),
-            *[
-                waiting_check(label, blocked)
-                for label in PLAN_LABELS
-                if label
-                not in (
-                    "Entry zone",
-                    "Stop outside normal noise",
-                    "Structural target",
-                )
-            ],
-        ]
+        ratio = 0.0
+        target_ok = False
+        reward_detail = missing_target
+    else:
+        reward = sign * (targets[0] - entry) / entry - cost_pct / 100
+        ratio = reward / risk_fraction if risk_fraction > 0 else 0.0
+        target_ok = True
+        reward_detail = f"{ratio:.2f}R net; need {cfg.min_reward_risk:g}R"
     notional = min(
         settings.planning_equity * settings.risk_pct / 100 / risk_fraction,
         settings.planning_equity * settings.leverage * 0.9,
@@ -553,8 +549,6 @@ def build_plan(
         ),
         None,
     )
-    reward = sign * (targets[0] - entry) / entry - cost_pct / 100
-    ratio = reward / risk_fraction
     max_leverage, liquidation = 0, None
     if tier:
         adverse_basis = min(0, sign * (market.mark - market.price))
@@ -585,13 +579,17 @@ def build_plan(
         [
             make_check(
                 "Structural target",
-                True,
-                "Confirmed target clears 2R inside the ≤24h travel budget",
+                target_ok,
+                (
+                    "Confirmed target clears 2R inside the ≤24h travel budget"
+                    if target_ok
+                    else missing_target
+                ),
             ),
             make_check(
                 "Reward after costs",
-                ratio >= cfg.min_reward_risk,
-                f"{ratio:.2f}R net; need {cfg.min_reward_risk:g}R",
+                target_ok and ratio >= cfg.min_reward_risk,
+                reward_detail,
             ),
             make_check(
                 "Funding drag",
@@ -616,6 +614,8 @@ def build_plan(
             ),
         ]
     )
+    if not targets:
+        return None, checks
     return TradePlan(
         side,
         entry,
