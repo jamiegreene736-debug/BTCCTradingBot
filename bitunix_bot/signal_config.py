@@ -46,6 +46,8 @@ class SignalsCfg:
     max_data_age_seconds: int = 60
     min_quote_volume: float = 10_000_000.0
     max_symbols: int = 12
+    universe_size: int = 80
+    evaluate_batch: int = 10
     min_reward_risk: float = 2.0
     relative_volume_min: float = 1.2
     breakout_volume_min: float = 1.5
@@ -83,6 +85,8 @@ class SignalsCfg:
             "refresh_seconds",
             "max_data_age_seconds",
             "max_symbols",
+            "universe_size",
+            "evaluate_batch",
             "stale_trade_hours",
             "max_same_direction",
             "queue_size",
@@ -112,6 +116,14 @@ class SignalsCfg:
             )
         if type(self.max_symbols) is not int or not 1 <= self.max_symbols <= 30:
             raise ValueError("signals.max_symbols must be an integer from 1 to 30")
+        if type(self.universe_size) is not int or not 6 <= self.universe_size <= 120:
+            raise ValueError("signals.universe_size must be an integer from 6 to 120")
+        if self.universe_size < self.max_symbols:
+            raise ValueError(
+                "signals.universe_size must be at least signals.max_symbols"
+            )
+        if type(self.evaluate_batch) is not int or not 1 <= self.evaluate_batch <= 30:
+            raise ValueError("signals.evaluate_batch must be an integer from 1 to 30")
         if not 1 <= self.queue_size <= 8:
             raise ValueError("signals.queue_size must be an integer from 1 to 8")
         if not 5 <= self.handoff_seconds <= 60:
