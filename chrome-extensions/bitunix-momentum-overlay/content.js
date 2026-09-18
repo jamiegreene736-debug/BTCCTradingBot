@@ -226,7 +226,11 @@
     const liveCount = (payload.trades || []).filter(t => t.kind === 'exchange' || t.exchange_position_id).length;
     const liveBit = liveCount ? ` · ${liveCount} live position${liveCount === 1 ? '' : 's'}` : '';
     status.className = payload.error ? 'bis-notice' : 'bis-status';
-    status.textContent = payload.error || payload.status?.error || (payload.status?.ready ? '● Monitoring liquid USDT perpetuals' + liveBit : 'Waiting for complete market data');
+    const scan = payload.scan;
+    const scanBit = scan && Number.isFinite(scan.hot) && Number.isFinite(scan.universe)
+      ? ` · ${scan.hot} hot / ${scan.universe} universe`
+      : '';
+    status.textContent = payload.error || payload.status?.error || (payload.status?.ready ? '● Monitoring liquid USDT perpetuals' + scanBit + liveBit : 'Waiting for complete market data');
     host.querySelector('#bis-planning').innerHTML = `<div><small>Planning equity</small><b>${money(settings.planning_equity)}</b></div><div><small>Risk / trade</small><b>${fixed(settings.risk_pct)}%</b></div><div><small>Leverage / hold</small><b>${settings.leverage}x · ≤${settings.hold_hours}h</b></div><button data-action="planning">Edit</button>`;
     const rows = Object.values(payload.symbols || {});
     if (selected && !payload.symbols[selected]) selected = '';
