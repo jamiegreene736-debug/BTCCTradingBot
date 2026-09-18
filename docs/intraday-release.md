@@ -24,8 +24,9 @@ responses; no candles were interpolated or fabricated.
 The shipped baseline exits at the first structural target. A second target is
 context only; partial-profit schemes are not enabled without separate testing.
 Live Bitunix positions are imported read-only when API keys are present. The
-scanner still never places or closes orders. Recorded trade state needs a
-persistent volume for continuity across Railway deployments.
+scanner still does not open or flatten trades. **Set Bitunix stop** can attach
+a position-level protective stop. Recorded trade state needs a persistent
+volume for continuity across Railway deployments.
 
 ## 24h / 25-40x methodology revision
 
@@ -85,6 +86,16 @@ Waiting for a bounce without an exchange stop was still one extra step too
 many. The overlay now places that stop for you. Trade permission is required
 on the Bitunix API key. Entries, leverage changes and flash-closes stay
 blocked.
+
+## Two-tier scan — wide universe, hot set
+
+The overlay still shows five ranked setups. The backend no longer limits
+discovery to those twelve names. Tickers build a liquid universe of up to 80
+USDT perps. Every refresh fully evaluates the hot set (BTC, live/tracked
+positions, current WATCH/ENTER names, the displayed queue, and top-volume
+fillers up to `max_symbols`) and rotates `evaluate_batch` more universe names.
+A name that prints WATCH or ENTER is promoted onto the 15-second lane. Stale
+rotation WAIT rows stay out of the published queue.
 
 ## Signal queue, timestamps and handoff
 

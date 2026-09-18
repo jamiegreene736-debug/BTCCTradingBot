@@ -57,8 +57,13 @@ stored in local Chrome storage.
    estimated isolated-margin liquidation buffer must pass. The intended
    isolated-margin band is 25-40x; leverage never narrows the stop.
 
-The scanner ranks the twelve most liquid eligible USDT perpetuals, plus BTC and
-any actively tracked symbols. Every card uses the same 19-gate checklist
+The scanner keeps a wide liquid universe of about 80 USDT perpetuals and a hot
+set of about 12. Each 15-second refresh fully rescans the hot set — BTC, open or
+tracked positions, current WATCH/ENTER names, the displayed top five, and the
+most liquid majors — then rotates through about 10 more universe names so the
+full list is covered every couple of minutes. Names that print a WATCH or ENTER
+are promoted onto the fast lane. The overlay still shows only the ranked top
+five. Every card uses the same 19-gate checklist
 (market, setup, plan, book). Later stages stay listed as waiting, so a WATCH
 does not jump from 4/5 to 5/7 when a 15m trigger appears. Two extra market
 gates — mark vs last, and a 3-minute funding-print blackout — use data the

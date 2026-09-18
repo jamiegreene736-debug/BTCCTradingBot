@@ -1256,3 +1256,140 @@ def test_portfolio_gate_does_not_change_checklist_length(tmp_path):
         check["label"] == "Tracked exposure" and not check["passed"]
         for check in gated["checks"]
     )
+
+
+def _pair_row(symbol):
+    return {
+        "symbol": symbol,
+        "symbolStatus": "OPEN",
+        "basePrecision": 3,
+        "quotePrecision": 2,
+        "minTradeVolume": 0.001,
+    }
+
+
+def _universe_scanner(tmp_path, names, **overrides):
+    _, market, frames = ready_decision()
+    values = {
+        "max_symbols": 2,
+        "universe_size": 6,
+        "evaluate_batch": 2,
+        "queue_size": 2,
+    }
+    values.update(overrides)
+    cfg = SignalsCfg(**values)
+    cfg.validate()
+    scanner = SignalScanner(
+        MagicMock(spec=BitunixClient),
+        cfg,
+        SignalStore(str(tmp_path / "signals.db")),
+    )
+    scanner.client.trading_pairs.return_value = [_pair_row(name) for name in names]
+    scanner.client.tickers.return_value = [
+        {"symbol": name, "quoteVol": 100_000_000 - index * 1_000_000}
+        for index, name in enumerate(names)
+    ]
+    scanner.client.klines.side_effect = lambda symbol, interval, limit: candle_rows(
+        frames[interval]
+    )
+    scanner.client.funding_rate.return_value = {
+        "lastPrice": market.price,
+        "markPrice": market.mark,
+        "fundingRate": 0,
+        "fundingInterval": 8,
+        "nextFundingTime": (NOW + 3600) * 1000,
+    }
+    scanner.client.depth.return_value = {
+        "bids": [[market.bid, 10000]],
+        "asks": [[market.ask, 10000]],
+    }
+    scanner.client.position_tiers.return_value = [
+        {
+            "startValue": 0,
+            "endValue": 50000,
+            "maintenanceMarginRate": 0.004,
+            "leverage": 125,
+        }
+    ]
+    return scanner
+
+
+UNIVERSE_NAMES = [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "XRPUSDT",
+    "DOGEUSDT",
+    "ADAUSDT",
+]
+
+
+def test_two_tier_scan_rotates_universe_and_retains_decisions(tmp_path):
+    scanner = _universe_scanner(tmp_path, UNIVERSE_NAMES)
+    with patch("time.time", return_value=NOW), patch("time.sleep"):
+        scanner.refresh(force=True)
+        first = scanner.snapshot()["scan"]
+    assert first["universe"] == 6
+    assert first["hot_symbols"][:2] == ["BTCUSDT", "ETHUSDT"]
+    assert len(first["evaluated"]) == 4
+    first_batch = [name for name in first["evaluated"] if name not in first["hot_symbols"]]
+    assert first_batch == ["SOLUSDT", "XRPUSDT"]
+    with patch("time.time", return_value=NOW + 15), patch("time.sleep"):
+        scanner.refresh(force=True)
+        second = scanner.snapshot()["scan"]
+    second_batch = [
+        name for name in second["evaluated"] if name not in second["hot_symbols"]
+    ]
+    assert second_batch == ["DOGEUSDT", "ADAUSDT"]
+    assert set(scanner.decisions) == set(UNIVERSE_NAMES)
+    assert len(scanner.snapshot()["queue"]) <= scanner.cfg.queue_size
+
+
+def test_watch_signal_is_promoted_to_hot_set(tmp_path):
+    scanner = _universe_scanner(tmp_path, UNIVERSE_NAMES)
+    with patch("time.time", return_value=NOW), patch("time.sleep"):
+        scanner.refresh(force=True)
+        scanner.refresh(force=True)
+    for decision in scanner.decisions.values():
+        decision.state = "WAIT"
+        decision.side = ""
+    scanner.decisions["ADAUSDT"].state = "WATCH_LONG"
+    scanner.decisions["ADAUSDT"].side = "long"
+    with patch("time.time", return_value=NOW + 30), patch("time.sleep"):
+        scanner.refresh(force=True)
+        hot = scanner.snapshot()["scan"]["hot_symbols"]
+    assert "ADAUSDT" in hot
+
+
+def test_scan_prunes_names_that_left_the_universe(tmp_path):
+    scanner = _universe_scanner(tmp_path, UNIVERSE_NAMES)
+    with patch("time.time", return_value=NOW), patch("time.sleep"):
+        scanner.refresh(force=True)
+        scanner.refresh(force=True)
+    assert "ADAUSDT" in scanner.decisions
+    scanner.decisions["ADAUSDT"].state = "WAIT"
+    scanner.decisions["ADAUSDT"].side = ""
+    kept = UNIVERSE_NAMES[:-1]
+    scanner.client.trading_pairs.return_value = [_pair_row(name) for name in kept]
+    scanner.client.tickers.return_value = [
+        {"symbol": name, "quoteVol": 100_000_000 - index * 1_000_000}
+        for index, name in enumerate(kept)
+    ]
+    scanner._cache.pop("pairs", None)
+    scanner._cache.pop("tickers", None)
+    with patch("time.time", return_value=NOW + 45), patch("time.sleep"):
+        scanner.refresh(force=True)
+    assert "ADAUSDT" not in scanner.decisions
+
+
+def test_universe_config_bounds_and_shipped_yaml():
+    with pytest.raises(ValueError, match="universe_size"):
+        SignalsCfg(universe_size=5).validate()
+    with pytest.raises(ValueError, match="universe_size"):
+        SignalsCfg(max_symbols=20, universe_size=12).validate()
+    with pytest.raises(ValueError, match="evaluate_batch"):
+        SignalsCfg(evaluate_batch=0).validate()
+    cfg = load("config.yaml", "/dev/null")
+    assert cfg.signals.universe_size == 80
+    assert cfg.signals.evaluate_batch == 10
+    assert cfg.signals.max_symbols == 12

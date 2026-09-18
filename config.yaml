@@ -6,7 +6,9 @@ signals:
   refresh_seconds: 15
   max_data_age_seconds: 60
   min_quote_volume: 10000000
-  max_symbols: 12
+  max_symbols: 12          # hot set: always rescanned at refresh_seconds
+  universe_size: 80        # wide liquid list rotated through in batches
+  evaluate_batch: 10       # extra universe names fully evaluated each refresh
   min_reward_risk: 2.0
   relative_volume_min: 1.2
   breakout_volume_min: 1.5

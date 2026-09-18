@@ -167,6 +167,10 @@ class SignalScanner:
         self._handoff_to: str | None = None
         self._handoff_until: int = 0
         self._positions_error: str | None = None
+        self._universe_cursor = 0
+        self._universe: list[str] = []
+        self._hot_symbols_last: list[str] = []
+        self._evaluated_last: list[str] = []
 
     def _read(self, key: str, ttl: float, fetch: Callable[[], T]) -> T:
         now = time.time()
@@ -584,6 +588,88 @@ class SignalScanner:
                 trade.unrealized_pnl = None
                 self.store.save_trade(trade)
 
+    def _rank_decisions(
+        self, rows: dict[str, Decision] | None = None
+    ) -> list[Decision]:
+        return sorted(
+            (rows if rows is not None else self.decisions).values(),
+            key=lambda d: (
+                d.state.startswith("ENTER_"),
+                d.state.startswith("WATCH_"),
+                sum(c.passed for c in d.checks),
+                d.plan.net_reward_risk if d.plan else 0.0,
+            ),
+            reverse=True,
+        )
+
+    def _liquid_universe(self, by_ticker: dict[str, dict[str, object]]) -> list[str]:
+        return sorted(
+            (
+                symbol
+                for symbol in by_ticker
+                if row_quote_volume_usdt(by_ticker[symbol]) >= self.cfg.min_quote_volume
+            ),
+            key=lambda symbol: row_quote_volume_usdt(by_ticker[symbol]),
+            reverse=True,
+        )[: self.cfg.universe_size]
+
+    def _hot_symbols(self, liquid: list[str], pinned: list[str]) -> list[str]:
+        hot: list[str] = []
+
+        def add(symbol: str | None) -> None:
+            if symbol and symbol not in hot:
+                hot.append(symbol)
+
+        add("BTCUSDT")
+        for symbol in pinned:
+            add(symbol)
+        add(self._featured_symbol)
+        for decision in self.decisions.values():
+            if decision.state.startswith(("ENTER_", "WATCH_")):
+                add(decision.symbol)
+        for decision in self._rank_decisions()[: self.cfg.queue_size]:
+            add(decision.symbol)
+        for symbol in liquid:
+            if len(hot) >= self.cfg.max_symbols:
+                break
+            add(symbol)
+        return hot
+
+    def _rotate_universe(self, liquid: list[str], already: set[str]) -> list[str]:
+        if not liquid or self.cfg.evaluate_batch <= 0:
+            return []
+        picked: list[str] = []
+        start = self._universe_cursor % len(liquid)
+        for offset in range(len(liquid)):
+            symbol = liquid[(start + offset) % len(liquid)]
+            if symbol in already:
+                continue
+            picked.append(symbol)
+            if len(picked) >= self.cfg.evaluate_batch:
+                self._universe_cursor = (start + offset + 1) % len(liquid)
+                return picked
+        return picked
+
+    def _evaluate_symbol(
+        self,
+        symbol: str,
+        now: int,
+        settings: SignalSettings,
+        by_ticker: dict[str, dict[str, object]],
+        by_pair: dict[str, dict[str, object]],
+        frames: dict[str, dict[str, list[Candle]]],
+    ) -> Decision:
+        frames[symbol] = self._frames(symbol, now)
+        market = self._market(symbol, by_ticker[symbol], by_pair[symbol])
+        return evaluate_intraday(
+            market,
+            frames[symbol],
+            frames.get("BTCUSDT", {}).get("1h"),
+            settings,
+            self.cfg,
+            int(time.time()),
+        )
+
     def _refresh(self) -> None:
         now = int(time.time())
         settings = self.store.settings()
@@ -596,23 +682,13 @@ class SignalScanner:
             )
             by_pair = {row_symbol(p): p for p in pairs if row_is_tradeable_usdt_perp(p)}
             by_ticker = {row_symbol(t): t for t in tickers if row_symbol(t) in by_pair}
-            liquid = sorted(
-                (
-                    s
-                    for s in by_ticker
-                    if row_quote_volume_usdt(by_ticker[s]) >= self.cfg.min_quote_volume
-                ),
-                key=lambda s: row_quote_volume_usdt(by_ticker[s]),
-                reverse=True,
-            )[: self.cfg.max_symbols]
-            symbols = list(
-                dict.fromkeys(
-                    ["BTCUSDT"]
-                    + liquid
-                    + [t.symbol for t in active]
-                    + [p.symbol for p in positions]
-                )
-            )
+            liquid = self._liquid_universe(by_ticker)
+            pinned = [trade.symbol for trade in active] + [
+                position.symbol for position in positions
+            ]
+            hot = self._hot_symbols(liquid, pinned)
+            rotated = self._rotate_universe(liquid, set(hot))
+            symbols = list(dict.fromkeys(hot + rotated))
             if not by_ticker:
                 raise ValueError("Provider returned no tradable markets")
         except READ_ERRORS as exc:
@@ -620,6 +696,9 @@ class SignalScanner:
             with self.lock:
                 self.error = "Market provider unavailable; new entries are blocked"
                 self.decisions = {}
+                self._universe = []
+                self._hot_symbols_last = []
+                self._evaluated_last = []
                 self._sync_exchange_positions(
                     positions, {}, now, fetch_ok=positions_ok
                 )
@@ -629,15 +708,8 @@ class SignalScanner:
         decisions: dict[str, Decision] = {}
         for symbol in symbols:
             try:
-                frames[symbol] = self._frames(symbol, now)
-                market = self._market(symbol, by_ticker[symbol], by_pair[symbol])
-                decisions[symbol] = evaluate_intraday(
-                    market,
-                    frames[symbol],
-                    frames.get("BTCUSDT", {}).get("1h"),
-                    settings,
-                    self.cfg,
-                    int(time.time()),
+                decisions[symbol] = self._evaluate_symbol(
+                    symbol, now, settings, by_ticker, by_pair, frames
                 )
             except READ_ERRORS as exc:
                 log.warning("Intraday data rejected for %s: %s", symbol, exc)
@@ -648,19 +720,36 @@ class SignalScanner:
                         "Wait for valid candles, funding, depth and risk tiers"
                     ),
                 )
+        keep = set(liquid) | set(symbols) | set(pinned) | {"BTCUSDT"}
         with self.lock:
             # A settings update invalidates any scan that started with the old risk profile.
             if settings != self.store.settings():
                 return
             self.error = None
             self._stamp_states(decisions, now)
-            self.frames, self.decisions = frames, decisions
+            merged_frames = {
+                symbol: bars
+                for symbol, bars in self.frames.items()
+                if symbol in keep
+            }
+            merged_frames.update(frames)
+            merged = {
+                symbol: decision
+                for symbol, decision in self.decisions.items()
+                if symbol in keep
+            }
+            merged.update(decisions)
+            self.frames, self.decisions = merged_frames, merged
+            self._universe = liquid
+            self._hot_symbols_last = hot
+            self._evaluated_last = symbols
             self._sync_exchange_positions(
-                positions, decisions, now, fetch_ok=positions_ok
+                positions, merged, now, fetch_ok=positions_ok
             )
-            self._update_exits(decisions, int(time.time()))
-            for decision in decisions.values():
+            self._update_exits(merged, int(time.time()))
+            for decision in merged.values():
                 self._portfolio_gate(decision)
+            for decision in decisions.values():
                 self._record_signal_alert(decision, now)
 
     def _portfolio_gate(self, decision: Decision) -> None:
@@ -855,17 +944,23 @@ class SignalScanner:
             for decision in rows.values():
                 if not decision.state_since:
                     decision.state_since = decision.as_of or now
-            ranked = sorted(
-                rows.values(),
-                key=lambda d: (
-                    d.state.startswith("ENTER_"),
-                    d.state.startswith("WATCH_"),
-                    sum(c.passed for c in d.checks),
-                    d.plan.net_reward_risk if d.plan else 0.0,
-                ),
-                reverse=True,
-            )
-            featured, handoff = self._featured_and_handoff(ranked, rows, now)
+            live_symbols = {
+                trade.symbol
+                for trade in self.store.trades(active_only=True)
+            }
+            published = {
+                symbol: decision
+                for symbol, decision in rows.items()
+                if symbol in self._hot_symbols_last
+                or symbol in self._evaluated_last
+                or symbol in live_symbols
+                or (
+                    decision.as_of
+                    and now - decision.as_of <= self.cfg.max_data_age_seconds
+                )
+            }
+            ranked = self._rank_decisions(published)
+            featured, handoff = self._featured_and_handoff(ranked, published, now)
             trades = self.store.trades()
             live = [
                 t
@@ -896,6 +991,15 @@ class SignalScanner:
                         else self._positions_error
                     ),
                 },
+                "scan": {
+                    "universe": len(self._universe),
+                    "hot": len(self._hot_symbols_last),
+                    "hot_symbols": list(self._hot_symbols_last),
+                    "evaluated": list(self._evaluated_last),
+                    "refresh_seconds": self.cfg.refresh_seconds,
+                    "evaluate_batch": self.cfg.evaluate_batch,
+                    "queue_size": self.cfg.queue_size,
+                },
                 "symbols": {d.symbol: asdict(d) for d in ranked},
                 "queue": [
                     self._queue_item(d, now) for d in ranked[: self.cfg.queue_size]
@@ -913,6 +1017,10 @@ class SignalScanner:
             self.store.save_settings(settings)
             self.decisions = {}
             self._last_scan = 0
+            self._universe_cursor = 0
+            self._universe = []
+            self._hot_symbols_last = []
+            self._evaluated_last = []
             self._featured_symbol = None
             self._handoff_to = None
             self._handoff_until = 0
