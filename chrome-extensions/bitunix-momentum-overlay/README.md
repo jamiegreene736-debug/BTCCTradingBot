@@ -1,4 +1,4 @@
-# Bitunix Intraday Signals — Chrome extension v1.5.2
+# Bitunix Intraday Signals — Chrome extension v1.5.3
 
 Long and short entry, hold, review and exit alerts for trades lasting up to
 12–24 hours. The backend computes the strategy; this extension displays it.
@@ -18,10 +18,10 @@ No extension action sends an exchange order or modifies a position.
 - **Pump Fade Radar** or version **0.3.16** means old files or an old tab are
   still loaded. Reload the extension from this folder in `chrome://extensions`,
   then reload the Bitunix tab. The popup must say **Bitunix Intraday Signals**,
-  version **1.5.2**. Unpacked extensions do not refresh themselves after a git pull.
+  version **1.5.3**. Unpacked extensions do not refresh themselves after a git pull.
   Click **Reload** on this extension in `chrome://extensions`, then reload the
   Bitunix tab. A Bitunix in-page refresh is not enough. The panel header must
-  show **v1.5.2**, a drag grip, and ⤢. Drag the title to move; drag the
+  show **v1.5.3**, a drag grip, and ⤢. Drag the title to move; drag the
   bottom-right corner to resize.
 - Use the complete extension folder from one release. Mixing the old manifest
   and panel with the new worker breaks message delivery and omits its alarms permission.
@@ -55,9 +55,10 @@ until a gesture.
 
 Track paper trade simulates a record. Record my fill records a trade you already
 executed, within the currently confirmed plan. **Set Bitunix stop** then places
-a position-level stop at the working price; if it hits, Bitunix closes the whole
-position at market. That is the only exchange write. It does not open a trade
-or flatten immediately. You can still mark a stop you already placed by hand.
+the quantity stop-loss the Bitunix ticket shows, rounded to that market's tick;
+if it hits, Bitunix closes that size at market. That is the only exchange write.
+It does not open a trade or flatten immediately. You can still mark a stop you
+already placed by hand.
 Tracked trades show a live hold/close suggestion (HOLD, CONSIDER CLOSE, SET STOP,
 CLOSE, or REVIEW). SET STOP and CLOSE hide the hold-confidence bar and show the
 working stop in a get-out banner. The close-out list is 13 gates, including

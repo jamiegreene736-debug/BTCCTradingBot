@@ -106,13 +106,13 @@ extra collateral, not the exchange's exact liquidation price or a guarantee.
 - **Record my fill** records a fill you already executed, within the confirmed
   entry zone and planned size/risk. Until a Bitunix stop is confirmed, the card
   shows SET STOP instead of HOLD. Imported live positions start the same way.
-- **Set Bitunix stop** places a position-level stop on Bitunix at the working
-  stop price. One click. If hit, Bitunix closes the whole position at market.
-  This is the only exchange write in signal mode. It cannot open a trade or
-  flash-close a position. API keys need Trade permission.
+- **Set Bitunix stop** places the quantity stop-loss the Bitunix ticket shows,
+  rounded to that market's tick. One click. If hit, Bitunix closes that size at
+  market. This is the only exchange write in signal mode. It cannot open a trade
+  or flash-close a position. API keys need Trade permission.
 - **Live Bitunix positions** are imported read-only when `BITUNIX_API_KEY` and
   `BITUNIX_SECRET_KEY` are set. The scanner still does not open or flatten
-  trades. **Set Bitunix stop** can attach or tighten a position-level stop.
+  trades. **Set Bitunix stop** can attach or tighten that ticket stop.
   A vanished position closes that live track automatically.
 - Original stop, target, risk and holding limit are frozen when recorded.
 - Tracked cards show a live hold/close suggestion, a hold-confidence checklist

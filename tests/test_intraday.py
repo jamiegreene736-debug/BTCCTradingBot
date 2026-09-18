@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import requests
 
-from bitunix_bot.client import BitunixClient
+from bitunix_bot.client import BitunixClient, BitunixError
 from bitunix_bot.config import load
 from bitunix_bot.dashboard import create_app
 from bitunix_bot.intraday import (
@@ -537,15 +537,85 @@ def test_place_stop_sends_position_tpsl_and_never_opens_or_closes(tmp_path):
         scanner._sync_exchange_positions([parsed], scanner.decisions, NOW, fetch_ok=True)
         trade = scanner.store.trades(active_only=True)[0]
         scanner.client.pending_tpsl.return_value = []
-        scanner.client.place_position_tpsl.return_value = {"orderId": "SL1"}
+        scanner.client.place_qty_tpsl.return_value = {"orderId": "SL1"}
+        placed = scanner.place_stop({"id": trade.id})
+    assert placed.exchange_stop_confirmed is True
+    scanner.client.place_qty_tpsl.assert_called_once()
+    args = scanner.client.place_qty_tpsl.call_args.args
+    assert args[0] == "HYPEUSDT" and args[1] == "HYPE1"
+    assert float(args[2]) == pytest.approx(trade.current_stop)
+    assert float(args[3]) == pytest.approx(36.59)
+    scanner.client.place_order.assert_not_called()
+    scanner.client.flash_close_position.assert_not_called()
+
+
+def test_place_stop_rounds_to_quote_precision(tmp_path):
+    row = {
+        "positionId": "XAG1",
+        "symbol": "XAGUSDT",
+        "qty": "12.3",
+        "side": "LONG",
+        "avgOpenPrice": "65.5",
+        "markPrice": "66.48",
+        "unrealizedPNL": "12.05",
+        "leverage": 40,
+    }
+    scanner, _ = _live_scanner(tmp_path, [row])
+    scanner._cache["pairs"] = (
+        NOW,
+        [
+            {
+                "symbol": "XAGUSDT",
+                "quotePrecision": 2,
+                "basePrecision": 3,
+                "minTradeVolume": "0.1",
+            }
+        ],
+    )
+    parsed = parse_open_position(row)
+    assert parsed is not None
+    with patch("time.time", return_value=NOW):
+        scanner._sync_exchange_positions([parsed], scanner.decisions, NOW, fetch_ok=True)
+        trade = scanner.store.trades(active_only=True)[0]
+        trade.current_stop = 65.5025
+        scanner.store.save_trade(trade)
+        scanner.client.pending_tpsl.return_value = []
+        scanner.client.place_qty_tpsl.return_value = {"orderId": "SLXAG"}
+        placed = scanner.place_stop({"id": trade.id})
+    assert placed.exchange_stop_confirmed is True
+    args = scanner.client.place_qty_tpsl.call_args.args
+    assert args[0] == "XAGUSDT" and args[1] == "XAG1"
+    assert args[2] in {"65.5", "65.50"}
+    assert args[2] != "65.5025"
+    assert float(args[3]) == pytest.approx(12.3)
+
+
+def test_place_stop_falls_back_when_quantity_stop_already_exists(tmp_path):
+    row = {
+        "positionId": "HYPE1",
+        "symbol": "HYPEUSDT",
+        "qty": "36.59",
+        "side": "SHORT",
+        "avgOpenPrice": "80.37",
+        "markPrice": "80.574",
+        "unrealizedPNL": "-7.318",
+        "leverage": 40,
+    }
+    scanner, _ = _live_scanner(tmp_path, [row])
+    parsed = parse_open_position(row)
+    assert parsed is not None
+    with patch("time.time", return_value=NOW):
+        scanner._sync_exchange_positions([parsed], scanner.decisions, NOW, fetch_ok=True)
+        trade = scanner.store.trades(active_only=True)[0]
+        scanner.client.pending_tpsl.return_value = []
+        scanner.client.place_qty_tpsl.side_effect = BitunixError(
+            30019, "already exist", {}
+        )
+        scanner.client.place_position_tpsl.return_value = {"orderId": "SL2"}
         placed = scanner.place_stop({"id": trade.id})
     assert placed.exchange_stop_confirmed is True
     scanner.client.place_position_tpsl.assert_called_once()
-    args = scanner.client.place_position_tpsl.call_args.args
-    assert args[0] == "HYPEUSDT" and args[1] == "HYPE1"
-    assert float(args[2]) == pytest.approx(trade.current_stop)
     scanner.client.place_order.assert_not_called()
-    scanner.client.flash_close_position.assert_not_called()
 
 
 def test_place_stop_tightens_a_wider_existing_stop(tmp_path):
@@ -721,6 +791,8 @@ def test_read_only_client_allows_only_protective_stop_posts():
     response.json.return_value = {"code": 0, "data": {"orderId": "SL1"}}
     client.session = MagicMock()
     client.session.post.return_value = response
+    client.place_qty_tpsl("BTCUSDT", "1", "97.5", "0.01")
+    assert "/tpsl/place_order" in client.session.post.call_args.args[0]
     client.place_position_tpsl("BTCUSDT", "1", "97.5")
     assert "/tpsl/position/place_order" in client.session.post.call_args.args[0]
     with pytest.raises(ValueError, match="disabled"):
