@@ -516,6 +516,98 @@ def test_confirm_stop_allows_hold_on_manual_track(tmp_path):
     assert confirmed.suggestion == "HOLD_LONG"
 
 
+def test_place_stop_sends_position_tpsl_and_never_opens_or_closes(tmp_path):
+    row = {
+        "positionId": "HYPE1",
+        "symbol": "HYPEUSDT",
+        "qty": "36.59",
+        "side": "SHORT",
+        "avgOpenPrice": "80.37",
+        "markPrice": "80.574",
+        "unrealizedPNL": "-7.318",
+        "leverage": 40,
+        "ctime": (NOW - 120) * 1000,
+    }
+    scanner, _ = _live_scanner(tmp_path, [row])
+    parsed = parse_open_position(row)
+    assert parsed is not None
+    with patch("time.time", return_value=NOW):
+        scanner._sync_exchange_positions([parsed], scanner.decisions, NOW, fetch_ok=True)
+        trade = scanner.store.trades(active_only=True)[0]
+        scanner.client.pending_tpsl.return_value = []
+        scanner.client.place_position_tpsl.return_value = {"orderId": "SL1"}
+        placed = scanner.place_stop({"id": trade.id})
+    assert placed.exchange_stop_confirmed is True
+    scanner.client.place_position_tpsl.assert_called_once()
+    args = scanner.client.place_position_tpsl.call_args.args
+    assert args[0] == "HYPEUSDT" and args[1] == "HYPE1"
+    assert float(args[2]) == pytest.approx(trade.current_stop)
+    scanner.client.place_order.assert_not_called()
+    scanner.client.flash_close_position.assert_not_called()
+
+
+def test_place_stop_tightens_a_wider_existing_stop(tmp_path):
+    row = {
+        "positionId": "HYPE1",
+        "symbol": "HYPEUSDT",
+        "qty": "36.59",
+        "side": "SHORT",
+        "avgOpenPrice": "80.37",
+        "markPrice": "80.574",
+        "unrealizedPNL": "-7.318",
+        "leverage": 40,
+    }
+    scanner, _ = _live_scanner(tmp_path, [row])
+    parsed = parse_open_position(row)
+    assert parsed is not None
+    with patch("time.time", return_value=NOW):
+        scanner._sync_exchange_positions([parsed], scanner.decisions, NOW, fetch_ok=True)
+        trade = scanner.store.trades(active_only=True)[0]
+        scanner.client.pending_tpsl.return_value = [
+            {
+                "positionId": "HYPE1",
+                "id": "TPSL1",
+                "slPrice": "90",
+                "slQty": "36.59",
+                "slStopType": "LAST_PRICE",
+                "slOrderType": "MARKET",
+            }
+        ]
+        scanner.place_stop({"id": trade.id})
+    scanner.client.place_position_tpsl.assert_not_called()
+    scanner.client.modify_tpsl_order.assert_called_once()
+    assert scanner.client.modify_tpsl_order.call_args.kwargs["sl_price"] == (
+        f"{trade.current_stop:.8f}".rstrip("0").rstrip(".")
+    )
+
+
+def test_place_stop_refuses_paper_and_missing_keys(tmp_path):
+    scanner, decision = scanner_with_entry(tmp_path)
+    with patch("time.time", return_value=NOW):
+        paper = scanner.track(
+            {
+                "signal_id": decision.signal_id,
+                "kind": "paper",
+                "entry": decision.plan.entry,
+                "quantity": decision.plan.quantity,
+            }
+        )
+    with pytest.raises(ValueError, match="Paper"):
+        scanner.place_stop({"id": paper.id})
+    other, decision = scanner_with_entry(tmp_path / "manual")
+    with patch("time.time", return_value=NOW):
+        manual = other.track(
+            {
+                "signal_id": decision.signal_id,
+                "kind": "manual",
+                "entry": decision.plan.entry,
+                "quantity": decision.plan.quantity,
+            }
+        )
+    with pytest.raises(ValueError, match="API keys"):
+        other.place_stop({"id": manual.id})
+
+
 def test_paper_track_does_not_require_exchange_stop(tmp_path):
     scanner, decision = scanner_with_entry(tmp_path)
     with patch("time.time", return_value=NOW):
@@ -619,6 +711,20 @@ def test_read_only_client_refuses_every_exchange_post():
     with pytest.raises(ValueError, match="disabled"):
         client.flash_close_position("123")
     client.session.post.assert_not_called()
+
+
+def test_read_only_client_allows_only_protective_stop_posts():
+    client = BitunixClient("key", "secret", read_only=True)
+    response = MagicMock()
+    response.json.return_value = {"code": 0, "data": {"orderId": "SL1"}}
+    client.session = MagicMock()
+    client.session.post.return_value = response
+    client.place_position_tpsl("BTCUSDT", "1", "97.5")
+    assert "/tpsl/position/place_order" in client.session.post.call_args.args[0]
+    with pytest.raises(ValueError, match="disabled"):
+        client.place_order("BTCUSDT", "BUY", "1")
+    with pytest.raises(ValueError, match="disabled"):
+        client.flash_close_position("1")
 
 
 def test_alert_mode_cannot_enter_legacy_tick_or_configure_account(

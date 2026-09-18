@@ -35,6 +35,7 @@
 #bis-panel .bis-levels b{font-size:12px;overflow-wrap:anywhere}
 #bis-panel .bis-buttons{display:flex;gap:8px;margin-top:12px}#bis-panel .bis-buttons button{flex:1;font-size:11px}
 #bis-panel .bis-buttons button:last-child{border-color:#6d9e9b;background:#264445}
+#bis-panel .bis-trade .bis-buttons button{font-size:13px;font-weight:700;padding:10px 12px;border-color:#f08a8a;background:#5a2428}
 #bis-panel details{border-top:1px solid #2c3a4b;margin-top:14px;padding-top:10px}
 #bis-panel summary{font-size:11px;font-weight:600;color:#b6c5d7;cursor:pointer}
 #bis-panel .bis-checks{padding:0;margin:10px 0;list-style:none}

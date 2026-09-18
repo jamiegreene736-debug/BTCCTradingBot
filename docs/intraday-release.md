@@ -24,8 +24,9 @@ responses; no candles were interpolated or fabricated.
 The shipped baseline exits at the first structural target. A second target is
 context only; partial-profit schemes are not enabled without separate testing.
 Live Bitunix positions are imported read-only when API keys are present. The
-scanner still never places or closes orders. Recorded trade state needs a
-persistent volume for continuity across Railway deployments.
+scanner still does not open or flatten trades. **Set Bitunix stop** can attach
+a position-level protective stop. Recorded trade state needs a persistent
+volume for continuity across Railway deployments.
 
 ## 24h / 25-40x methodology revision
 
@@ -68,13 +69,23 @@ waiting for a bounce without a Bitunix stop, then getting liquidated. This
 release does not place that stop. It makes the missing stop and the “get out”
 call impossible to treat as optional.
 
-- Recording a real fill requires a checkbox that the Bitunix stop is already
-  placed at the planned price.
+- Recording a real fill can confirm a stop you already placed, or leave the
+  card on SET STOP until you click **Set Bitunix stop**.
 - Imported live positions start as SET STOP until that confirmation.
+- **Set Bitunix stop** is the only exchange write in signal mode: a
+  position-level Bitunix stop at the working stop. It does not open or flatten
+  a trade. Existing tighter stops are left alone; wider stops are tightened.
 - The overlay speaks “Set the Bitunix stop now” and “Close the trade now. Do
   not wait for a reversal.”
 - Hard EXIT now includes estimated liquidation-buffer loss and −0.75R, with
   copy that a reversal will not beat liquidation.
+
+## One-click protective stop — 1.5.1
+
+Waiting for a bounce without an exchange stop was still one extra step too
+many. The overlay now places that stop for you. Trade permission is required
+on the Bitunix API key. Entries, leverage changes and flash-closes stay
+blocked.
 
 ## Two-tier scan — wide universe, hot set
 

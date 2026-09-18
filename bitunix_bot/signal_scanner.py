@@ -1161,6 +1161,123 @@ class SignalScanner:
             self.store.save_trade(trade)
             return trade
 
+    def _matching_live_position(
+        self, trade: TrackedTrade, positions: list[OpenPosition]
+    ) -> OpenPosition | None:
+        if trade.exchange_position_id:
+            found = next(
+                (
+                    position
+                    for position in positions
+                    if position.position_id == trade.exchange_position_id
+                ),
+                None,
+            )
+            if found:
+                return found
+        return next(
+            (
+                position
+                for position in positions
+                if position.symbol == trade.symbol and position.side == trade.plan.side
+            ),
+            None,
+        )
+
+    def place_stop(self, values: dict[str, object]) -> TrackedTrade:
+        if set(values) != {"id"}:
+            raise ValueError("Provide id")
+        with self.lock:
+            trade = next((t for t in self.store.trades() if t.id == values["id"]), None)
+            if not trade:
+                raise ValueError("Tracked trade not found")
+            if trade.closed_at:
+                raise ValueError("Trade is already closed")
+            if trade.kind == "paper":
+                raise ValueError("Paper tracks do not place an exchange stop")
+            if not self._has_account_keys():
+                raise ValueError(
+                    "Add Bitunix API keys with Trade permission to place the stop"
+                )
+            if trade.current_stop <= 0:
+                raise ValueError("Working stop is missing")
+            positions, ok = self._load_positions()
+            if not ok:
+                raise ValueError(
+                    self._positions_error
+                    or "Could not read live Bitunix positions"
+                )
+            position = self._matching_live_position(trade, positions)
+            if position is None:
+                raise ValueError(
+                    "Open this position on Bitunix first, then click Set Bitunix stop"
+                )
+            decision = self.decisions.get(trade.symbol)
+            live = (
+                position.mark
+                or trade.mark_price
+                or (decision.price if decision and decision.price else None)
+                or position.entry
+            )
+            sign = 1 if trade.plan.side == "long" else -1
+            if sign * (live - trade.current_stop) <= 0:
+                raise ValueError(
+                    "Stop is already through the market; close on Bitunix instead of hoping"
+                )
+            stop_text = f"{trade.current_stop:.8f}".rstrip("0").rstrip(".")
+            existing: dict[str, object] | None = None
+            try:
+                pending = self.client.pending_tpsl(trade.symbol)
+            except READ_ERRORS as exc:
+                raise ValueError(f"Could not read existing Bitunix stops: {exc}") from exc
+            for row in pending:
+                if not isinstance(row, dict):
+                    continue
+                if str(row.get("positionId") or "") != position.position_id:
+                    continue
+                if row.get("slPrice") not in (None, ""):
+                    existing = row
+                    break
+            try:
+                if existing is None:
+                    self.client.place_position_tpsl(
+                        trade.symbol, position.position_id, stop_text
+                    )
+                else:
+                    current = number(existing.get("slPrice"))
+                    tighter = (
+                        trade.current_stop > current
+                        if trade.plan.side == "long"
+                        else trade.current_stop < current
+                    )
+                    if tighter:
+                        self.client.modify_tpsl_order(
+                            str(existing.get("id") or existing.get("orderId") or ""),
+                            sl_price=stop_text,
+                            sl_qty=(
+                                str(existing["slQty"])
+                                if existing.get("slQty") not in (None, "")
+                                else None
+                            ),
+                            sl_stop_type=str(existing.get("slStopType") or "LAST_PRICE"),
+                            sl_order_type=str(existing.get("slOrderType") or "MARKET"),
+                        )
+            except BitunixError as exc:
+                raise ValueError(f"Bitunix rejected the stop: {exc.msg}") from exc
+            trade.exchange_stop_confirmed = True
+            trade.exchange_position_id = position.position_id
+            trade.mark_price = position.mark
+            trade.unrealized_pnl = position.unrealized_pnl
+            evaluate_exit(
+                trade,
+                decision,
+                self.frames.get(trade.symbol, {}).get("15m", []),
+                int(time.time()),
+                self.cfg,
+            )
+            self.store.save_trade(trade)
+            return trade
+
     def close_track(self, values: dict[str, object]) -> TrackedTrade:
         if set(values) != {"id", "exit_price"}:
             raise ValueError("Provide id and exit_price")
