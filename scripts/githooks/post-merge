@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Runs after git pull in BTCCTradingBot so a deploy/pull cannot silently leave
+# the unpacked overlay stale.
+set -euo pipefail
+ROOT="$(git rev-parse --show-toplevel)"
+OVERLAY="$ROOT/chrome-extensions/bitunix-momentum-overlay"
+if [[ -f "$OVERLAY/manifest.json" ]]; then
+  VERSION="$(python3 -c "import json; print(json.load(open('$OVERLAY/manifest.json'))['version'])")"
+  echo "Overlay folder: $OVERLAY"
+  echo "Overlay version: $VERSION"
+  echo "Reload Bitunix Intraday Signals in chrome://extensions, then reload the Bitunix tab."
+fi

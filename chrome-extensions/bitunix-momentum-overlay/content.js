@@ -30,6 +30,13 @@
     return minutes > 0 ? `${minutes}m ${whole % 60}s` : `${whole}s`;
   };
   function fresh(row) { return !payload?.error && row?.as_of > 0 && Date.now() / 1000 - row.as_of <= (payload?.data_max_age || 60); }
+  function displayState(row) {
+    if (!fresh(row)) return 'WAIT';
+    if (row?.state?.startsWith('ENTER_') && row.plan && row.plan.expires_at <= Date.now() / 1000) {
+      return row.side === 'short' ? 'WATCH_SHORT' : 'WATCH_LONG';
+    }
+    return row.state || 'WAIT';
+  }
   function actionable(row) { return fresh(row) && row?.state?.startsWith('ENTER_') && row.plan?.expires_at > Date.now() / 1000; }
   function enterKey(row) {
     return row?.signal_id || `${row?.symbol}:${row?.state}:${row?.bar_time || row?.as_of || ''}`;
@@ -230,8 +237,16 @@
     const scanBit = scan && Number.isFinite(scan.hot) && Number.isFinite(scan.universe)
       ? ` · ${scan.hot} hot / ${scan.universe} universe`
       : '';
-    status.textContent = payload.error || payload.status?.error || (payload.status?.ready ? '● Monitoring liquid USDT perpetuals' + scanBit + liveBit : 'Waiting for complete market data');
-    host.querySelector('#bis-planning').innerHTML = `<div><small>Planning equity</small><b>${money(settings.planning_equity)}</b></div><div><small>Risk / trade</small><b>${fixed(settings.risk_pct)}%</b></div><div><small>Leverage / hold</small><b>${settings.leverage}x · ≤${settings.hold_hours}h</b></div><button data-action="planning">Edit</button>`;
+    const needVersion = payload.extension_version;
+    const staleOverlay = needVersion && version && needVersion !== version;
+    status.textContent = staleOverlay
+      ? `Overlay v${version} is stale. Backend needs v${needVersion}. On your Mac run ~/BTCCTradingBot/scripts/update_overlay.sh then Reload this extension and the Bitunix tab.`
+      : payload.error || payload.status?.error || (payload.status?.ready ? '● Monitoring liquid USDT perpetuals' + scanBit + liveBit : 'Waiting for complete market data');
+    if (staleOverlay) status.className = 'bis-notice';
+    const profile = settings.profile === 'fast_short' ? 'fast_short' : 'swing';
+    const title = host.querySelector('header strong');
+    if (title) title.textContent = profile === 'fast_short' ? 'Fast short signals' : 'Trade signals';
+    host.querySelector('#bis-planning').innerHTML = `<label class="bis-profile"><small>Strategy</small><select id="bis-profile"><option value="swing" ${profile === 'swing' ? 'selected' : ''}>Swing · 12–24h · long/short</option><option value="fast_short" ${profile === 'fast_short' ? 'selected' : ''}>Fast short · 1–2h · up to 100x</option></select></label><div><small>Risk / trade</small><b>${fixed(settings.risk_pct)}%</b></div><div><small>Leverage / hold</small><b>${settings.leverage}x · ≤${settings.hold_hours}h</b></div><button data-action="planning">Edit</button>`;
     const rows = Object.values(payload.symbols || {});
     if (selected && !payload.symbols[selected]) selected = '';
     const symbol = selected && payload.symbols[selected] ? selected : payload.best_symbol;
@@ -256,15 +271,20 @@
         reason: item.reasons?.[0] || '', price: item.price,
       }));
     host.querySelector('#bis-queue').innerHTML = `<h3>Top setups <span>${Math.min(queue.length, 5)}</span></h3>${queue.slice(0, 5).map((item, index) => {
-      const live = fresh(payload.symbols?.[item.symbol]) ? item.state : 'WAIT';
+      const live = displayState(payload.symbols?.[item.symbol] || item);
       const left = item.expires_at && live.startsWith('ENTER_') ? remain(item.expires_at - nowSec) : '';
       return `<button type="button" class="bis-queue-row ${tone(live)}${item.symbol === symbol ? ' active' : ''}" data-action="pick" data-symbol="${esc(item.symbol)}"><b>${index + 1}</b><div><strong>${esc(item.symbol)}</strong><small>${esc(label(live))}${item.setup ? ' · ' + esc(item.setup) : ''}</small><small>${esc(clock(item.state_since || item.as_of))}${left ? ' · ' + left + ' left' : ''}</small></div><span>${price(item.price)}</span></button>`;
     }).join('') || '<p class="bis-empty">No ranked setups yet.</p>'}`;
-    if (document.activeElement?.id !== 'bis-symbol') host.querySelector('#bis-selection').innerHTML = `<label>Market <select id="bis-symbol"><option value="">Best setup</option>${rows.map(r => `<option value="${esc(r.symbol)}" ${selected === r.symbol ? 'selected' : ''}>${esc(r.symbol)} · ${esc(fresh(r) ? label(r.state) : 'WAIT')}</option>`).join('')}</select></label><button data-action="refresh" title="Refresh signals">↻</button>`;
+    if (document.activeElement?.id !== 'bis-symbol') host.querySelector('#bis-selection').innerHTML = `<label>Market <select id="bis-symbol"><option value="">Best setup</option>${rows.map(r => `<option value="${esc(r.symbol)}" ${selected === r.symbol ? 'selected' : ''}>${esc(r.symbol)} · ${esc(label(displayState(r)))}</option>`).join('')}</select></label><button data-action="refresh" title="Refresh signals">↻</button>`;
     if (row) {
-      const state = fresh(row) && (!row.plan || row.plan.expires_at > Date.now() / 1000) ? row.state : 'WAIT';
+      const state = displayState(row);
       const plan = row.plan;
       const expiryLeft = plan && state.startsWith('ENTER_') ? remain(plan.expires_at - nowSec) : '';
+      const entryWindow = plan
+        ? (state.startsWith('ENTER_') && expiryLeft
+          ? `Entry window ${esc(clock(plan.expires_at))} · ${expiryLeft} left (this is not the hold time)`
+          : `Entry window closed · setup stays listed · planned hold after fill ≤${plan.hold_hours}h`)
+        : '';
       const checkGroups = [
         ['market', 'Market'], ['setup', 'Setup'], ['plan', 'Plan'], ['portfolio', 'Book'],
       ].map(([key, title]) => {
@@ -284,7 +304,7 @@
           return `<li class="${kind}"><span>${mark}</span><div><b>${esc(c.label)}</b><small>${esc(c.detail)}</small></div></li>`;
         }).join('');
       }).join('');
-      host.querySelector('#bis-card').innerHTML = `<article class="bis-signal ${tone(state)}"><div class="bis-row"><strong>${esc(row.symbol)}</strong><span>${price(row.price)}</span></div><div class="bis-state" aria-live="polite">${esc(label(state))}</div><p>${esc(fresh(row) ? row.reasons?.[0] : 'Data is stale. Entry alerts are paused.')}</p><div class="bis-meta">${esc(row.setup || '4h bias → 1h structure → 15m entry')}<br>Shown ${esc(clock(row.state_since || row.as_of))} · ${esc(ago(row.state_since || row.as_of))}<br>Market snapshot ${esc(clock(row.as_of))} · ${esc(ago(row.as_of))}</div>${plan ? `<div class="bis-levels"><div><small>Entry zone</small><b>${price(plan.entry_low)} – ${price(plan.entry_high)}</b></div><div><small>Stop loss</small><b>${price(plan.stop)}</b></div><div><small>Profit target</small><b>${price(plan.target)}</b></div><div><small>Net reward / risk</small><b>${fixed(plan.net_reward_risk)}R</b></div><div><small>Planned loss incl. costs</small><b>${money(plan.risk_usdt)} · ${fixed(plan.risk_pct)}%</b></div><div><small>Notional / margin</small><b>${money(plan.notional)} / ${money(plan.margin)}</b></div></div><div class="bis-meta">Entry expires ${esc(clock(plan.expires_at))}${expiryLeft ? ' · ' + expiryLeft + ' left' : ''} · Estimated leverage ceiling ${plan.max_leverage}x · 25-40x band</div><div class="bis-buttons"><button data-action="paper" ${actionable(row) ? '' : 'disabled'}>Track paper trade</button><button data-action="manual" ${actionable(row) ? '' : 'disabled'}>Record my fill</button></div>` : ''}<details><summary>Why this signal · ${row.checks.filter(c => c.passed).length}/${row.checks.length} checks</summary><p class="bis-empty">Same 19 gates on every card. Waiting gates are locked until the prior stage prints. Failed gates were scored and blocked the entry.</p><ul class="bis-checks">${checkGroups}</ul><div class="bis-meta">4h bias: ${esc(row.metrics.trend_4h || '—')} · 1h structure: ${esc(row.metrics.trend_1h || '—')}<br>ATR: ${fixed(row.metrics.atr_pct)}% · 1h ATR: ${fixed(row.metrics.hourly_atr_pct)}% · Volume: ${fixed(row.metrics.relative_volume)}×<br>UTC session VWAP: ${price(row.metrics.vwap)}<br>BTC relative strength (6h): ${fixed(row.metrics.relative_strength_pct)}%<br>Funding / interval: ${fixed(row.metrics.funding_rate_pct, 4)}%<br>Open interest: ${row.metrics.open_interest == null ? 'Unavailable' : price(row.metrics.open_interest)}</div>${plan ? `<p class="bis-meta">Estimated liquidation: ${price(plan.liquidation_estimate)}. Isolated margin, no extra collateral; verify on Bitunix. Estimated total costs ${fixed(plan.cost_pct)}%, including ${plan.funding_payments} projected funding payments. Future rates can change. Target 2 (context only): ${price(plan.target2)}.</p>` : ''}</details></article>`;
+      host.querySelector('#bis-card').innerHTML = `<article class="bis-signal ${tone(state)}"><div class="bis-row"><strong>${esc(row.symbol)}</strong><span>${price(row.price)}</span></div><div class="bis-state" aria-live="polite">${esc(label(state))}</div><p>${esc(fresh(row) ? row.reasons?.[0] : 'Data is stale. Entry alerts are paused.')}</p><div class="bis-meta">${esc(row.setup || '4h bias → 1h structure → 15m entry')}<br>Shown ${esc(clock(row.state_since || row.as_of))} · ${esc(ago(row.state_since || row.as_of))}<br>Market snapshot ${esc(clock(row.as_of))} · ${esc(ago(row.as_of))}</div>${plan ? `<div class="bis-levels"><div><small>Entry zone</small><b>${price(plan.entry_low)} – ${price(plan.entry_high)}</b></div><div><small>Stop loss</small><b>${price(plan.stop)}</b></div><div><small>Profit target</small><b>${price(plan.target)}</b></div><div><small>Net reward / risk</small><b>${fixed(plan.net_reward_risk)}R</b></div><div><small>Planned loss incl. costs</small><b>${money(plan.risk_usdt)} · ${fixed(plan.risk_pct)}%</b></div><div><small>Notional / margin</small><b>${money(plan.notional)} / ${money(plan.margin)}</b></div></div><div class="bis-meta">${entryWindow}<br>Estimated leverage ceiling ${plan.max_leverage}x · 25-40x band</div><div class="bis-buttons"><button data-action="paper" ${actionable(row) ? '' : 'disabled'}>Track paper trade</button><button data-action="manual" ${actionable(row) ? '' : 'disabled'}>Record my fill</button></div>` : ''}<details><summary>Why this signal · ${row.checks.filter(c => c.passed).length}/${row.checks.length} checks</summary><p class="bis-empty">Same 19 gates on every card. Waiting gates are locked until the prior stage prints. Failed gates were scored and blocked the entry.</p><ul class="bis-checks">${checkGroups}</ul><div class="bis-meta">4h bias: ${esc(row.metrics.trend_4h || '—')} · 1h structure: ${esc(row.metrics.trend_1h || '—')} · 1h EMA: ${esc(row.metrics.trend_1h_ema || '—')}<br>ATR: ${fixed(row.metrics.atr_pct)}% · 1h ATR: ${fixed(row.metrics.hourly_atr_pct)}% · Volume: ${fixed(row.metrics.relative_volume)}×<br>UTC session VWAP: ${price(row.metrics.vwap)}<br>BTC relative strength (6h): ${fixed(row.metrics.relative_strength_pct)}%<br>Funding / interval: ${fixed(row.metrics.funding_rate_pct, 4)}%<br>Open interest: ${row.metrics.open_interest == null ? 'Unavailable' : price(row.metrics.open_interest)}</div>${plan ? `<p class="bis-meta">Estimated liquidation: ${price(plan.liquidation_estimate)}. Isolated margin, no extra collateral; verify on Bitunix. Estimated total costs ${fixed(plan.cost_pct)}%, including ${plan.funding_payments} projected funding payments. Future rates can change. Target 2 (context only): ${price(plan.target2)}.</p>` : ''}</details></article>`;
     } else host.querySelector('#bis-card').innerHTML = '<p class="bis-empty">Scanner warming up. Missing data blocks entries.</p>';
     const kindLabel = kind => kind === 'paper' ? 'PAPER' : kind === 'exchange' ? 'LIVE' : 'USER RECORDED';
     const pnlText = value => Number.isFinite(value) ? `${value >= 0 ? '+' : '−'}${money(Math.abs(value))}` : '';
@@ -370,7 +390,24 @@
       synth.speak(warm);
     } catch { /* gesture unlock for Chrome speech */ }
   }, true);
-  host.addEventListener('change', event => { if (event.target.id === 'bis-symbol') { selected = event.target.value; render(); } });
+  host.addEventListener('change', event => {
+    if (event.target.id === 'bis-symbol') { selected = event.target.value; render(); }
+    if (event.target.id === 'bis-profile' && payload?.settings) {
+      const nextProfile = event.target.value === 'fast_short' ? 'fast_short' : 'swing';
+      const s = payload.settings;
+      const body = {
+        profile: nextProfile,
+        planning_equity: Number(s.planning_equity),
+        risk_pct: Number(s.risk_pct),
+        leverage: nextProfile === 'fast_short' ? (s.profile === 'fast_short' ? Number(s.leverage) : 100) : (s.profile === 'swing' ? Number(s.leverage) : 25),
+        hold_hours: nextProfile === 'fast_short' ? (s.profile === 'fast_short' ? Number(s.hold_hours) : 2) : (s.profile === 'swing' ? Number(s.hold_hours) : 24),
+      };
+      send('save-planning', body).then(response => {
+        if (!response?.ok) throw new Error(response?.error || 'Could not switch strategy.');
+        return refresh();
+      }).catch(error => { payload = { ...(payload || {}), error: error.message }; render(); });
+    }
+  });
   host.addEventListener('keydown', event => {
     if (event.key === 'Escape' && formOpen) closeForm();
     if (event.key === 'Tab' && formOpen) {
@@ -396,7 +433,33 @@
     }
     if (action === 'planning') {
       const s = payload.settings;
-      openForm('Planning settings', `<p>These are planning values, not your exchange balance. Existing tracked plans remain unchanged. The scanner is built for isolated 25-40x and a 12h or 24h hold. Leverage never tightens the stop; if 40x would liquidate before the structural stop, the entry stays blocked.</p><label>Planning equity (USDT)<input name="planning_equity" type="number" min="10" max="100000000" step="0.01" value="${s.planning_equity}" required></label><label>Risk per trade (%)<input name="risk_pct" type="number" min="0.01" max="2" step="0.01" value="${s.risk_pct}" required></label><label>Leverage (isolated, 25-40x intended)<input name="leverage" type="number" min="1" max="40" step="1" value="${s.leverage}" required></label><label>Maximum hold<select name="hold_hours"><option value="12" ${s.hold_hours === 12 ? 'selected' : ''}>12 hours</option><option value="24" ${s.hold_hours === 24 ? 'selected' : ''}>24 hours</option></select></label>`, 'Save settings', data => send('save-planning', Object.fromEntries([...data].map(([k, v]) => [k, Number(v)]))));
+      const profile = s.profile === 'fast_short' ? 'fast_short' : 'swing';
+      const holdOpts = profile === 'fast_short'
+        ? `<option value="1" ${s.hold_hours === 1 ? 'selected' : ''}>1 hour</option><option value="2" ${s.hold_hours === 2 ? 'selected' : ''}>2 hours</option>`
+        : `<option value="12" ${s.hold_hours === 12 ? 'selected' : ''}>12 hours</option><option value="24" ${s.hold_hours === 24 ? 'selected' : ''}>24 hours</option>`;
+      const copy = profile === 'fast_short'
+        ? 'Fast short looks for a completed 15m pump-fade rejection and plans a 1-2h short. 100x liquidates on about a 1% wick. Leverage never tightens the stop; if 100x would liquidate before that fade stop, the card stays WATCH.'
+        : 'Swing plans isolated 25-40x longs or shorts for a 12h or 24h hold. Leverage never tightens the stop; if 40x would liquidate before the structural stop, the entry stays blocked.';
+      openForm('Planning settings', `<p>These are planning values, not your exchange balance. Existing tracked plans remain unchanged. ${copy}</p><label>Strategy<select name="profile"><option value="swing" ${profile === 'swing' ? 'selected' : ''}>Swing · 12–24h · long/short</option><option value="fast_short" ${profile === 'fast_short' ? 'selected' : ''}>Fast short · 1–2h · up to 100x</option></select></label><label>Planning equity (USDT)<input name="planning_equity" type="number" min="10" max="100000000" step="0.01" value="${s.planning_equity}" required></label><label>Risk per trade (%)<input name="risk_pct" type="number" min="0.01" max="2" step="0.01" value="${s.risk_pct}" required></label><label>Leverage (isolated)<input name="leverage" type="number" min="1" max="${profile === 'fast_short' ? 100 : 40}" step="1" value="${s.leverage}" required></label><label>Maximum hold<select name="hold_hours">${holdOpts}</select></label>`, 'Save settings', data => send('save-planning', {
+        profile: String(data.get('profile') || 'swing'),
+        planning_equity: Number(data.get('planning_equity')),
+        risk_pct: Number(data.get('risk_pct')),
+        leverage: Number(data.get('leverage')),
+        hold_hours: Number(data.get('hold_hours')),
+      }));
+      host.querySelector('#bis-form [name="profile"]')?.addEventListener('change', event => {
+        const fast = event.target.value === 'fast_short';
+        const hold = host.querySelector('#bis-form [name="hold_hours"]');
+        const lev = host.querySelector('#bis-form [name="leverage"]');
+        if (hold) hold.innerHTML = fast
+          ? '<option value="1">1 hour</option><option value="2" selected>2 hours</option>'
+          : '<option value="12">12 hours</option><option value="24" selected>24 hours</option>';
+        if (lev) {
+          lev.max = fast ? 100 : 40;
+          if (fast && Number(lev.value) > 40) lev.value = 100;
+          if (!fast && Number(lev.value) > 40) lev.value = 25;
+        }
+      });
     }
     if (action === 'paper' || action === 'manual') {
       const row = payload.symbols[selected || payload.best_symbol];

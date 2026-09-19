@@ -21,13 +21,23 @@ every exchange POST. The old automatic entry/exit loop is bypassed, and old
 extension admin POSTs receive HTTP 403. Public market scanning needs no API key.
 Legacy account/dashboard reads may still need read credentials.
 
-Load `chrome-extensions/bitunix-momentum-overlay` unpacked through
-`chrome://extensions`. Connect it to your HTTPS Railway dashboard and password.
-After updating, click **Reload** on the extension in `chrome://extensions`, then
-reload the Bitunix tab. An in-page Bitunix refresh is not enough; the header
-must show the current version, a drag grip, and ⤢. Reloading the extension
-replaces any leftover immovable panel. The new overlay requires the matching
-backend release; it does not interpret old pump-fade scores.
+Load this unpacked folder through `chrome://extensions`:
+
+`/Users/jamiegreene/BTCCTradingBot/chrome-extensions/bitunix-momentum-overlay`
+
+That is the live copy on this Mac. It is not the rental-tracker `repo` folder.
+Railway deploys the backend only; it cannot update Chrome's unpacked files.
+After every pull or deploy, run this in Terminal (not in Rental Community Tracker):
+
+```sh
+/Users/jamiegreene/BTCCTradingBot/scripts/update_overlay.sh
+```
+
+Then click **Reload** on the extension in `chrome://extensions`, then reload the
+Bitunix tab. An in-page Bitunix refresh is not enough. The header must show the
+current version, a drag grip, and ⤢. A stale overlay shows a yellow banner with
+the version the backend expects. `scripts/deploy.sh` runs the overlay update
+before a local Railway deploy.
 Drag the title to move the panel, the bottom-right corner to resize it, or
 double-click the header / use ⤢ to restore the default position. The layout is
 stored in local Chrome storage.
@@ -35,9 +45,12 @@ stored in local Chrome storage.
 ## Signals
 
 1. 4h supplies directional bias only (20/50 EMA stack and slope). Confirmed 4h
-   swings take 16 hours to print and arrive too late for a 12/24h hold. 1h must
-   still show matching confirmed swing structure, EMA stack, and slope. Mixed
-   1h structure or an opposite 4h bias means WAIT.
+   swings take 16 hours to print and arrive too late for a 12/24h hold. A trade
+   side is allowed when 4h bias and confirmed 1h structure agree, when 1h
+   structure is confirmed and 4h is mixed, or when 4h bias and the 1h EMA stack
+   agree before 1h swings print. Opposite 1h structure still means WAIT. That
+   last path is how shorts appear in a fresh downturn: waiting for LH/LL
+   confirmation used to miss the whole 12/24h hold.
 2. A 15m trend pullback must touch the hourly or 15m EMA, hourly support, or
    UTC-session VWAP, then reclaim the prior close in the trend direction with
    relative volume. Entries do not wait for a break of the prior high.
@@ -51,11 +64,12 @@ stored in local Chrome storage.
    ≤24h travel budget (8× 1h ATR or 3× 4h ATR), is used. Near swings that fail
    2R are skipped instead of blocking the trade. A second target is contextual
    only; the default exit is the first target.
-5. Altcoins additionally require aligned BTC direction and matching relative
-   strength over six hours. Spread, 24h USDT volume, 1h ATR (not dead, not
-   blow-off), planned order size, depth, projected funding drag, and an
-   estimated isolated-margin liquidation buffer must pass. The intended
-   isolated-margin band is 25-40x; leverage never narrows the stop.
+5. Altcoins need matching 6h relative strength. A confirmed opposite BTC 1h
+   trend still blocks the alt; mixed or same-side BTC does not. Spread, 24h
+   USDT volume, 1h ATR (not dead, not blow-off), planned order size, depth,
+   projected funding drag, and an estimated isolated-margin liquidation buffer
+   must pass. The intended isolated-margin band is 25-40x; leverage never
+   narrows the stop.
 
 The scanner keeps a wide liquid universe of about 80 USDT perpetuals and a hot
 set of about 12. Each 15-second refresh fully rescans the hot set — BTC, open or
@@ -77,18 +91,37 @@ news/event feed.
 
 ## Planning and tracking
 
-The overlay's Edit button sets planning equity, risk per trade, leverage (1–40x),
-and maximum hold (12h/24h). Initial planning defaults are explicitly hypothetical:
-1,000 USDT equity, 0.5% risk, 25x, 24 hours. These are not an exchange balance.
+The overlay strategy dropdown switches the scanner. **Swing** is the 12h/24h
+long-or-short book at 25-40x. **Fast short** is a different model: completed 15m
+pump-fade rejections only, 1h or 2h hold, planning leverage up to 100x. It does
+not wait for a 4h/1h downtrend — that would be late for a 1-2h fade. A confirmed
+1h downtrend is treated as a chase and stays WAIT.
+
+100x is not a free lunch. Isolated 100x liquidates on about a 1% wick. The
+scanner still never tightens the stop to make leverage fit; if the fade stop
+sits past the estimated liquidation buffer, the card stays WATCH. Most names
+will. Fees and slippage also eat a large slice of margin at 100x. Use it only
+when the rejection wick is tight enough that the stop still fits.
+
+The overlay's Edit button sets planning equity, risk per trade, leverage, and
+maximum hold for the selected profile. Initial swing defaults are hypothetical:
+1,000 USDT equity, 0.5% risk, 25x, 24 hours. Switching to Fast short fills 100x
+and 2 hours. These are not an exchange balance.
 
 The overlay shows a ranked queue of the top five markets, each with the time
 the current state started. WATCH and ENTER alerts are stored with that
-timestamp so you can look back. When a setup flips to ENTER, the laptop
+timestamp so you can look back. The 12h/24h figure is the planned hold after a
+fill, not how long the card stays on ENTER. The entry window itself ends at
+the next completed 15m candle (at most ~15 minutes). When that window closes,
+the setup stays on the list as WATCH until 4h/1h alignment breaks — it is not
+yanked to WAIT. A live ENTER is not replaced by a mere WATCH. A one-off
+provider read failure keeps the last good decision instead of wiping the card.
+When a setup flips to ENTER, the laptop
 speakers say “Trade entry waiting” plus the market and side. When a tracked
 trade needs an exchange stop or a latched exit, they say “Set the Bitunix stop
 now” or “Close the trade now. Do not wait for a reversal.” Click the panel
 once if Chrome blocks speech until a gesture. When the featured setup is about
-to change — a higher-ranked market is ready, or the entry window is under 45
+to change — a higher-ranked ENTER is ready, or the entry window is under 45
 seconds — the panel counts down before switching.
 
 Position size accounts for the structural stop plus estimated costs. The scanner

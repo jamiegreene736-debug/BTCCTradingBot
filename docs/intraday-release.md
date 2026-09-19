@@ -38,7 +38,9 @@ inside the cost-adjusted stop.
 
 This revision keeps alerts-only execution and the same risk accounting:
 
-- 4h is EMA bias only; 1h still requires confirmed HH/HL or LH/LL.
+- 4h is EMA bias only. 1h confirmed swings still win, but a matching 1h EMA
+  stack can admit a side before those swings print, and a confirmed 1h
+  structure is enough when 4h is mixed. Opposite 1h structure still blocks.
 - 15m pullbacks reclaim the prior close (not the prior high) and may use the
   15m EMA. Impulse continuation is a third completed-candle trigger.
 - Structural targets skip sub-2R swings and stay inside a hold-window travel
@@ -103,7 +105,18 @@ USDT perps. Every refresh fully evaluates the hot set (BTC, live/tracked
 positions, current WATCH/ENTER names, the displayed queue, and top-volume
 fillers up to `max_symbols`) and rotates `evaluate_batch` more universe names.
 A name that prints WATCH or ENTER is promoted onto the 15-second lane. Stale
-rotation WAIT rows stay out of the published queue.
+rotation WAIT rows stay out of the published queue. A confirmed ENTER is not
+dropped to WAIT when the 15m entry window closes; it stays listed as WATCH
+until alignment breaks. A live ENTER is not handed off to a WATCH-only name.
+A failed re-read keeps the last good decision for two data-age windows.
+
+## Fast short profile — 1.5.5
+
+The overlay can switch from swing (12/24h, 25-40x, long or short) to **Fast
+short**: 1-2h, shorts only, planning leverage up to 100x. The scanner looks for
+a completed 15m pump-fade rejection. It does not require a 4h/1h downtrend.
+100x still fails the isolated-margin buffer when the fade stop is too wide.
+This is not a measured edge.
 
 ## Signal queue, timestamps and handoff
 

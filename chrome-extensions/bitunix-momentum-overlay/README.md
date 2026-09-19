@@ -1,4 +1,4 @@
-# Bitunix Intraday Signals — Chrome extension v1.5.3
+# Bitunix Intraday Signals — Chrome extension v1.5.6
 
 Long and short entry, hold, review and exit alerts for trades lasting up to
 12–24 hours. The backend computes the strategy; this extension displays it.
@@ -18,10 +18,10 @@ No extension action sends an exchange order or modifies a position.
 - **Pump Fade Radar** or version **0.3.16** means old files or an old tab are
   still loaded. Reload the extension from this folder in `chrome://extensions`,
   then reload the Bitunix tab. The popup must say **Bitunix Intraday Signals**,
-  version **1.5.3**. Unpacked extensions do not refresh themselves after a git pull.
+  version **1.5.6**. Unpacked extensions do not refresh themselves after a git pull.
   Click **Reload** on this extension in `chrome://extensions`, then reload the
   Bitunix tab. A Bitunix in-page refresh is not enough. The panel header must
-  show **v1.5.3**, a drag grip, and ⤢. Drag the title to move; drag the
+  show **v1.5.6**, a drag grip, and ⤢. Drag the title to move; drag the
   bottom-right corner to resize.
 - Use the complete extension folder from one release. Mixing the old manifest
   and panel with the new worker breaks message delivery and omits its alarms permission.
@@ -38,13 +38,19 @@ bottom-right corner to resize, or double-click the header / use ⤢ to restore
 the default spot. Reloading the extension replaces any leftover immovable
 panel from an older script. Size and position persist in local Chrome storage.
 
+The strategy dropdown switches Swing (12–24h long/short) and Fast short (1–2h
+pump-fade shorts, up to 100x). 100x still requires the fade stop to fit inside
+the estimated liquidation buffer.
+
 The top-five queue lists the current ranked markets with the time each state
 started. A countdown warning appears before the featured card switches to the
 next setup. Recent alerts keep WATCH and ENTER rows with full timestamps.
 
 The card shows WAIT, WATCH LONG/SHORT or ENTER LONG/SHORT, an entry zone,
 structural stop, profit target, estimated net reward/risk, planning size and
-estimated leverage ceiling. Open the checklist for the underlying evidence. Every card lists the same
+estimated leverage ceiling. The 12h/24h planning value is hold time after a
+fill. The entry window is the current 15m candle only; when it closes the
+setup stays listed as WATCH instead of disappearing. Open the checklist for the underlying evidence. Every card lists the same
 19 gates, grouped as market / setup / plan / book.
 Stale data disables entry tracking. The Best setup selector ranks eligible markets.
 The laptop speakers say “Trade entry waiting” plus the market and side when a

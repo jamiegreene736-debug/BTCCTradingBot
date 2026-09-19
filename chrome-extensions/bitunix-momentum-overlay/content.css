@@ -12,8 +12,10 @@
 #bis-panel #bis-body{overflow-y:auto;max-height:calc(100vh - 175px);padding:12px 16px 16px;flex:1 1 auto;min-height:0}
 #bis-panel p{margin:7px 0;line-height:1.55}#bis-panel small{display:block;font-size:10px;color:#9dafc3}#bis-panel b,#bis-panel strong{font-weight:650}
 #bis-panel .bis-status{font-size:11px;color:#9bceb9;margin-bottom:12px}#bis-panel .bis-notice{padding:16px;color:#ffd399}
-#bis-panel #bis-planning{display:grid;grid-template-columns:1.1fr .8fr 1.2fr auto;align-items:center;gap:8px;padding-bottom:14px;border-bottom:1px solid #2c3a4b}
+#bis-panel #bis-planning{display:grid;grid-template-columns:minmax(0,1.5fr) .7fr .9fr auto;align-items:center;gap:8px;padding-bottom:14px;border-bottom:1px solid #2c3a4b}
 #bis-panel #bis-planning b{font-size:11px}#bis-panel #bis-planning button{padding:4px 7px;font-size:11px}
+#bis-panel #bis-planning .bis-profile{display:flex;flex-direction:column;gap:2px;min-width:0}
+#bis-panel #bis-planning .bis-profile select{padding:4px 6px;font-size:11px}
 #bis-panel .bis-handoff{display:grid;grid-template-columns:1fr auto;gap:4px 8px;padding:10px 12px;margin:0 0 12px;border:1px solid #e9ac69;background:#352b24;border-radius:9px;color:#ffd399}
 #bis-panel .bis-handoff strong{font-size:12px}#bis-panel .bis-handoff span{font-size:12px;font-weight:700}
 #bis-panel .bis-handoff small{grid-column:1 / -1;color:#efd3ad}

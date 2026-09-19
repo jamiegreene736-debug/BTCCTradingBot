@@ -13,14 +13,18 @@ import requests
 from bitunix_bot.client import BitunixClient, BitunixError
 from bitunix_bot.config import load
 from bitunix_bot.dashboard import create_app
+from bitunix_bot.extension import required_extension_version
 from bitunix_bot.intraday import (
     CHECKLIST_LABELS,
     Candle,
     Market,
     Tier,
+    choose_side,
     closed_candles,
     ema_bias,
+    ema_stack,
     evaluate_intraday,
+    find_fade_setup,
     find_setup,
     funding_cost,
     make_check,
@@ -28,7 +32,7 @@ from bitunix_bot.intraday import (
     trend,
     waiting_check,
 )
-from bitunix_bot.signal_config import SignalsCfg, SignalSettings
+from bitunix_bot.signal_config import FAST_SHORT, SignalsCfg, SignalSettings
 from bitunix_bot.signal_scanner import SignalScanner, parse_open_position
 from bitunix_bot.signal_store import (
     HOLD_CHECK_LABELS,
@@ -359,6 +363,63 @@ def test_alt_requires_btc_context_and_relative_strength():
         NOW,
     )
     assert decision.state == "WATCH_LONG"
+    assert any(c.label == "BTC context" and not c.passed for c in decision.checks)
+
+
+def test_choose_side_admits_shorts_before_1h_swings_confirm():
+    assert choose_side("mixed", "short", "short") == "short"
+    assert choose_side("short", "mixed", "short") == "short"
+    assert choose_side("short", "short", "short") == "short"
+    assert choose_side("long", "long", "long") == "long"
+    assert choose_side("short", "long", "short") is None
+    assert choose_side("long", "short", "long") is None
+    assert choose_side("mixed", "mixed", "mixed") is None
+
+
+def test_short_enters_when_4h_ema_agrees_before_1h_swings():
+    decision, market, frames = ready_decision("short")
+    hourly = frames["1h"]
+    peak = max(c.high for c in hourly[-20:]) + 8
+    hourly[-5] = replace(hourly[-5], high=peak)
+    assert trend(hourly) == "mixed"
+    assert ema_stack(hourly) == "short"
+    assert ema_bias(frames["4h"]) == "short"
+    again = evaluate_intraday(
+        market, frames, None, SignalSettings(), SignalsCfg(), NOW
+    )
+    assert again.side == "short"
+    assert again.state == "ENTER_SHORT", again.reasons
+
+
+def test_alt_can_enter_when_btc_is_mixed():
+    _, market, frames = ready_decision("long")
+    btc = [
+        Candle(c.time, 100.0, 100.1, 99.9, 100.0, 100.0) for c in frames["1h"]
+    ]
+    assert trend(btc) == "mixed"
+    decision = evaluate_intraday(
+        replace(market, symbol="ETHUSDT"),
+        frames,
+        btc,
+        SignalSettings(),
+        SignalsCfg(),
+        NOW,
+    )
+    assert decision.state == "ENTER_LONG", decision.reasons
+
+
+def test_alt_short_is_blocked_by_confirmed_btc_long():
+    _, market, frames = ready_decision("short")
+    _, long_frames = market_frames("long")
+    decision = evaluate_intraday(
+        replace(market, symbol="ETHUSDT"),
+        frames,
+        long_frames["1h"],
+        SignalSettings(),
+        SignalsCfg(),
+        NOW,
+    )
+    assert not decision.state.startswith("ENTER")
     assert any(c.label == "BTC context" and not c.passed for c in decision.checks)
 
 
@@ -723,6 +784,81 @@ def test_invalid_planning_values_rejected(values):
         SignalSettings.from_dict({**asdict(SignalSettings()), **values})
 
 
+def test_legacy_settings_payload_defaults_to_swing():
+    settings = SignalSettings.from_dict(
+        {
+            "planning_equity": 1000.0,
+            "risk_pct": 0.5,
+            "leverage": 25,
+            "hold_hours": 24,
+        }
+    )
+    assert settings.profile == "swing"
+    assert SignalSettings.from_dict(
+        {
+            "planning_equity": 1000.0,
+            "risk_pct": 0.5,
+            "leverage": 100,
+            "hold_hours": 2,
+            "profile": FAST_SHORT,
+        }
+    ).max_leverage_cap == 100
+    with pytest.raises(ValueError):
+        SignalSettings.from_dict(
+            {
+                "planning_equity": 1000.0,
+                "risk_pct": 0.5,
+                "leverage": 100,
+                "hold_hours": 2,
+            }
+        )
+    with pytest.raises(ValueError):
+        SignalSettings(profile=FAST_SHORT, leverage=101, hold_hours=2).validate()
+
+
+def fade_market():
+    market, frames = market_frames("long")
+    bars = frames["15m"]
+    bars[-3] = replace(bars[-3], open=98.2, high=99.6, low=98.15, close=99.5, volume=300)
+    bars[-2] = replace(bars[-2], open=99.5, high=99.7, low=99.2, close=99.4, volume=180)
+    bars[-1] = replace(
+        bars[-1], open=99.4, high=99.75, low=98.7, close=98.85, volume=220
+    )
+    for i in range(96):
+        bars[i] = replace(bars[i], low=96.8)
+    price = bars[-1].close
+    market = replace(market, price=price, mark=price, bid=price - 0.005, ask=price + 0.005)
+    return market, frames
+
+
+def test_fast_short_fade_setup_and_does_not_chase_1h_downtrend():
+    market, frames = fade_market()
+    atr_value = 0.45
+    setup = find_fade_setup(frames["15m"], frames["1h"], atr_value, SignalsCfg())
+    assert setup is not None and setup.name == "Pump fade rejection"
+    settings = SignalSettings(profile=FAST_SHORT, leverage=50, hold_hours=2)
+    decision = evaluate_intraday(
+        market, frames, None, settings, SignalsCfg(), NOW
+    )
+    assert decision.side == "short"
+    assert decision.setup == "Pump fade rejection"
+    assert decision.state in ("ENTER_SHORT", "WATCH_SHORT"), decision.reasons
+    if decision.state == "WATCH_SHORT":
+        assert any(not item.passed for item in decision.checks)
+    chased = evaluate_intraday(
+        market,
+        {**frames, "1h": market_frames("short")[1]["1h"]},
+        None,
+        settings,
+        SignalsCfg(),
+        NOW,
+    )
+    assert not chased.state.startswith("ENTER")
+    assert "chase" in chased.reasons[0].lower() or any(
+        "chase" in item.detail.lower() for item in chased.checks
+    )
+
+
 def scanner_with_entry(tmp_path):
     scanner = SignalScanner(
         MagicMock(spec=BitunixClient),
@@ -919,6 +1055,7 @@ def test_scanner_reads_current_public_schema_and_deduplicates_alerts(tmp_path):
     assert snapshot["history"][0]["time"] == NOW
     assert snapshot["queue"][0]["symbol"] == "BTCUSDT"
     assert snapshot["queue"][0]["state_since"] == NOW
+    assert snapshot["extension_version"] == required_extension_version()
     scanner.client.place_order.assert_not_called()
     scanner.client.pending_positions.assert_not_called()
 
@@ -978,6 +1115,63 @@ def test_entry_expiry_warns_before_window_closes(tmp_path):
     assert snap["handoff"]["to_symbol"] == "ETHUSDT"
     assert snap["handoff"]["seconds_remaining"] == 30
     assert snap["queue"][0]["seconds_remaining"] == 30
+
+
+def test_expired_enter_stays_listed_as_watch(tmp_path):
+    scanner, decision = scanner_with_entry(tmp_path)
+    decision.as_of = NOW
+    decision.plan.expires_at = NOW - 5
+    scanner.decisions = {decision.symbol: decision}
+    scanner._hot_symbols_last = [decision.symbol]
+    scanner._evaluated_last = [decision.symbol]
+    with patch("time.time", return_value=NOW):
+        snap = scanner.snapshot()
+    row = snap["symbols"][decision.symbol]
+    assert row["state"] == "WATCH_LONG"
+    assert "stays listed" in row["reasons"][0]
+    assert snap["queue"][0]["symbol"] == decision.symbol
+    assert snap["queue"][0]["state"] == "WATCH_LONG"
+
+
+def test_live_enter_is_not_handed_off_to_a_watch(tmp_path):
+    scanner, first = scanner_with_entry(tmp_path)
+    second, _, _ = ready_decision("short")
+    second.symbol = "ETHUSDT"
+    second.state = "WATCH_SHORT"
+    first.as_of = second.as_of = NOW
+    first.state_since = NOW - 30
+    scanner.decisions = {first.symbol: first, second.symbol: second}
+    with patch("time.time", return_value=NOW):
+        snap = scanner.snapshot()
+    assert snap["best_symbol"] == "BTCUSDT"
+    assert snap["handoff"] is None
+    with patch("time.time", return_value=NOW + 60):
+        held = scanner.snapshot()
+    assert held["best_symbol"] == "BTCUSDT"
+    assert held["handoff"] is None
+
+
+def test_failed_reread_keeps_live_enter(tmp_path):
+    scanner, decision = scanner_with_entry(tmp_path)
+    decision.as_of = NOW
+    scanner.decisions = {decision.symbol: decision}
+    scanner._evaluate_symbol = MagicMock(side_effect=ValueError("klines missing"))
+    scanner.client.trading_pairs.return_value = [
+        {
+            "symbol": "BTCUSDT",
+            "symbolStatus": "OPEN",
+            "basePrecision": 3,
+            "quotePrecision": 2,
+            "minTradeVolume": 0.001,
+        }
+    ]
+    scanner.client.tickers.return_value = [
+        {"symbol": "BTCUSDT", "quoteVol": 100_000_000}
+    ]
+    with patch("time.time", return_value=NOW), patch("time.sleep"):
+        scanner.refresh(force=True)
+    assert scanner.decisions["BTCUSDT"].state == "ENTER_LONG"
+    assert scanner.decisions["BTCUSDT"].signal_id == decision.signal_id
 
 
 def test_trailing_stop_is_not_applied_to_an_earlier_wick():
