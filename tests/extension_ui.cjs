@@ -23,7 +23,7 @@ async function main() {
       window.listeners = [];
       window.savedLayout = {};
       window.chrome = { runtime: {
-        getManifest: () => ({ version: '1.5.4' }),
+        getManifest: () => ({ version: '1.5.6' }),
         sendMessage: async message => {
           window.messages.push(message);
           if (['save-planning', 'track-entry', 'close-track', 'confirm-stop', 'place-stop'].includes(message.type)) return { ok: true };
@@ -55,7 +55,7 @@ async function main() {
     });
     await page.addStyleTag({ path: path.join(root, 'content.css') });
     await page.addScriptTag({ path: path.join(root, 'content.js') });
-    assert.equal(await page.locator('#bis-panel').getAttribute('data-bis-version'), '1.5.4');
+    assert.equal(await page.locator('#bis-panel').getAttribute('data-bis-version'), '1.5.6');
     assert.equal(await page.locator('#bis-panel').evaluate(el => el.textContent.includes('OLD IMMOVABLE PANEL')), false);
     assert.match(await page.locator('#bis-status').textContent(), /Connecting/);
     await page.evaluate(() => {
@@ -276,13 +276,13 @@ async function main() {
     await popup.setContent(fs.readFileSync(path.join(root, 'popup.html'), 'utf8').replace(/<script[^>]*><\/script>/g, ''));
     await popup.evaluate(() => {
       window.chrome = { runtime: {
-        getManifest: () => ({ version: '1.5.4' }),
+        getManifest: () => ({ version: '1.5.6' }),
         sendMessage: async () => ({ payload: { error: 'Cannot reach the dashboard.' } }),
       } };
     });
     await popup.addScriptTag({ path: path.join(root, 'popup.js') });
     assert.match(await popup.locator('#status').textContent(), /Cannot reach/);
-    assert.equal(await popup.locator('#version').textContent(), 'Version 1.5.4');
+    assert.equal(await popup.locator('#version').textContent(), 'Version 1.5.6');
     const stalled = await browser.newPage();
     stalled.on('pageerror', error => errors.push(error.message));
     await stalled.clock.install();
