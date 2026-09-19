@@ -19,6 +19,7 @@ jobs:
       - run: pip install -r requirements.txt pytest ruff mypy types-requests types-PyYAML
       - run: ruff check --select E4,E7,E9,F,I bitunix_bot/intraday.py bitunix_bot/signal_*.py scripts/backtest_intraday.py tests/test_intraday.py
       - run: mypy --strict --follow-imports=silent bitunix_bot/intraday.py bitunix_bot/signal_*.py scripts/backtest_intraday.py
+      - run: test -x scripts/update_overlay.sh && test -x scripts/deploy.sh
       - run: python -m pytest tests/test_e2e.py tests/test_intraday.py -q
       - run: node --test tests/extension_worker.test.cjs
       - run: npm install --no-save playwright

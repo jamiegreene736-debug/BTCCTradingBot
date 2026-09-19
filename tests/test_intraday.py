@@ -13,6 +13,7 @@ import requests
 from bitunix_bot.client import BitunixClient, BitunixError
 from bitunix_bot.config import load
 from bitunix_bot.dashboard import create_app
+from bitunix_bot.extension import required_extension_version
 from bitunix_bot.intraday import (
     CHECKLIST_LABELS,
     Candle,
@@ -1054,6 +1055,7 @@ def test_scanner_reads_current_public_schema_and_deduplicates_alerts(tmp_path):
     assert snapshot["history"][0]["time"] == NOW
     assert snapshot["queue"][0]["symbol"] == "BTCUSDT"
     assert snapshot["queue"][0]["state_since"] == NOW
+    assert snapshot["extension_version"] == required_extension_version()
     scanner.client.place_order.assert_not_called()
     scanner.client.pending_positions.assert_not_called()
 

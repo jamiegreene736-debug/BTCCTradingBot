@@ -1,0 +1,17 @@
+---
+description: Keep Jamie's Mac unpacked overlay folder current
+alwaysApply: true
+---
+
+The live unpacked Chrome overlay is:
+
+`/Users/jamiegreene/BTCCTradingBot/chrome-extensions/bitunix-momentum-overlay`
+
+Never use `/path/to/BTCCTradingBot`. Never run overlay git commands in
+`Rental-Community-Tracker` or `Rental Comunity Tool Cursor/repo`.
+
+Railway and cloud agents cannot write that Mac folder. After any overlay or
+signal-UI change: bump `chrome-extensions/bitunix-momentum-overlay/manifest.json`
+(the backend reads it as `extension_version`), commit, push, then tell the user
+to run `/Users/jamiegreene/BTCCTradingBot/scripts/update_overlay.sh` and Reload
+the extension plus the Bitunix tab.

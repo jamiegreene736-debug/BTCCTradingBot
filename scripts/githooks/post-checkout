@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+ROOT="$(git rev-parse --show-toplevel)"
+OVERLAY="$ROOT/chrome-extensions/bitunix-momentum-overlay"
+if [[ -f "$OVERLAY/manifest.json" ]]; then
+  VERSION="$(python3 -c "import json; print(json.load(open('$OVERLAY/manifest.json'))['version'])")"
+  echo "Overlay folder: $OVERLAY  (v$VERSION)"
+  echo "Reload the extension in chrome://extensions if this is the copy Chrome has loaded."
+fi

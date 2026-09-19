@@ -15,6 +15,7 @@ from typing import TypeVar
 import requests
 
 from .client import BitunixClient, BitunixError
+from .extension import required_extension_version
 from .intraday import (
     Candle,
     Decision,
@@ -1008,6 +1009,7 @@ class SignalScanner:
                 "strategy": "intraday",
                 "mode": "alerts_only",
                 "now": now,
+                "extension_version": required_extension_version(),
                 "settings": asdict(self.store.settings()),
                 "data_max_age": self.cfg.max_data_age_seconds,
                 "status": {

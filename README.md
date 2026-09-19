@@ -21,13 +21,23 @@ every exchange POST. The old automatic entry/exit loop is bypassed, and old
 extension admin POSTs receive HTTP 403. Public market scanning needs no API key.
 Legacy account/dashboard reads may still need read credentials.
 
-Load `chrome-extensions/bitunix-momentum-overlay` unpacked through
-`chrome://extensions`. Connect it to your HTTPS Railway dashboard and password.
-After updating, click **Reload** on the extension in `chrome://extensions`, then
-reload the Bitunix tab. An in-page Bitunix refresh is not enough; the header
-must show the current version, a drag grip, and ⤢. Reloading the extension
-replaces any leftover immovable panel. The new overlay requires the matching
-backend release; it does not interpret old pump-fade scores.
+Load this unpacked folder through `chrome://extensions`:
+
+`/Users/jamiegreene/BTCCTradingBot/chrome-extensions/bitunix-momentum-overlay`
+
+That is the live copy on this Mac. It is not the rental-tracker `repo` folder.
+Railway deploys the backend only; it cannot update Chrome's unpacked files.
+After every pull or deploy, run this in Terminal (not in Rental Community Tracker):
+
+```sh
+/Users/jamiegreene/BTCCTradingBot/scripts/update_overlay.sh
+```
+
+Then click **Reload** on the extension in `chrome://extensions`, then reload the
+Bitunix tab. An in-page Bitunix refresh is not enough. The header must show the
+current version, a drag grip, and ⤢. A stale overlay shows a yellow banner with
+the version the backend expects. `scripts/deploy.sh` runs the overlay update
+before a local Railway deploy.
 Drag the title to move the panel, the bottom-right corner to resize it, or
 double-click the header / use ⤢ to restore the default position. The layout is
 stored in local Chrome storage.
