@@ -10,8 +10,9 @@ The live unpacked Chrome overlay is:
 Never use `/path/to/BTCCTradingBot`. Never run overlay git commands in
 `Rental-Community-Tracker` or `Rental Comunity Tool Cursor/repo`.
 
-Railway and cloud agents cannot write that Mac folder. After any overlay or
-signal-UI change: bump `chrome-extensions/bitunix-momentum-overlay/manifest.json`
-(the backend reads it as `extension_version`), commit, push, then tell the user
-to run `/Users/jamiegreene/BTCCTradingBot/scripts/update_overlay.sh` and Reload
-the extension plus the Bitunix tab.
+Railway and cloud agents cannot write that Mac folder. A LaunchAgent at
+`~/Library/LaunchAgents/com.bitunix.intraday-overlay-sync.plist` pulls
+`/Users/jamiegreene/BTCCTradingBot` every two minutes. The overlay reloads
+itself when `extension_version` changes. After overlay or signal-UI changes,
+bump `chrome-extensions/bitunix-momentum-overlay/manifest.json` and push.
+Do not ask the user to run update scripts or click Reload.

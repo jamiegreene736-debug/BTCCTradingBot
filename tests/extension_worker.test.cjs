@@ -10,9 +10,23 @@ function worker({ response = { ok: true, json: async () => structuredClone(fixtu
   const messages = [], requests = [];
   const local = configured ? { dashboardUrl: 'https://example.up.railway.app', password: 'secret' } : {};
   const chrome = {
-    runtime: { id: 'extension-id', onMessage: { addListener: fn => messages.push(fn) }, openOptionsPage() {} },
-    storage: { local: { get: async () => local, set: async () => {} }, sync: { get: async () => ({}), remove: async () => {} }, onChanged: { addListener() {} } },
-    tabs: { query: async () => [], sendMessage: async () => {} },
+    runtime: {
+      id: 'extension-id',
+      onMessage: { addListener: fn => messages.push(fn) },
+      onInstalled: { addListener() {} },
+      openOptionsPage() {},
+      getManifest: () => ({ version: manifest.version }),
+      reload() {},
+    },
+    storage: { local: {
+      get: async keys => {
+        if (keys == null) return { ...local };
+        const list = Array.isArray(keys) ? keys : [keys];
+        return Object.fromEntries(list.map(key => [key, local[key]]));
+      },
+      set: async value => { Object.assign(local, value); },
+    }, sync: { get: async () => ({}), remove: async () => {} }, onChanged: { addListener() {} } },
+    tabs: { query: async () => [], sendMessage: async () => {}, reload: async () => {} },
     // Mirror Chrome: an omitted manifest permission does not expose the API.
     alarms: manifest.permissions.includes('alarms') ? { create() {}, onAlarm: { addListener() {} } } : undefined,
   };

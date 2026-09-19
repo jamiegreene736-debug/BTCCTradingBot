@@ -4,9 +4,10 @@
 set -euo pipefail
 ROOT="$(git rev-parse --show-toplevel)"
 OVERLAY="$ROOT/chrome-extensions/bitunix-momentum-overlay"
+if [[ -f "$ROOT/scripts/update_overlay.sh" ]]; then
+  /bin/bash "$ROOT/scripts/update_overlay.sh" --install-only >/dev/null 2>&1 || true
+fi
 if [[ -f "$OVERLAY/manifest.json" ]]; then
   VERSION="$(python3 -c "import json; print(json.load(open('$OVERLAY/manifest.json'))['version'])")"
-  echo "Overlay folder: $OVERLAY"
-  echo "Overlay version: $VERSION"
-  echo "Reload Bitunix Intraday Signals in chrome://extensions, then reload the Bitunix tab."
+  echo "Overlay folder: $OVERLAY  (v$VERSION, auto-sync installed)"
 fi

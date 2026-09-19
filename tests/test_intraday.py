@@ -784,6 +784,12 @@ def test_invalid_planning_values_rejected(values):
         SignalSettings.from_dict({**asdict(SignalSettings()), **values})
 
 
+def test_overlay_sync_is_a_noop_off_mac():
+    from bitunix_bot.overlay_sync import install_mac_overlay_sync
+
+    install_mac_overlay_sync()
+
+
 def test_legacy_settings_payload_defaults_to_swing():
     settings = SignalSettings.from_dict(
         {

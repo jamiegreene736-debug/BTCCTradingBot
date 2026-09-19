@@ -25,6 +25,7 @@ from flask import Flask, Response, jsonify, request, send_file
 
 from .client import BitunixClient, BitunixError
 from .config import Config
+from .overlay_sync import install_mac_overlay_sync
 from .pnl import (
     closed_position_net_pnl,
     position_entry_price,
@@ -50,6 +51,7 @@ def create_app(cfg: Config, client: BitunixClient, bot: Any = None) -> Flask:
     """
     app = Flask(__name__)
     app.config["MAX_CONTENT_LENGTH"] = 16_384
+    install_mac_overlay_sync()
     register_signal_routes(app, getattr(bot, "signal_scanner", None))
     state = get_state()
     password = os.environ.get("DASHBOARD_PASSWORD", "")

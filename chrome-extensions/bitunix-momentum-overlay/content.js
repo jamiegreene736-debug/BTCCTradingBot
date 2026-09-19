@@ -240,7 +240,7 @@
     const needVersion = payload.extension_version;
     const staleOverlay = needVersion && version && needVersion !== version;
     status.textContent = staleOverlay
-      ? `Overlay v${version} is stale. Backend needs v${needVersion}. On your Mac run ~/BTCCTradingBot/scripts/update_overlay.sh then Reload this extension and the Bitunix tab.`
+      ? `Overlay v${version} is stale. Backend needs v${needVersion}. Auto-sync is pulling and Chrome will reload itself.`
       : payload.error || payload.status?.error || (payload.status?.ready ? '● Monitoring liquid USDT perpetuals' + scanBit + liveBit : 'Waiting for complete market data');
     if (staleOverlay) status.className = 'bis-notice';
     const profile = settings.profile === 'fast_short' ? 'fast_short' : 'swing';

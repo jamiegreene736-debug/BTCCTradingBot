@@ -67,6 +67,7 @@ async function refresh() {
       const payload = await request('/api/signals');
       validateSnapshot(payload);
       latest = payload;
+      await maybeReloadOverlay(payload);
     } catch (error) { latest = { ...(latest?.strategy === 'intraday' ? latest : {}), error: error.message || 'Dashboard unavailable' }; }
     fetchedAt = Date.now();
     const tabs = await chrome.tabs.query({ url: 'https://*.bitunix.com/*' });
@@ -111,6 +112,23 @@ chrome.storage.onChanged.addListener((changes, area) => {
   }
 });
 // Alarms survive MV3 worker suspension; open tabs also refresh every five seconds.
+async function maybeReloadOverlay(payload) {
+  const need = payload?.extension_version;
+  let have = '';
+  try { have = chrome.runtime.getManifest().version || ''; } catch { have = ''; }
+  if (!need || !have || need === have) return;
+  const stored = await chrome.storage.local.get('overlayReloadAt');
+  if (Date.now() - Number(stored.overlayReloadAt || 0) < 60000) return;
+  await chrome.storage.local.set({ overlayReloadAt: Date.now() });
+  const tabs = await chrome.tabs.query({ url: 'https://*.bitunix.com/*' });
+  await Promise.allSettled(tabs.map(tab => chrome.tabs.reload(tab.id)));
+  chrome.runtime.reload();
+}
+chrome.runtime.onInstalled.addListener(() => {
+  chrome.tabs.query({ url: 'https://*.bitunix.com/*' }).then(tabs => {
+    tabs.forEach(tab => chrome.tabs.reload(tab.id));
+  }).catch(() => {});
+});
 chrome.alarms.create('intraday-refresh', { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener(alarm => { if (alarm.name === 'intraday-refresh') refresh(); });
 settingsReady.then(refresh);
