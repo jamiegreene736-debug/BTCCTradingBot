@@ -595,6 +595,7 @@ class SignalScanner:
             (rows if rows is not None else self.decisions).values(),
             key=lambda d: (
                 d.state.startswith("ENTER_"),
+                bool(d.plan and d.signal_id and d.state.startswith("WATCH_")),
                 d.state.startswith("WATCH_"),
                 sum(c.passed for c in d.checks),
                 d.plan.net_reward_risk if d.plan else 0.0,
@@ -713,13 +714,22 @@ class SignalScanner:
                 )
             except READ_ERRORS as exc:
                 log.warning("Intraday data rejected for %s: %s", symbol, exc)
-                decisions[symbol] = Decision(
-                    symbol,
-                    reasons=[f"Data unavailable: {exc}"],
-                    checks=blank_checklist(
-                        "Wait for valid candles, funding, depth and risk tiers"
-                    ),
-                )
+                prior = self.decisions.get(symbol)
+                if (
+                    prior
+                    and prior.as_of
+                    and now - prior.as_of <= self.cfg.max_data_age_seconds * 2
+                ):
+                    # A one-off provider blip must not erase a live ENTER/WATCH.
+                    decisions[symbol] = prior
+                else:
+                    decisions[symbol] = Decision(
+                        symbol,
+                        reasons=[f"Data unavailable: {exc}"],
+                        checks=blank_checklist(
+                            "Wait for valid candles, funding, depth and risk tiers"
+                        ),
+                    )
         keep = set(liquid) | set(symbols) | set(pinned) | {"BTCUSDT"}
         with self.lock:
             # A settings update invalidates any scan that started with the old risk profile.
@@ -879,13 +889,29 @@ class SignalScanner:
             self._handoff_to = None
             self._handoff_until = 0
         elif natural != featured:
-            if self._handoff_to != natural:
-                self._handoff_to = natural
-                self._handoff_until = now + self.cfg.handoff_seconds
-            if now >= self._handoff_until:
-                featured = natural
+            featured_row = rows.get(featured)
+            natural_row = rows.get(natural) if natural else None
+            live_enter = (
+                featured_row is not None
+                and featured_row.state.startswith("ENTER_")
+                and featured_row.plan is not None
+                and now < featured_row.plan.expires_at
+            )
+            challenger_enter = (
+                natural_row is not None and natural_row.state.startswith("ENTER_")
+            )
+            if live_enter and not challenger_enter:
+                # A confirmed entry stays featured; a WATCH must not yank it.
                 self._handoff_to = None
                 self._handoff_until = 0
+            else:
+                if self._handoff_to != natural:
+                    self._handoff_to = natural
+                    self._handoff_until = now + self.cfg.handoff_seconds
+                if now >= self._handoff_until:
+                    featured = natural
+                    self._handoff_to = None
+                    self._handoff_until = 0
         else:
             self._handoff_to = None
             self._handoff_until = 0
@@ -936,10 +962,19 @@ class SignalScanner:
                             "Market data is stale; wait for a fresh scan"
                         ]
                 elif decision.plan and now >= decision.plan.expires_at:
-                    decision.state = "WAIT"
-                    decision.reasons = [
-                        "Entry window expired; wait for the next completed candle"
-                    ]
+                    if decision.state.startswith("ENTER_") and decision.side in (
+                        "long",
+                        "short",
+                    ):
+                        decision.state = f"WATCH_{decision.side.upper()}"
+                        decision.reasons = [
+                            "Entry window closed; setup stays listed until 4h/1h alignment breaks"
+                        ]
+                    elif not decision.state.startswith("WATCH_"):
+                        decision.state = "WAIT"
+                        decision.reasons = [
+                            "Entry window expired; wait for the next completed candle"
+                        ]
                 self._portfolio_gate(decision)
             for decision in rows.values():
                 if not decision.state_since:

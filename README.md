@@ -35,9 +35,12 @@ stored in local Chrome storage.
 ## Signals
 
 1. 4h supplies directional bias only (20/50 EMA stack and slope). Confirmed 4h
-   swings take 16 hours to print and arrive too late for a 12/24h hold. 1h must
-   still show matching confirmed swing structure, EMA stack, and slope. Mixed
-   1h structure or an opposite 4h bias means WAIT.
+   swings take 16 hours to print and arrive too late for a 12/24h hold. A trade
+   side is allowed when 4h bias and confirmed 1h structure agree, when 1h
+   structure is confirmed and 4h is mixed, or when 4h bias and the 1h EMA stack
+   agree before 1h swings print. Opposite 1h structure still means WAIT. That
+   last path is how shorts appear in a fresh downturn: waiting for LH/LL
+   confirmation used to miss the whole 12/24h hold.
 2. A 15m trend pullback must touch the hourly or 15m EMA, hourly support, or
    UTC-session VWAP, then reclaim the prior close in the trend direction with
    relative volume. Entries do not wait for a break of the prior high.
@@ -51,11 +54,12 @@ stored in local Chrome storage.
    ≤24h travel budget (8× 1h ATR or 3× 4h ATR), is used. Near swings that fail
    2R are skipped instead of blocking the trade. A second target is contextual
    only; the default exit is the first target.
-5. Altcoins additionally require aligned BTC direction and matching relative
-   strength over six hours. Spread, 24h USDT volume, 1h ATR (not dead, not
-   blow-off), planned order size, depth, projected funding drag, and an
-   estimated isolated-margin liquidation buffer must pass. The intended
-   isolated-margin band is 25-40x; leverage never narrows the stop.
+5. Altcoins need matching 6h relative strength. A confirmed opposite BTC 1h
+   trend still blocks the alt; mixed or same-side BTC does not. Spread, 24h
+   USDT volume, 1h ATR (not dead, not blow-off), planned order size, depth,
+   projected funding drag, and an estimated isolated-margin liquidation buffer
+   must pass. The intended isolated-margin band is 25-40x; leverage never
+   narrows the stop.
 
 The scanner keeps a wide liquid universe of about 80 USDT perpetuals and a hot
 set of about 12. Each 15-second refresh fully rescans the hot set — BTC, open or
@@ -83,12 +87,18 @@ and maximum hold (12h/24h). Initial planning defaults are explicitly hypothetica
 
 The overlay shows a ranked queue of the top five markets, each with the time
 the current state started. WATCH and ENTER alerts are stored with that
-timestamp so you can look back. When a setup flips to ENTER, the laptop
+timestamp so you can look back. The 12h/24h figure is the planned hold after a
+fill, not how long the card stays on ENTER. The entry window itself ends at
+the next completed 15m candle (at most ~15 minutes). When that window closes,
+the setup stays on the list as WATCH until 4h/1h alignment breaks — it is not
+yanked to WAIT. A live ENTER is not replaced by a mere WATCH. A one-off
+provider read failure keeps the last good decision instead of wiping the card.
+When a setup flips to ENTER, the laptop
 speakers say “Trade entry waiting” plus the market and side. When a tracked
 trade needs an exchange stop or a latched exit, they say “Set the Bitunix stop
 now” or “Close the trade now. Do not wait for a reversal.” Click the panel
 once if Chrome blocks speech until a gesture. When the featured setup is about
-to change — a higher-ranked market is ready, or the entry window is under 45
+to change — a higher-ranked ENTER is ready, or the entry window is under 45
 seconds — the panel counts down before switching.
 
 Position size accounts for the structural stop plus estimated costs. The scanner

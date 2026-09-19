@@ -18,8 +18,10 @@ from bitunix_bot.intraday import (
     Candle,
     Market,
     Tier,
+    choose_side,
     closed_candles,
     ema_bias,
+    ema_stack,
     evaluate_intraday,
     find_setup,
     funding_cost,
@@ -359,6 +361,63 @@ def test_alt_requires_btc_context_and_relative_strength():
         NOW,
     )
     assert decision.state == "WATCH_LONG"
+    assert any(c.label == "BTC context" and not c.passed for c in decision.checks)
+
+
+def test_choose_side_admits_shorts_before_1h_swings_confirm():
+    assert choose_side("mixed", "short", "short") == "short"
+    assert choose_side("short", "mixed", "short") == "short"
+    assert choose_side("short", "short", "short") == "short"
+    assert choose_side("long", "long", "long") == "long"
+    assert choose_side("short", "long", "short") is None
+    assert choose_side("long", "short", "long") is None
+    assert choose_side("mixed", "mixed", "mixed") is None
+
+
+def test_short_enters_when_4h_ema_agrees_before_1h_swings():
+    decision, market, frames = ready_decision("short")
+    hourly = frames["1h"]
+    peak = max(c.high for c in hourly[-20:]) + 8
+    hourly[-5] = replace(hourly[-5], high=peak)
+    assert trend(hourly) == "mixed"
+    assert ema_stack(hourly) == "short"
+    assert ema_bias(frames["4h"]) == "short"
+    again = evaluate_intraday(
+        market, frames, None, SignalSettings(), SignalsCfg(), NOW
+    )
+    assert again.side == "short"
+    assert again.state == "ENTER_SHORT", again.reasons
+
+
+def test_alt_can_enter_when_btc_is_mixed():
+    _, market, frames = ready_decision("long")
+    btc = [
+        Candle(c.time, 100.0, 100.1, 99.9, 100.0, 100.0) for c in frames["1h"]
+    ]
+    assert trend(btc) == "mixed"
+    decision = evaluate_intraday(
+        replace(market, symbol="ETHUSDT"),
+        frames,
+        btc,
+        SignalSettings(),
+        SignalsCfg(),
+        NOW,
+    )
+    assert decision.state == "ENTER_LONG", decision.reasons
+
+
+def test_alt_short_is_blocked_by_confirmed_btc_long():
+    _, market, frames = ready_decision("short")
+    _, long_frames = market_frames("long")
+    decision = evaluate_intraday(
+        replace(market, symbol="ETHUSDT"),
+        frames,
+        long_frames["1h"],
+        SignalSettings(),
+        SignalsCfg(),
+        NOW,
+    )
+    assert not decision.state.startswith("ENTER")
     assert any(c.label == "BTC context" and not c.passed for c in decision.checks)
 
 
@@ -978,6 +1037,63 @@ def test_entry_expiry_warns_before_window_closes(tmp_path):
     assert snap["handoff"]["to_symbol"] == "ETHUSDT"
     assert snap["handoff"]["seconds_remaining"] == 30
     assert snap["queue"][0]["seconds_remaining"] == 30
+
+
+def test_expired_enter_stays_listed_as_watch(tmp_path):
+    scanner, decision = scanner_with_entry(tmp_path)
+    decision.as_of = NOW
+    decision.plan.expires_at = NOW - 5
+    scanner.decisions = {decision.symbol: decision}
+    scanner._hot_symbols_last = [decision.symbol]
+    scanner._evaluated_last = [decision.symbol]
+    with patch("time.time", return_value=NOW):
+        snap = scanner.snapshot()
+    row = snap["symbols"][decision.symbol]
+    assert row["state"] == "WATCH_LONG"
+    assert "stays listed" in row["reasons"][0]
+    assert snap["queue"][0]["symbol"] == decision.symbol
+    assert snap["queue"][0]["state"] == "WATCH_LONG"
+
+
+def test_live_enter_is_not_handed_off_to_a_watch(tmp_path):
+    scanner, first = scanner_with_entry(tmp_path)
+    second, _, _ = ready_decision("short")
+    second.symbol = "ETHUSDT"
+    second.state = "WATCH_SHORT"
+    first.as_of = second.as_of = NOW
+    first.state_since = NOW - 30
+    scanner.decisions = {first.symbol: first, second.symbol: second}
+    with patch("time.time", return_value=NOW):
+        snap = scanner.snapshot()
+    assert snap["best_symbol"] == "BTCUSDT"
+    assert snap["handoff"] is None
+    with patch("time.time", return_value=NOW + 60):
+        held = scanner.snapshot()
+    assert held["best_symbol"] == "BTCUSDT"
+    assert held["handoff"] is None
+
+
+def test_failed_reread_keeps_live_enter(tmp_path):
+    scanner, decision = scanner_with_entry(tmp_path)
+    decision.as_of = NOW
+    scanner.decisions = {decision.symbol: decision}
+    scanner._evaluate_symbol = MagicMock(side_effect=ValueError("klines missing"))
+    scanner.client.trading_pairs.return_value = [
+        {
+            "symbol": "BTCUSDT",
+            "symbolStatus": "OPEN",
+            "basePrecision": 3,
+            "quotePrecision": 2,
+            "minTradeVolume": 0.001,
+        }
+    ]
+    scanner.client.tickers.return_value = [
+        {"symbol": "BTCUSDT", "quoteVol": 100_000_000}
+    ]
+    with patch("time.time", return_value=NOW), patch("time.sleep"):
+        scanner.refresh(force=True)
+    assert scanner.decisions["BTCUSDT"].state == "ENTER_LONG"
+    assert scanner.decisions["BTCUSDT"].signal_id == decision.signal_id
 
 
 def test_trailing_stop_is_not_applied_to_an_earlier_wick():

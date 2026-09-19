@@ -96,7 +96,7 @@ def swing_levels(candles: list[Candle]) -> tuple[list[float], list[float]]:
     return highs, lows
 
 
-def _ema_stack(candles: list[Candle]) -> str:
+def ema_stack(candles: list[Candle]) -> str:
     closes = np.array([c.close for c in candles])
     fast, slow = ema(closes, 20), ema(closes, 50)
     if closes[-1] > fast[-1] > slow[-1] and fast[-1] > fast[-4]:
@@ -113,7 +113,7 @@ def ema_bias(candles: list[Candle]) -> str:
     arrive after the move a 12/24h trade can capture. EMA stack plus slope is
     the bias; 1h structure still has to confirm.
     """
-    return _ema_stack(candles)
+    return ema_stack(candles)
 
 
 def trend(candles: list[Candle]) -> str:
@@ -121,12 +121,38 @@ def trend(candles: list[Candle]) -> str:
     highs, lows = swing_levels(candles[-64:])
     if min(len(highs), len(lows)) < 2:
         return "mixed"
-    stacked = _ema_stack(candles)
+    stacked = ema_stack(candles)
     if stacked == "long" and highs[-1] > highs[-2] and lows[-1] > lows[-2]:
         return "long"
     if stacked == "short" and highs[-1] < highs[-2] and lows[-1] < lows[-2]:
         return "short"
     return "mixed"
+
+
+def opposite_side(side: str) -> str:
+    return "short" if side == "long" else "long"
+
+
+def choose_side(trend_1h: str, bias_4h: str, ema_1h: str) -> Side | None:
+    """Pick a long or short without waiting for every timeframe to confirm.
+
+    Full 4h+1h agreement still wins. A confirmed 1h structure is enough when 4h
+    is mixed — 4h swings are too slow for a 12/24h hold. A 4h EMA bias plus a
+    matching 1h EMA stack is enough when 1h swings have not printed yet. That
+    lag is why fresh downturns produced no shorts: LH/LL confirmation arrives
+    after the move. Opposite 1h structure still blocks.
+    """
+    if trend_1h in ("long", "short"):
+        if bias_4h == opposite_side(trend_1h):
+            return None
+        if bias_4h in (trend_1h, "mixed"):
+            return "long" if trend_1h == "long" else "short"
+    if bias_4h in ("long", "short"):
+        if trend_1h == opposite_side(bias_4h):
+            return None
+        if ema_1h == bias_4h:
+            return "long" if bias_4h == "long" else "short"
+    return None
 
 
 def volatility(candles: list[Candle]) -> float:
@@ -208,7 +234,7 @@ CHECKLIST_LABELS: tuple[str, ...] = tuple(CHECK_GROUPS)
 PLAN_LABELS: tuple[str, ...] = tuple(
     label for label, group in CHECK_GROUPS.items() if group == "plan"
 )
-WAITING_ALIGNMENT = "Waiting for 4h EMA bias and confirmed 1h structure"
+WAITING_ALIGNMENT = "Waiting for 4h EMA bias or confirmed 1h structure in the same direction"
 WAITING_SETUP = "Waiting for a completed 15m setup"
 
 
@@ -653,16 +679,19 @@ def evaluate_intraday(
 ) -> Decision:
     result = Decision(market.symbol, as_of=market.as_of, price=market.price)
     bars, hourly, four_hour = frames["15m"], frames["1h"], frames["4h"]
-    one, four_bias, four_structure = (
+    one, one_ema, four_bias, four_structure = (
         trend(hourly),
+        ema_stack(hourly),
         ema_bias(four_hour),
         trend(four_hour),
     )
+    side = choose_side(one, four_bias, one_ema)
     result.bar_time = bars[-1].time
     atr_value, vwap = volatility(bars), session_vwap(bars, now)
     hourly_atr_pct = volatility(hourly) / market.price * 100
     result.metrics = {
         "trend_1h": one,
+        "trend_1h_ema": one_ema,
         "trend_4h": four_bias,
         "trend_4h_structure": four_structure,
         "atr_pct": atr_value / market.price * 100,
@@ -699,8 +728,12 @@ def evaluate_intraday(
         ),
         make_check(
             "4h bias / 1h structure",
-            one == four_bias and one != "mixed",
-            f"4h bias {four_bias}; 1h structure {one}",
+            side is not None,
+            (
+                f"4h bias {four_bias}; 1h structure {one}; 1h EMA {one_ema} → {side}"
+                if side
+                else f"4h bias {four_bias}; 1h structure {one}; 1h EMA {one_ema}"
+            ),
         ),
         make_check(
             "Mark vs last",
@@ -713,7 +746,7 @@ def evaluate_intraday(
             f"Next funding in {max(0, funding_eta)}s; wait if ≤{cfg.funding_blackout_seconds}s",
         ),
     ]
-    if one != four_bias or one not in ("long", "short"):
+    if side is None:
         result.checks.extend(
             waiting_check(label, WAITING_ALIGNMENT)
             for label in CHECKLIST_LABELS
@@ -728,10 +761,9 @@ def evaluate_intraday(
         )
         result.checks = order_checks(result.checks)
         result.reasons = [
-            "Wait for 4h EMA bias and confirmed 1h structure in the same direction"
+            "Wait for 4h EMA bias or confirmed 1h structure in the same direction"
         ]
         return result
-    side: Side = "long" if one == "long" else "short"
     sign = 1 if side == "long" else -1
     result.side = side
     result.state = f"WATCH_{side.upper()}"
@@ -752,8 +784,10 @@ def evaluate_intraday(
         result.checks.append(
             make_check(
                 "BTC context",
-                btc_trend == side and relative is not None and sign * relative >= 0,
-                "Require aligned BTC direction and matching 6h relative strength",
+                btc_trend != opposite_side(side)
+                and relative is not None
+                and sign * relative >= 0,
+                "Matching 6h relative strength; block only a confirmed opposite BTC trend",
             )
         )
     else:
