@@ -266,7 +266,9 @@ class SignalScanner:
                 partial(self.client.klines, symbol, interval, limit=200),
             )
             try:
-                frames[interval] = closed_candles(rows, interval, now)
+                frames[interval] = closed_candles(
+                    rows, interval, now, fill_gaps=seconds < 900
+                )
             except ValueError:
                 self._cache.pop(key, None)
                 raise

@@ -35,17 +35,22 @@ def history(
     client: BitunixClient, symbol: str, interval: str, start: int, now: int
 ) -> list[Candle]:
     rows: dict[int, dict[str, object]] = {}
+    seconds_ms = INTERVALS[interval] * 1000
     cursor = now * 1000
     cutoff = start - 200 * INTERVALS[interval]
+    previous_oldest: int | None = None
     while cursor > cutoff * 1000:
         batch = client.klines(symbol, interval, limit=200, end_time=cursor)
         if not batch:
             raise ValueError(f"Incomplete historical candles: {symbol} {interval}")
         oldest = min(int(row["time"]) for row in batch)
-        if oldest >= cursor:
+        if previous_oldest is not None and oldest >= previous_oldest:
             raise ValueError("Provider pagination did not advance")
         rows.update({int(row["time"]): row for row in batch})
-        cursor = oldest - 1
+        # endTime is exclusive and pages can drop candles near their edges;
+        # overlap the next page by 30 bars and deduplicate by timestamp.
+        previous_oldest = oldest
+        cursor = oldest + 30 * seconds_ms
         time.sleep(0.15)
     return closed_candles(list(rows.values()), interval, now, allow_gaps=True)
 

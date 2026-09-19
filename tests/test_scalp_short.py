@@ -14,7 +14,7 @@ from bitunix_bot.forward_test import (
     summarize_forward_tests,
     update_forward_test,
 )
-from bitunix_bot.intraday import Candle, Market, Tier
+from bitunix_bot.intraday import Candle, Market, Tier, closed_candles
 from bitunix_bot.scalp_short import (
     SCALP_CHECK_LABELS,
     evaluate_scalp_short,
@@ -439,3 +439,20 @@ def test_switching_profile_clears_frames_and_uses_swing_checklist(tmp_path):
     )
     assert scanner.frames == {} and scanner.decisions == {}
     assert scanner.store.settings().profile == "swing"
+
+
+def test_short_gaps_in_minute_feed_are_filled_flat_but_long_gaps_still_fail():
+    rows = [
+        {"time": (NOW // 60 * 60 - (100 - i) * 60) * 1000, "open": 10, "high": 10.1, "low": 9.9, "close": 10, "baseVol": 5}
+        for i in range(100)
+        if i not in (40, 41, 42)
+    ]
+    bars = closed_candles(rows, "1m", NOW, fill_gaps=True)
+    assert len(bars) == 100
+    filled = [c for c in bars if c.volume == 0]
+    assert len(filled) == 3 and all(c.open == c.high == c.low == c.close == 10 for c in filled)
+    with pytest.raises(ValueError, match="Gap"):
+        closed_candles(rows, "1m", NOW)
+    wide = [r for r in rows if not 50 <= (r["time"] // 1000 - bars[0].time) // 60 <= 62]
+    with pytest.raises(ValueError, match="Gap"):
+        closed_candles(wide, "1m", NOW, fill_gaps=True)

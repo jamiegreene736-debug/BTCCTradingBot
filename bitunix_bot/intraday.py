@@ -35,9 +35,19 @@ class Candle:
     volume: float
 
 
+MAX_FILLED_GAP_BARS = 10
+
+
 def closed_candles(
-    rows: list[dict[str, object]], interval: str, now: int, *, allow_gaps: bool = False
+    rows: list[dict[str, object]],
+    interval: str,
+    now: int,
+    *,
+    allow_gaps: bool = False,
+    fill_gaps: bool = False,
 ) -> list[Candle]:
+    """Parse completed candles. ``fill_gaps`` inserts flat zero-volume candles for
+    up to ten missing bars, which the sub-15m feed omits when nothing traded."""
     seconds = INTERVALS[interval]
     candles: dict[int, Candle] = {}
     for row in rows:
@@ -73,6 +83,17 @@ def closed_candles(
             raise ValueError(f"Conflicting {interval} candle duplicates")
         candles[candle.time] = candle
     result = sorted(candles.values(), key=lambda c: c.time)
+    if fill_gaps:
+        filled: list[Candle] = []
+        for candle in result:
+            if filled and 1 < (candle.time - filled[-1].time) // seconds <= MAX_FILLED_GAP_BARS + 1:
+                prior = filled[-1]
+                for missing in range(prior.time + seconds, candle.time, seconds):
+                    filled.append(
+                        Candle(missing, prior.close, prior.close, prior.close, prior.close, 0.0)
+                    )
+            filled.append(candle)
+        result = filled
     if len(result) < 64:
         raise ValueError(f"Warming up: need 64 completed {interval} candles")
     if result[-1].time != (now // seconds - 1) * seconds:
