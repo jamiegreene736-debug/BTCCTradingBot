@@ -36,6 +36,38 @@ signals:
   queue_size: 5
   handoff_seconds: 20
   expiry_warn_seconds: 45
+  # Scalp-short profile (choose it in the overlay's planning settings):
+  # parabolic-exhaustion fades held 1-2h at up to the pair's leverage cap.
+  # The stop sits just above the failed high and must fit inside the
+  # estimated isolated liquidation distance, so most 100x plans report a
+  # lower ceiling. Universe is restricted to pairs whose cap allows the
+  # planned leverage.
+  scalp:
+    trigger_interval: 1m
+    min_gain_1h_pct: 1.5
+    min_gain_4h_pct: 3.0
+    min_extension_atr: 2.0       # hourly ATRs above the 1h EMA20
+    min_climax_volume: 3.0       # peak bar vs the prior 20-bar baseline
+    climax_lookback: 15
+    min_funding_rate_pct: 0.01   # per interval; crowded longs
+    min_oi_change_pct: 1.0       # or open interest built over the window
+    oi_window_seconds: 3600
+    spike_lookback: 30
+    spike_min_age_bars: 2
+    spike_max_age_bars: 12
+    stop_atr_buffer: 0.15
+    max_stop_pct: 0.45
+    min_stop_atr: 0.5
+    travel_atr_multiple: 1.5     # target within 1.5 hourly ATR
+    min_reward_risk: 2.0
+    max_spread_pct: 0.03
+    min_depth_ratio: 8.0
+    liquidation_buffer_pct: 0.15
+    entry_expiry_seconds: 180
+    stale_minutes: 20            # exit if < stale_progress_r by then
+    stale_progress_r: 0.3
+    breakeven_at_r: 0.75
+    trailing_activate_r: 1.0
 
 trading:
   # User trades these four manually; bot only computes signals for the overlay.

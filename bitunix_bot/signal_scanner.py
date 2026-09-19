@@ -7,6 +7,7 @@ import logging
 import random
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
 from functools import partial
@@ -15,7 +16,14 @@ from typing import TypeVar
 import requests
 
 from .client import BitunixClient, BitunixError
+from .forward_test import (
+    ForwardTest,
+    forward_test_from_decision,
+    summarize_forward_tests,
+    update_forward_test,
+)
 from .intraday import (
+    INTERVALS,
     Candle,
     Decision,
     Market,
@@ -29,11 +37,15 @@ from .intraday import (
     upsert_check,
     volatility,
 )
+from .scalp_short import PROFILE as SCALP_PROFILE
+from .scalp_short import blank_scalp_checklist, evaluate_scalp_short
 from .signal_config import SignalsCfg, SignalSettings
 from .signal_store import SignalStore, TrackedTrade, evaluate_exit
 from .symbol_meta import (
     parse_symbol_meta,
     row_is_tradeable_usdt_perp,
+    row_max_leverage,
+    row_open_interest_usdt,
     row_quote_volume_usdt,
     row_symbol,
 )
@@ -171,6 +183,43 @@ class SignalScanner:
         self._universe: list[str] = []
         self._hot_symbols_last: list[str] = []
         self._evaluated_last: list[str] = []
+        # Open-interest snapshots per symbol from the ticker feed, oldest first.
+        self._oi_history: dict[str, deque[tuple[int, float]]] = {}
+
+    def _intervals(self, settings: SignalSettings) -> tuple[str, ...]:
+        if settings.profile == SCALP_PROFILE:
+            return (self.cfg.scalp.trigger_interval, "15m", "1h", "4h")
+        return ("15m", "1h", "4h")
+
+    def _record_open_interest(self, by_ticker: dict[str, dict[str, object]], now: int) -> None:
+        window = self.cfg.scalp.oi_window_seconds * 3
+        for symbol, row in by_ticker.items():
+            oi = row_open_interest_usdt(row)
+            if oi <= 0:
+                continue
+            history = self._oi_history.setdefault(symbol, deque())
+            if history and history[-1][0] >= now:
+                continue
+            history.append((now, oi))
+            while history and history[0][0] < now - window:
+                history.popleft()
+        for symbol in list(self._oi_history):
+            if symbol not in by_ticker:
+                self._oi_history.pop(symbol, None)
+
+    def _oi_change_pct(self, symbol: str, now: int) -> float | None:
+        history = self._oi_history.get(symbol)
+        if not history:
+            return None
+        window = self.cfg.scalp.oi_window_seconds
+        # Need a sample at least most of a window old, otherwise the delta is noise.
+        base = next(
+            ((t, v) for t, v in history if t <= now - window * 0.8),
+            None,
+        )
+        if base is None or base[1] <= 0:
+            return None
+        return (history[-1][1] / base[1] - 1) * 100
 
     def _read(self, key: str, ttl: float, fetch: Callable[[], T]) -> T:
         now = time.time()
@@ -200,9 +249,12 @@ class SignalScanner:
         self._cache[key] = (time.time(), copy.deepcopy(value))
         return value
 
-    def _frames(self, symbol: str, now: int) -> dict[str, list[Candle]]:
+    def _frames(
+        self, symbol: str, now: int, intervals: tuple[str, ...] = ("15m", "1h", "4h")
+    ) -> dict[str, list[Candle]]:
         frames = {}
-        for interval, seconds in (("15m", 900), ("1h", 3600), ("4h", 14400)):
+        for interval in intervals:
+            seconds = INTERVALS[interval]
             # Cache only within this candle boundary; never retain the prior incomplete close.
             key = f"candles:{symbol}:{interval}"
             cached = self._cache.get(key)
@@ -403,7 +455,14 @@ class SignalScanner:
                 else None
             )
             max_leverage = plan.max_leverage
+            profile, trigger_interval = plan.profile, plan.trigger_interval
         else:
+            profile = settings.profile
+            trigger_interval = (
+                self.cfg.scalp.trigger_interval
+                if settings.profile == SCALP_PROFILE
+                else "15m"
+            )
             bars = self.frames.get(position.symbol, {}).get("15m", [])
             atr_value = volatility(bars) if len(bars) >= 15 else 0.0
             stop_distance = max(
@@ -440,6 +499,9 @@ class SignalScanner:
             leverage,
             settings.hold_hours,
             now + 1800,
+            0.0,
+            profile,
+            trigger_interval,
         )
 
     def _sync_exchange_positions(
@@ -602,12 +664,29 @@ class SignalScanner:
             reverse=True,
         )
 
-    def _liquid_universe(self, by_ticker: dict[str, dict[str, object]]) -> list[str]:
+    def _liquid_universe(
+        self,
+        by_ticker: dict[str, dict[str, object]],
+        by_pair: dict[str, dict[str, object]] | None = None,
+        settings: SignalSettings | None = None,
+    ) -> list[str]:
+        # The scalp profile only scans pairs whose exchange cap allows the
+        # planned leverage; a 50x pair can never fit a 100x plan.
+        min_leverage = (
+            settings.leverage
+            if settings is not None and settings.profile == SCALP_PROFILE
+            else 0
+        )
         return sorted(
             (
                 symbol
                 for symbol in by_ticker
                 if row_quote_volume_usdt(by_ticker[symbol]) >= self.cfg.min_quote_volume
+                and (
+                    not min_leverage
+                    or by_pair is None
+                    or row_max_leverage(by_pair.get(symbol, {})) >= min_leverage
+                )
             ),
             key=lambda symbol: row_quote_volume_usdt(by_ticker[symbol]),
             reverse=True,
@@ -659,8 +738,18 @@ class SignalScanner:
         by_pair: dict[str, dict[str, object]],
         frames: dict[str, dict[str, list[Candle]]],
     ) -> Decision:
-        frames[symbol] = self._frames(symbol, now)
+        frames[symbol] = self._frames(symbol, now, self._intervals(settings))
         market = self._market(symbol, by_ticker[symbol], by_pair[symbol])
+        if settings.profile == SCALP_PROFILE:
+            return evaluate_scalp_short(
+                market,
+                frames[symbol],
+                frames.get("BTCUSDT", {}).get("1h"),
+                settings,
+                self.cfg,
+                int(time.time()),
+                self._oi_change_pct(symbol, now),
+            )
         return evaluate_intraday(
             market,
             frames[symbol],
@@ -669,6 +758,11 @@ class SignalScanner:
             self.cfg,
             int(time.time()),
         )
+
+    def _blank_checklist(self, settings: SignalSettings, detail: str):
+        if settings.profile == SCALP_PROFILE:
+            return blank_scalp_checklist(detail)
+        return blank_checklist(detail)
 
     def _refresh(self) -> None:
         now = int(time.time())
@@ -682,10 +776,17 @@ class SignalScanner:
             )
             by_pair = {row_symbol(p): p for p in pairs if row_is_tradeable_usdt_perp(p)}
             by_ticker = {row_symbol(t): t for t in tickers if row_symbol(t) in by_pair}
-            liquid = self._liquid_universe(by_ticker)
-            pinned = [trade.symbol for trade in active] + [
-                position.symbol for position in positions
-            ]
+            self._record_open_interest(by_ticker, now)
+            liquid = self._liquid_universe(by_ticker, by_pair, settings)
+            pinned = (
+                [trade.symbol for trade in active]
+                + [position.symbol for position in positions]
+                + [
+                    test.symbol
+                    for test in self.store.forward_tests(open_only=True)
+                    if test.symbol in by_ticker
+                ]
+            )
             hot = self._hot_symbols(liquid, pinned)
             rotated = self._rotate_universe(liquid, set(hot))
             symbols = list(dict.fromkeys(hot + rotated))
@@ -716,8 +817,8 @@ class SignalScanner:
                 decisions[symbol] = Decision(
                     symbol,
                     reasons=[f"Data unavailable: {exc}"],
-                    checks=blank_checklist(
-                        "Wait for valid candles, funding, depth and risk tiers"
+                    checks=self._blank_checklist(
+                        settings, "Wait for valid candles, funding, depth and risk tiers"
                     ),
                 )
         keep = set(liquid) | set(symbols) | set(pinned) | {"BTCUSDT"}
@@ -751,6 +852,21 @@ class SignalScanner:
                 self._portfolio_gate(decision)
             for decision in decisions.values():
                 self._record_signal_alert(decision, now)
+                self._record_forward_test(decision, now)
+            self._update_forward_tests(int(time.time()))
+
+    def _record_forward_test(self, decision: Decision, now: int) -> None:
+        test = forward_test_from_decision(decision, now)
+        if test is not None:
+            self.store.record_forward_test(test)
+
+    def _update_forward_tests(self, now: int) -> None:
+        for test in self.store.forward_tests(open_only=True):
+            candles = self.frames.get(test.symbol, {}).get(test.interval, [])
+            before = (test.outcome, test.bars_seen)
+            update_forward_test(test, candles, now)
+            if (test.outcome, test.bars_seen) != before:
+                self.store.save_forward_test(test)
 
     def _portfolio_gate(self, decision: Decision) -> None:
         if not decision.state.startswith("ENTER_") or not decision.plan:
@@ -782,7 +898,7 @@ class SignalScanner:
             evaluate_exit(
                 trade,
                 decisions.get(trade.symbol),
-                self.frames.get(trade.symbol, {}).get("15m", []),
+                self.frames.get(trade.symbol, {}).get(trade.plan.trigger_interval, []),
                 now,
                 self.cfg,
             )
@@ -968,12 +1084,19 @@ class SignalScanner:
                 if not t.closed_at and (t.kind == "exchange" or t.exchange_position_id)
             ]
             connected = self._has_account_keys()
+            forward_tests = self.store.forward_tests(limit=200)
+            settings = self.store.settings()
             return {
                 "version": 2,
                 "strategy": "intraday",
                 "mode": "alerts_only",
                 "now": now,
-                "settings": asdict(self.store.settings()),
+                "profile": settings.profile,
+                "settings": asdict(settings),
+                "forward_test": {
+                    **summarize_forward_tests(forward_tests),
+                    "recent": [asdict(t) for t in forward_tests[:20]],
+                },
                 "data_max_age": self.cfg.max_data_age_seconds,
                 "status": {
                     "ready": any(
@@ -1016,6 +1139,7 @@ class SignalScanner:
         with self.lock:
             self.store.save_settings(settings)
             self.decisions = {}
+            self.frames = {}
             self._last_scan = 0
             self._universe_cursor = 0
             self._universe = []
