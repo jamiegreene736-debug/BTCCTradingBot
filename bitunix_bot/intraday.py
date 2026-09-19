@@ -13,7 +13,7 @@ from .indicators import atr, ema
 from .signal_config import SignalsCfg, SignalSettings
 
 Side = Literal["long", "short"]
-INTERVALS = {"15m": 900, "1h": 3600, "4h": 14400}
+INTERVALS = {"1m": 60, "3m": 180, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400}
 
 
 def number(value: object) -> float:
@@ -268,6 +268,8 @@ class TradePlan:
     hold_hours: int
     expires_at: int
     adverse_mark_basis: float = 0.0
+    profile: str = "swing"
+    trigger_interval: str = "15m"
 
 
 @dataclass

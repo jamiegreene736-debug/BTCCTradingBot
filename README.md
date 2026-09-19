@@ -1,10 +1,12 @@
 # Bitunix Intraday Signals
 
-An alerts-only scanner and Chrome overlay for long and short trades with a
-maximum holding period of 12 or 24 hours. The new strategy uses completed
-4h / 1h / 15m candles. It never opens trades, changes leverage, or closes
-exchange positions. The one exception is the overlay **Set Bitunix stop**
-button, which places a position-level protective stop.
+An alerts-only scanner and Chrome overlay with two profiles. **Swing** finds
+long and short trades with a maximum holding period of 12 or 24 hours from
+completed 4h / 1h / 15m candles. **Scalp short** fades parabolic exhaustion
+on 1m bars for a 1h or 2h hold at up to the pair's leverage cap. Neither opens
+trades, changes leverage, or closes exchange positions. The one exception is
+the overlay **Set Bitunix stop** button, which places a position-level
+protective stop.
 
 ## Start the backend
 
@@ -75,11 +77,57 @@ triggers; missing open interest is labeled unavailable. Missing funding, depth,
 or maintenance tiers blocks a new entry. This release does not include a
 news/event feed.
 
+## Scalp-short profile
+
+Select **Scalp short** in the overlay's planning settings. It is a separate
+evaluator (`bitunix_bot/scalp_short.py`) with its own `signals.scalp` block in
+`config.yaml`; the swing profile is unchanged.
+
+1. **Universe by tier.** Only liquid USDT perpetuals whose exchange leverage
+   cap allows the planned leverage are scanned, and the card's "Leverage tier"
+   gate re-checks the position tiers. Open interest from each ticker refresh is
+   kept for three hours so a one-hour OI delta is available.
+2. **Candidate discovery.** A market must be extended (at least +1.5% over 1h,
+   +3% over 4h, and 2 hourly ATRs above the 1h EMA20), climactic (a bar in the
+   last 15 at 3× the prior 20-bar volume baseline), crowded (funding at or
+   above +0.01% per interval, or open interest up at least 1% over the hour),
+   and, for alts, have outrun BTC over the last two hours.
+3. **Failed-high trigger on 1m bars.** The spike is the highest high of the
+   last 30 bars, between 2 and 12 bars old. The last completed bar must close
+   below the spike bar's body on a down bar with no new high since the spike.
+   A close-weighted volume-delta proxy since the spike must be net selling
+   (the public kline feed has no taker split). The stop is the spike high plus
+   0.15 ATR; it must be at least 0.5 ATR and at most 0.45% of entry.
+4. **Stop inside liquidation.** The scanner estimates the isolated short
+   liquidation from the maintenance tier, costs and mark basis, and blocks the
+   entry if the planned leverage would liquidate before the stop plus a 0.15%
+   buffer. It reports the highest leverage that fits. With a typical 0.4%
+   maintenance rate, 100x liquidates about 0.4% above entry after fees, so
+   most cards show a lower ceiling; that number is the honest answer.
+5. **Mean-reversion targets.** The nearest of session VWAP, the 15m EMA20,
+   the 1h EMA20 and the spike base that sits within 1.5 hourly ATR and clears
+   2R net of fees, slippage and any negative funding. Shorts receive positive
+   funding but that is never counted as reward.
+6. **Execution gates.** Spread at most 0.03%, both sides of the book at least
+   eight times the planned notional, a three-minute entry window, plus the
+   usual fresh data, liquidity, mark basis and funding-print checks.
+7. **Management and measurement.** Tracked scalps exit at the hold cap, on
+   stop or target, at −0.75R, and after 20 minutes below 0.3R. The 1h trend is
+   faded by design and does not latch an exit. Every ENTER alert (both
+   profiles) is forward-tested against the completed trigger candles that
+   follow: maximum favorable and adverse excursion in R, and the first touch
+   of target, stop or estimated liquidation. The summary is in the API
+   snapshot under `forward_test` and on the overlay status line, and
+   `scripts/backtest_scalp_short.py` replays the profile over recent 1m
+   candles of the top 24h gainers.
+
 ## Planning and tracking
 
-The overlay's Edit button sets planning equity, risk per trade, leverage (1–40x),
-and maximum hold (12h/24h). Initial planning defaults are explicitly hypothetical:
-1,000 USDT equity, 0.5% risk, 25x, 24 hours. These are not an exchange balance.
+The overlay's Edit button sets the profile, planning equity, risk per trade,
+leverage (1–40x swing, 1–125x scalp short), and maximum hold (12h/24h swing,
+1h/2h scalp short). Initial planning defaults are explicitly hypothetical:
+1,000 USDT equity, 0.5% risk, 25x, 24 hours, swing. These are not an exchange
+balance.
 
 The overlay shows a ranked queue of the top five markets, each with the time
 the current state started. WATCH and ENTER alerts are stored with that
@@ -161,12 +209,14 @@ storage, and are never sent to the page or an arbitrary dashboard origin.
 ## Validation
 
 ```sh
-python3 -m pytest tests/test_e2e.py tests/test_intraday.py -q
+python3 -m pytest tests/test_e2e.py tests/test_intraday.py tests/test_scalp_short.py -q
 node --test tests/extension_worker.test.cjs
 # Requires Playwright; CHROME_PATH can override the local Chrome executable.
 node tests/extension_ui.cjs
 python3 scripts/backtest_intraday.py --days 7 --symbols BTCUSDT,ETHUSDT \
   --leverage 25 --output /tmp/intraday-replay.json
+python3 scripts/backtest_scalp_short.py --hours 48 --leverage 100 \
+  --symbols auto --top 15 --output /tmp/scalp-short-replay.json
 ```
 
 The replay is chronological and uses only candles completed at each decision.

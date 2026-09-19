@@ -10,7 +10,8 @@ from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
-from .intraday import Candle, Check, Decision, TradePlan
+from .forward_test import ForwardTest
+from .intraday import INTERVALS, Candle, Check, Decision, TradePlan
 from .signal_config import SignalsCfg, SignalSettings
 
 
@@ -115,6 +116,20 @@ def evaluate_exit(
         return trade
     side = trade.plan.side
     sign = 1 if side == "long" else -1
+    scalp = trade.plan.profile == "scalp_short"
+    interval_seconds = INTERVALS.get(trade.plan.trigger_interval, 900)
+    if scalp:
+        stale_after = cfg.scalp.stale_minutes * 60
+        stale_need_r = cfg.scalp.stale_progress_r
+        stale_window = f"{cfg.scalp.stale_minutes}m"
+        breakeven_at_r = cfg.scalp.breakeven_at_r
+        trailing_activate_r = cfg.scalp.trailing_activate_r
+    else:
+        stale_after = cfg.stale_trade_hours * 3600
+        stale_need_r = cfg.stale_progress_r
+        stale_window = f"{cfg.stale_trade_hours}h"
+        breakeven_at_r = cfg.breakeven_at_r
+        trailing_activate_r = cfg.trailing_activate_r
     age = now - trade.opened_at
     hours_left = trade.plan.hold_hours - age / 3600
     max_hold = age >= trade.plan.hold_hours * 3600
@@ -142,7 +157,11 @@ def evaluate_exit(
         if live is not None and initial_risk > 0
         else None
     )
-    structure_reversed = trend_1h == ("short" if side == "long" else "long")
+    # A fade short is entered against the 1h trend by design; only swing
+    # trades exit on a completed structure reversal.
+    structure_reversed = not scalp and trend_1h == (
+        "short" if side == "long" else "long"
+    )
     stop_hit = False
     target_hit = False
     stale = False
@@ -178,8 +197,8 @@ def evaluate_exit(
         )
         stale = (
             progress_r is not None
-            and age >= cfg.stale_trade_hours * 3600
-            and progress_r < cfg.stale_progress_r
+            and age >= stale_after
+            and progress_r < stale_need_r
         )
 
     liq = _finite(trade.plan.liquidation_estimate)
@@ -278,32 +297,48 @@ def evaluate_exit(
             ),
             hold_check(
                 "1h structure",
-                trend_1h == side,
+                scalp or trend_1h == side,
                 (
-                    f"Completed 1h structure is {trend_1h}"
+                    "Mean-reversion scalp; the 1h trend is faded by design"
+                    if scalp
+                    else f"Completed 1h structure is {trend_1h}"
                     if trend_1h
                     else "1h structure unavailable"
                 ),
             ),
             hold_check(
                 "4h bias",
-                trend_4h == side,
-                f"4h EMA bias is {trend_4h}" if trend_4h else "4h bias unavailable",
+                scalp or trend_4h == side,
+                (
+                    "Mean-reversion scalp; 4h bias is not required"
+                    if scalp
+                    else f"4h EMA bias is {trend_4h}"
+                    if trend_4h
+                    else "4h bias unavailable"
+                ),
             ),
             hold_check(
                 "Progress vs review window",
                 data_fresh and not stale,
                 (
-                    f"{progress_r:.2f}R best progress; need {cfg.stale_progress_r:g}R within {cfg.stale_trade_hours}h"
+                    f"{progress_r:.2f}R best progress; need {stale_need_r:g}R within {stale_window}"
                     if progress_r is not None
                     else "Progress cannot be measured without a fresh price"
                 ),
             ),
             hold_check(
                 "Session VWAP",
-                live is not None and vwap is not None and sign * (live - vwap) >= 0,
                 (
-                    f"Price {live:.5g} vs session VWAP {vwap:.5g}; hold wants the {side} side"
+                    live is not None and vwap is not None
+                    if scalp
+                    else live is not None and vwap is not None and sign * (live - vwap) >= 0
+                ),
+                (
+                    (
+                        f"Price {live:.5g} vs session VWAP {vwap:.5g}; VWAP is the mean-reversion target"
+                        if scalp
+                        else f"Price {live:.5g} vs session VWAP {vwap:.5g}; hold wants the {side} side"
+                    )
                     if live is not None and vwap is not None
                     else "Session VWAP unavailable"
                 ),
@@ -390,7 +425,7 @@ def evaluate_exit(
         else:
             trade.state = f"HOLD_{side.upper()}"
             proposed = trade.current_stop
-            if progress_r is not None and progress_r >= cfg.breakeven_at_r:
+            if progress_r is not None and progress_r >= breakeven_at_r:
                 covered = (
                     trade.plan.entry
                     + sign * trade.plan.entry * trade.plan.cost_pct / 100
@@ -425,8 +460,8 @@ def evaluate_exit(
         failed = next((item for item in trade.checks if not item.passed), None)
         if failed:
             trade.reason = failed.detail
-    # Retain the start of the current 15m candle so its full range is examined once closed.
-    trade.checked_at = max(trade.opened_at, now // 900 * 900)
+    # Retain the start of the current trigger candle so its full range is examined once closed.
+    trade.checked_at = max(trade.opened_at, now // interval_seconds * interval_seconds)
     return trade
 
 
@@ -465,6 +500,9 @@ class SignalStore:
             )
             self.connection.execute(
                 "CREATE TABLE IF NOT EXISTS alerts (id TEXT PRIMARY KEY, time INTEGER NOT NULL, payload TEXT NOT NULL)"
+            )
+            self.connection.execute(
+                "CREATE TABLE IF NOT EXISTS forward_tests (id TEXT PRIMARY KEY, time INTEGER NOT NULL, payload TEXT NOT NULL)"
             )
 
     def settings(self) -> SignalSettings:
@@ -536,3 +574,36 @@ class SignalStore:
                 "SELECT payload FROM alerts ORDER BY time DESC, rowid DESC LIMIT 50"
             ).fetchall()
         return [json.loads(row[0]) for row in rows]
+
+    def record_forward_test(self, test: ForwardTest) -> bool:
+        with self.lock, self.connection:
+            cursor = self.connection.execute(
+                "INSERT OR IGNORE INTO forward_tests VALUES (?, ?, ?)",
+                (test.id, test.opened_at, json.dumps(asdict(test), allow_nan=False)),
+            )
+            self.connection.execute(
+                "DELETE FROM forward_tests WHERE id NOT IN (SELECT id FROM forward_tests ORDER BY time DESC, rowid DESC LIMIT 1000)"
+            )
+            return cursor.rowcount > 0
+
+    def save_forward_test(self, test: ForwardTest) -> None:
+        with self.lock, self.connection:
+            self.connection.execute(
+                "INSERT OR REPLACE INTO forward_tests VALUES (?, ?, ?)",
+                (test.id, test.opened_at, json.dumps(asdict(test), allow_nan=False)),
+            )
+
+    def forward_tests(self, open_only: bool = False, limit: int = 1000) -> list[ForwardTest]:
+        with self.lock:
+            rows = self.connection.execute(
+                "SELECT payload FROM forward_tests ORDER BY time DESC, rowid DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        allowed = {item.name for item in fields(ForwardTest)}
+        result = []
+        for row in rows:
+            payload = json.loads(row[0])
+            test = ForwardTest(**{key: payload[key] for key in payload if key in allowed})
+            if not open_only or test.outcome == "open":
+                result.append(test)
+        return result
