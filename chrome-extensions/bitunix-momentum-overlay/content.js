@@ -238,7 +238,10 @@
       ? ` · ${scan.hot} hot / ${scan.universe} universe`
       : '';
     status.textContent = payload.error || payload.status?.error || (payload.status?.ready ? '● Monitoring liquid USDT perpetuals' + scanBit + liveBit : 'Waiting for complete market data');
-    host.querySelector('#bis-planning').innerHTML = `<div><small>Planning equity</small><b>${money(settings.planning_equity)}</b></div><div><small>Risk / trade</small><b>${fixed(settings.risk_pct)}%</b></div><div><small>Leverage / hold</small><b>${settings.leverage}x · ≤${settings.hold_hours}h</b></div><button data-action="planning">Edit</button>`;
+    const profile = settings.profile === 'fast_short' ? 'fast_short' : 'swing';
+    const title = host.querySelector('header strong');
+    if (title) title.textContent = profile === 'fast_short' ? 'Fast short signals' : 'Trade signals';
+    host.querySelector('#bis-planning').innerHTML = `<label class="bis-profile"><small>Strategy</small><select id="bis-profile"><option value="swing" ${profile === 'swing' ? 'selected' : ''}>Swing · 12–24h · long/short</option><option value="fast_short" ${profile === 'fast_short' ? 'selected' : ''}>Fast short · 1–2h · up to 100x</option></select></label><div><small>Risk / trade</small><b>${fixed(settings.risk_pct)}%</b></div><div><small>Leverage / hold</small><b>${settings.leverage}x · ≤${settings.hold_hours}h</b></div><button data-action="planning">Edit</button>`;
     const rows = Object.values(payload.symbols || {});
     if (selected && !payload.symbols[selected]) selected = '';
     const symbol = selected && payload.symbols[selected] ? selected : payload.best_symbol;
@@ -382,7 +385,24 @@
       synth.speak(warm);
     } catch { /* gesture unlock for Chrome speech */ }
   }, true);
-  host.addEventListener('change', event => { if (event.target.id === 'bis-symbol') { selected = event.target.value; render(); } });
+  host.addEventListener('change', event => {
+    if (event.target.id === 'bis-symbol') { selected = event.target.value; render(); }
+    if (event.target.id === 'bis-profile' && payload?.settings) {
+      const nextProfile = event.target.value === 'fast_short' ? 'fast_short' : 'swing';
+      const s = payload.settings;
+      const body = {
+        profile: nextProfile,
+        planning_equity: Number(s.planning_equity),
+        risk_pct: Number(s.risk_pct),
+        leverage: nextProfile === 'fast_short' ? (s.profile === 'fast_short' ? Number(s.leverage) : 100) : (s.profile === 'swing' ? Number(s.leverage) : 25),
+        hold_hours: nextProfile === 'fast_short' ? (s.profile === 'fast_short' ? Number(s.hold_hours) : 2) : (s.profile === 'swing' ? Number(s.hold_hours) : 24),
+      };
+      send('save-planning', body).then(response => {
+        if (!response?.ok) throw new Error(response?.error || 'Could not switch strategy.');
+        return refresh();
+      }).catch(error => { payload = { ...(payload || {}), error: error.message }; render(); });
+    }
+  });
   host.addEventListener('keydown', event => {
     if (event.key === 'Escape' && formOpen) closeForm();
     if (event.key === 'Tab' && formOpen) {
@@ -408,7 +428,33 @@
     }
     if (action === 'planning') {
       const s = payload.settings;
-      openForm('Planning settings', `<p>These are planning values, not your exchange balance. Existing tracked plans remain unchanged. The scanner is built for isolated 25-40x and a 12h or 24h hold. Leverage never tightens the stop; if 40x would liquidate before the structural stop, the entry stays blocked.</p><label>Planning equity (USDT)<input name="planning_equity" type="number" min="10" max="100000000" step="0.01" value="${s.planning_equity}" required></label><label>Risk per trade (%)<input name="risk_pct" type="number" min="0.01" max="2" step="0.01" value="${s.risk_pct}" required></label><label>Leverage (isolated, 25-40x intended)<input name="leverage" type="number" min="1" max="40" step="1" value="${s.leverage}" required></label><label>Maximum hold<select name="hold_hours"><option value="12" ${s.hold_hours === 12 ? 'selected' : ''}>12 hours</option><option value="24" ${s.hold_hours === 24 ? 'selected' : ''}>24 hours</option></select></label>`, 'Save settings', data => send('save-planning', Object.fromEntries([...data].map(([k, v]) => [k, Number(v)]))));
+      const profile = s.profile === 'fast_short' ? 'fast_short' : 'swing';
+      const holdOpts = profile === 'fast_short'
+        ? `<option value="1" ${s.hold_hours === 1 ? 'selected' : ''}>1 hour</option><option value="2" ${s.hold_hours === 2 ? 'selected' : ''}>2 hours</option>`
+        : `<option value="12" ${s.hold_hours === 12 ? 'selected' : ''}>12 hours</option><option value="24" ${s.hold_hours === 24 ? 'selected' : ''}>24 hours</option>`;
+      const copy = profile === 'fast_short'
+        ? 'Fast short looks for a completed 15m pump-fade rejection and plans a 1-2h short. 100x liquidates on about a 1% wick. Leverage never tightens the stop; if 100x would liquidate before that fade stop, the card stays WATCH.'
+        : 'Swing plans isolated 25-40x longs or shorts for a 12h or 24h hold. Leverage never tightens the stop; if 40x would liquidate before the structural stop, the entry stays blocked.';
+      openForm('Planning settings', `<p>These are planning values, not your exchange balance. Existing tracked plans remain unchanged. ${copy}</p><label>Strategy<select name="profile"><option value="swing" ${profile === 'swing' ? 'selected' : ''}>Swing · 12–24h · long/short</option><option value="fast_short" ${profile === 'fast_short' ? 'selected' : ''}>Fast short · 1–2h · up to 100x</option></select></label><label>Planning equity (USDT)<input name="planning_equity" type="number" min="10" max="100000000" step="0.01" value="${s.planning_equity}" required></label><label>Risk per trade (%)<input name="risk_pct" type="number" min="0.01" max="2" step="0.01" value="${s.risk_pct}" required></label><label>Leverage (isolated)<input name="leverage" type="number" min="1" max="${profile === 'fast_short' ? 100 : 40}" step="1" value="${s.leverage}" required></label><label>Maximum hold<select name="hold_hours">${holdOpts}</select></label>`, 'Save settings', data => send('save-planning', {
+        profile: String(data.get('profile') || 'swing'),
+        planning_equity: Number(data.get('planning_equity')),
+        risk_pct: Number(data.get('risk_pct')),
+        leverage: Number(data.get('leverage')),
+        hold_hours: Number(data.get('hold_hours')),
+      }));
+      host.querySelector('#bis-form [name="profile"]')?.addEventListener('change', event => {
+        const fast = event.target.value === 'fast_short';
+        const hold = host.querySelector('#bis-form [name="hold_hours"]');
+        const lev = host.querySelector('#bis-form [name="leverage"]');
+        if (hold) hold.innerHTML = fast
+          ? '<option value="1">1 hour</option><option value="2" selected>2 hours</option>'
+          : '<option value="12">12 hours</option><option value="24" selected>24 hours</option>';
+        if (lev) {
+          lev.max = fast ? 100 : 40;
+          if (fast && Number(lev.value) > 40) lev.value = 100;
+          if (!fast && Number(lev.value) > 40) lev.value = 25;
+        }
+      });
     }
     if (action === 'paper' || action === 'manual') {
       const row = payload.symbols[selected || payload.best_symbol];

@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
+
+SWING = "swing"
+FAST_SHORT = "fast_short"
+PROFILES = (SWING, FAST_SHORT)
 
 
 @dataclass(frozen=True)
@@ -12,8 +16,15 @@ class SignalSettings:
     risk_pct: float = 0.5
     leverage: int = 25
     hold_hours: int = 24
+    profile: str = SWING
+
+    @property
+    def max_leverage_cap(self) -> int:
+        return 100 if self.profile == FAST_SHORT else 40
 
     def validate(self) -> None:
+        if self.profile not in PROFILES:
+            raise ValueError("Profile must be swing or fast_short")
         if (
             not math.isfinite(self.planning_equity)
             or not 10 <= self.planning_equity <= 100_000_000
@@ -21,20 +32,39 @@ class SignalSettings:
             raise ValueError("Planning equity must be between 10 and 100,000,000 USDT")
         if not math.isfinite(self.risk_pct) or not 0 < self.risk_pct <= 2:
             raise ValueError("Planned risk must be greater than zero and at most 2%")
-        if type(self.leverage) is not int or not 1 <= self.leverage <= 40:
-            raise ValueError("Leverage must be a whole number from 1 to 40")
-        if type(self.hold_hours) is not int or self.hold_hours not in (12, 24):
-            raise ValueError("Maximum holding time must be 12 or 24 hours")
+        if type(self.leverage) is not int:
+            raise ValueError("Leverage must be a whole number")
+        if type(self.hold_hours) is not int:
+            raise ValueError("Maximum holding time must be a whole number of hours")
+        if self.profile == FAST_SHORT:
+            if not 1 <= self.leverage <= 100:
+                raise ValueError("Fast-short leverage must be a whole number from 1 to 100")
+            if self.hold_hours not in (1, 2):
+                raise ValueError("Fast-short hold must be 1 or 2 hours")
+        else:
+            if not 1 <= self.leverage <= 40:
+                raise ValueError("Leverage must be a whole number from 1 to 40")
+            if self.hold_hours not in (12, 24):
+                raise ValueError("Maximum holding time must be 12 or 24 hours")
 
     @classmethod
     def from_dict(cls, values: dict[str, object]) -> SignalSettings:
-        if set(values) != {f.name for f in fields(cls)}:
+        payload = dict(values)
+        if "profile" not in payload:
+            payload["profile"] = SWING
+        required = {item.name for item in fields(cls)}
+        if set(payload) != required:
             raise ValueError(
-                "Provide planning_equity, risk_pct, leverage and hold_hours"
+                "Provide planning_equity, risk_pct, leverage, hold_hours and profile"
             )
-        if any(type(v) not in (int, float) for v in values.values()):
+        if payload["profile"] not in PROFILES or type(payload["profile"]) is not str:
+            raise ValueError("Profile must be swing or fast_short")
+        if any(
+            key != "profile" and type(value) not in (int, float)
+            for key, value in payload.items()
+        ):
             raise ValueError("Planning settings must be numbers")
-        settings = cls(**values)  # type: ignore[arg-type]
+        settings = cls(**payload)  # type: ignore[arg-type]
         settings.validate()
         return settings
 
@@ -130,3 +160,24 @@ class SignalsCfg:
             raise ValueError("signals.handoff_seconds must be between 5 and 60")
         if not 15 <= self.expiry_warn_seconds <= 180:
             raise ValueError("signals.expiry_warn_seconds must be between 15 and 180")
+
+
+def apply_profile(cfg: SignalsCfg, settings: SignalSettings) -> SignalsCfg:
+    """Tighten travel, stops and vol gates for a 1-2h 50-100x fade short."""
+    if settings.profile != FAST_SHORT:
+        return cfg
+    return replace(
+        cfg,
+        min_reward_risk=1.5,
+        max_target_atr_multiple=2.5,
+        max_target_4h_atr_multiple=1.0,
+        impulse_atr_min=1.0,
+        min_hourly_atr_pct=0.15,
+        max_hourly_atr_pct=8.0,
+        liquidation_buffer_pct=0.25,
+        max_funding_cost_pct=0.20,
+        stop_atr_buffer=0.15,
+        relative_volume_min=1.1,
+        stale_trade_hours=1,
+        stale_progress_r=0.15,
+    )

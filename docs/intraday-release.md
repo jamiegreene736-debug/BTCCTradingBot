@@ -110,6 +110,14 @@ dropped to WAIT when the 15m entry window closes; it stays listed as WATCH
 until alignment breaks. A live ENTER is not handed off to a WATCH-only name.
 A failed re-read keeps the last good decision for two data-age windows.
 
+## Fast short profile — 1.5.5
+
+The overlay can switch from swing (12/24h, 25-40x, long or short) to **Fast
+short**: 1-2h, shorts only, planning leverage up to 100x. The scanner looks for
+a completed 15m pump-fade rejection. It does not require a 4h/1h downtrend.
+100x still fails the isolated-margin buffer when the fade stop is too wide.
+This is not a measured edge.
+
 ## Signal queue, timestamps and handoff
 
 The snapshot now includes a ranked `queue` of up to five markets, `state_since`

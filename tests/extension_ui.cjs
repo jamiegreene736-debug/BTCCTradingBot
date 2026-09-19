@@ -23,7 +23,7 @@ async function main() {
       window.listeners = [];
       window.savedLayout = {};
       window.chrome = { runtime: {
-        getManifest: () => ({ version: '1.5.4' }),
+        getManifest: () => ({ version: '1.5.5' }),
         sendMessage: async message => {
           window.messages.push(message);
           if (['save-planning', 'track-entry', 'close-track', 'confirm-stop', 'place-stop'].includes(message.type)) return { ok: true };
@@ -55,7 +55,7 @@ async function main() {
     });
     await page.addStyleTag({ path: path.join(root, 'content.css') });
     await page.addScriptTag({ path: path.join(root, 'content.js') });
-    assert.equal(await page.locator('#bis-panel').getAttribute('data-bis-version'), '1.5.4');
+    assert.equal(await page.locator('#bis-panel').getAttribute('data-bis-version'), '1.5.5');
     assert.equal(await page.locator('#bis-panel').evaluate(el => el.textContent.includes('OLD IMMOVABLE PANEL')), false);
     assert.match(await page.locator('#bis-status').textContent(), /Connecting/);
     await page.evaluate(() => {
@@ -188,6 +188,12 @@ async function main() {
     await page.locator('.bis-modal').waitFor({ state: 'detached' });
     const saved = await page.evaluate(() => window.messages.find(m => m.type === 'save-planning').body);
     assert.equal(saved.leverage, 30); assert.equal(saved.hold_hours, 12);
+    assert.equal(saved.profile || 'swing', 'swing');
+    await page.locator('#bis-profile').selectOption('fast_short');
+    const switched = await page.evaluate(() => window.messages.filter(m => m.type === 'save-planning').at(-1).body);
+    assert.equal(switched.profile, 'fast_short');
+    assert.equal(switched.leverage, 100);
+    assert.equal(switched.hold_hours, 2);
     await page.locator('#bis-symbol').selectOption('ETHUSDT');
     assert.equal(await page.locator('.bis-state').textContent(), 'ENTER SHORT');
     await page.locator('#bis-card summary').click();
@@ -263,13 +269,13 @@ async function main() {
     await popup.setContent(fs.readFileSync(path.join(root, 'popup.html'), 'utf8').replace(/<script[^>]*><\/script>/g, ''));
     await popup.evaluate(() => {
       window.chrome = { runtime: {
-        getManifest: () => ({ version: '1.5.4' }),
+        getManifest: () => ({ version: '1.5.5' }),
         sendMessage: async () => ({ payload: { error: 'Cannot reach the dashboard.' } }),
       } };
     });
     await popup.addScriptTag({ path: path.join(root, 'popup.js') });
     assert.match(await popup.locator('#status').textContent(), /Cannot reach/);
-    assert.equal(await popup.locator('#version').textContent(), 'Version 1.5.4');
+    assert.equal(await popup.locator('#version').textContent(), 'Version 1.5.5');
     const stalled = await browser.newPage();
     stalled.on('pageerror', error => errors.push(error.message));
     await stalled.clock.install();

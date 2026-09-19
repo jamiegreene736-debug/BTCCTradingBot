@@ -23,6 +23,7 @@ from bitunix_bot.intraday import (
     ema_bias,
     ema_stack,
     evaluate_intraday,
+    find_fade_setup,
     find_setup,
     funding_cost,
     make_check,
@@ -30,7 +31,7 @@ from bitunix_bot.intraday import (
     trend,
     waiting_check,
 )
-from bitunix_bot.signal_config import SignalsCfg, SignalSettings
+from bitunix_bot.signal_config import FAST_SHORT, SignalsCfg, SignalSettings
 from bitunix_bot.signal_scanner import SignalScanner, parse_open_position
 from bitunix_bot.signal_store import (
     HOLD_CHECK_LABELS,
@@ -780,6 +781,81 @@ def test_trailing_stop_never_widens():
 def test_invalid_planning_values_rejected(values):
     with pytest.raises(ValueError):
         SignalSettings.from_dict({**asdict(SignalSettings()), **values})
+
+
+def test_legacy_settings_payload_defaults_to_swing():
+    settings = SignalSettings.from_dict(
+        {
+            "planning_equity": 1000.0,
+            "risk_pct": 0.5,
+            "leverage": 25,
+            "hold_hours": 24,
+        }
+    )
+    assert settings.profile == "swing"
+    assert SignalSettings.from_dict(
+        {
+            "planning_equity": 1000.0,
+            "risk_pct": 0.5,
+            "leverage": 100,
+            "hold_hours": 2,
+            "profile": FAST_SHORT,
+        }
+    ).max_leverage_cap == 100
+    with pytest.raises(ValueError):
+        SignalSettings.from_dict(
+            {
+                "planning_equity": 1000.0,
+                "risk_pct": 0.5,
+                "leverage": 100,
+                "hold_hours": 2,
+            }
+        )
+    with pytest.raises(ValueError):
+        SignalSettings(profile=FAST_SHORT, leverage=101, hold_hours=2).validate()
+
+
+def fade_market():
+    market, frames = market_frames("long")
+    bars = frames["15m"]
+    bars[-3] = replace(bars[-3], open=98.2, high=99.6, low=98.15, close=99.5, volume=300)
+    bars[-2] = replace(bars[-2], open=99.5, high=99.7, low=99.2, close=99.4, volume=180)
+    bars[-1] = replace(
+        bars[-1], open=99.4, high=99.75, low=98.7, close=98.85, volume=220
+    )
+    for i in range(96):
+        bars[i] = replace(bars[i], low=96.8)
+    price = bars[-1].close
+    market = replace(market, price=price, mark=price, bid=price - 0.005, ask=price + 0.005)
+    return market, frames
+
+
+def test_fast_short_fade_setup_and_does_not_chase_1h_downtrend():
+    market, frames = fade_market()
+    atr_value = 0.45
+    setup = find_fade_setup(frames["15m"], frames["1h"], atr_value, SignalsCfg())
+    assert setup is not None and setup.name == "Pump fade rejection"
+    settings = SignalSettings(profile=FAST_SHORT, leverage=50, hold_hours=2)
+    decision = evaluate_intraday(
+        market, frames, None, settings, SignalsCfg(), NOW
+    )
+    assert decision.side == "short"
+    assert decision.setup == "Pump fade rejection"
+    assert decision.state in ("ENTER_SHORT", "WATCH_SHORT"), decision.reasons
+    if decision.state == "WATCH_SHORT":
+        assert any(not item.passed for item in decision.checks)
+    chased = evaluate_intraday(
+        market,
+        {**frames, "1h": market_frames("short")[1]["1h"]},
+        None,
+        settings,
+        SignalsCfg(),
+        NOW,
+    )
+    assert not chased.state.startswith("ENTER")
+    assert "chase" in chased.reasons[0].lower() or any(
+        "chase" in item.detail.lower() for item in chased.checks
+    )
 
 
 def scanner_with_entry(tmp_path):

@@ -10,7 +10,7 @@ from typing import Literal
 import numpy as np
 
 from .indicators import atr, ema
-from .signal_config import SignalsCfg, SignalSettings
+from .signal_config import FAST_SHORT, SignalsCfg, SignalSettings, apply_profile
 
 Side = Literal["long", "short"]
 INTERVALS = {"15m": 900, "1h": 3600, "4h": 14400}
@@ -399,6 +399,34 @@ def find_setup(
     return _impulse_continuation(bars, side, atr_value, cfg)
 
 
+def find_fade_setup(
+    candles: list[Candle],
+    hourly: list[Candle],
+    atr_value: float,
+    cfg: SignalsCfg,
+) -> Setup | None:
+    """1-2h short after a completed 15m pump rejection. Not a trend short."""
+    if len(candles) < 16 or atr_value <= 0:
+        return None
+    last, prior = candles[-1], candles[-2]
+    lookback = candles[-13:-1]
+    local_high = max(c.high for c in lookback)
+    tagged = last.high >= local_high - 0.15 * atr_value
+    failed = last.close < min(prior.close, last.open) and (
+        last.high - last.close >= 0.4 * max(last.high - last.low, atr_value * 0.25)
+    )
+    pumped = any(
+        c.close - c.open >= cfg.impulse_atr_min * atr_value for c in candles[-9:-1]
+    ) or (hourly[-1].close / hourly[-3].close - 1) >= 0.008
+    if not (tagged and failed and pumped):
+        return None
+    return Setup(
+        "Pump fade rejection",
+        max(c.high for c in candles[-4:]) + cfg.stop_atr_buffer * atr_value,
+        _relative_volume(candles),
+    )
+
+
 def _impulse_continuation(
     bars: list[Candle], side: Side, atr_value: float, cfg: SignalsCfg
 ) -> Setup | None:
@@ -507,8 +535,12 @@ def build_plan(
         ),
         make_check(
             "Stop outside normal noise",
-            stop_distance >= 0.75 * atr_value,
-            "Structural stop must allow at least 0.75 ATR",
+            stop_distance >= (0.45 if settings.profile == FAST_SHORT else 0.75) * atr_value,
+            (
+                "Fade stop must allow at least 0.45 ATR"
+                if settings.profile == FAST_SHORT
+                else "Structural stop must allow at least 0.75 ATR"
+            ),
         ),
     ]
     if stop_distance <= 0:
@@ -551,7 +583,10 @@ def build_plan(
         volatility(four_hour),
         cfg,
     )
-    missing_target = "No confirmed target that clears 2R inside the ≤24h travel budget"
+    hold_label = f"≤{settings.hold_hours}h"
+    missing_target = (
+        f"No confirmed target that clears {cfg.min_reward_risk:g}R inside the {hold_label} travel budget"
+    )
     if not targets:
         ratio = 0.0
         target_ok = False
@@ -578,8 +613,10 @@ def build_plan(
     max_leverage, liquidation = 0, None
     if tier:
         adverse_basis = min(0, sign * (market.mark - market.price))
-        buffer = max(entry * cfg.liquidation_buffer_pct / 100, atr_value * 0.5)
-        for leverage in range(1, min(40, tier.max_leverage) + 1):
+        atr_floor = 0.15 if settings.profile == FAST_SHORT else 0.5
+        buffer = max(entry * cfg.liquidation_buffer_pct / 100, atr_value * atr_floor)
+        cap = min(settings.max_leverage_cap, tier.max_leverage)
+        for leverage in range(1, cap + 1):
             estimated = (
                 entry
                 * (1 - sign / leverage + sign * cost_pct / 100)
@@ -589,12 +626,18 @@ def build_plan(
                 max_leverage = leverage
             if leverage == settings.leverage:
                 liquidation = estimated
-    usable_band = min(max_leverage, 40) if max_leverage >= 25 else max_leverage
+    band_floor = 50 if settings.profile == FAST_SHORT else 25
+    usable_band = (
+        min(max_leverage, settings.max_leverage_cap)
+        if max_leverage >= band_floor
+        else max_leverage
+    )
     if tier is not None and settings.leverage <= max_leverage:
+        band = "50-100x" if settings.profile == FAST_SHORT else "25-40x"
         leverage_detail = (
             f"{settings.leverage}x clears the isolated-margin buffer; "
-            f"{usable_band}x is the highest 25-40x leverage that still fits this stop"
-            if max_leverage >= 25
+            f"{usable_band}x is the highest {band} leverage that still fits this stop"
+            if max_leverage >= band_floor
             else "Estimated isolated-margin buffer passes; verify exchange liquidation price"
         )
     else:
@@ -607,7 +650,7 @@ def build_plan(
                 "Structural target",
                 target_ok,
                 (
-                    "Confirmed target clears 2R inside the ≤24h travel budget"
+                    f"Confirmed target clears {cfg.min_reward_risk:g}R inside the {hold_label} travel budget"
                     if target_ok
                     else missing_target
                 ),
@@ -677,6 +720,7 @@ def evaluate_intraday(
     cfg: SignalsCfg,
     now: int,
 ) -> Decision:
+    cfg = apply_profile(cfg, settings)
     result = Decision(market.symbol, as_of=market.as_of, price=market.price)
     bars, hourly, four_hour = frames["15m"], frames["1h"], frames["4h"]
     one, one_ema, four_bias, four_structure = (
@@ -685,7 +729,8 @@ def evaluate_intraday(
         ema_bias(four_hour),
         trend(four_hour),
     )
-    side = choose_side(one, four_bias, one_ema)
+    fast = settings.profile == FAST_SHORT
+    side: Side | None = "short" if fast else choose_side(one, four_bias, one_ema)
     result.bar_time = bars[-1].time
     atr_value, vwap = volatility(bars), session_vwap(bars, now)
     hourly_atr_pct = volatility(hourly) / market.price * 100
@@ -728,11 +773,19 @@ def evaluate_intraday(
         ),
         make_check(
             "4h bias / 1h structure",
-            side is not None,
+            (one != "short") if fast else side is not None,
             (
-                f"4h bias {four_bias}; 1h structure {one}; 1h EMA {one_ema} → {side}"
-                if side
-                else f"4h bias {four_bias}; 1h structure {one}; 1h EMA {one_ema}"
+                (
+                    "Fast short fades a pump; confirmed 1h downtrend is late / a chase"
+                    if one == "short"
+                    else f"1h structure {one}; fading the pump, not a 12/24h trend short"
+                )
+                if fast
+                else (
+                    f"4h bias {four_bias}; 1h structure {one}; 1h EMA {one_ema} → {side}"
+                    if side
+                    else f"4h bias {four_bias}; 1h structure {one}; 1h EMA {one_ema}"
+                )
             ),
         ),
         make_check(
@@ -746,7 +799,7 @@ def evaluate_intraday(
             f"Next funding in {max(0, funding_eta)}s; wait if ≤{cfg.funding_blackout_seconds}s",
         ),
     ]
-    if side is None:
+    if (fast and one == "short") or (not fast and side is None):
         result.checks.extend(
             waiting_check(label, WAITING_ALIGNMENT)
             for label in CHECKLIST_LABELS
@@ -761,13 +814,25 @@ def evaluate_intraday(
         )
         result.checks = order_checks(result.checks)
         result.reasons = [
-            "Wait for 4h EMA bias or confirmed 1h structure in the same direction"
+            "Wait for a 15m pump rejection; do not chase a confirmed 1h downtrend"
+            if fast
+            else "Wait for 4h EMA bias or confirmed 1h structure in the same direction"
         ]
         return result
+    assert side is not None
     sign = 1 if side == "long" else -1
     result.side = side
     result.state = f"WATCH_{side.upper()}"
-    if market.symbol != "BTCUSDT":
+    if fast:
+        result.metrics["profile"] = FAST_SHORT
+        result.checks.append(
+            make_check(
+                "BTC context",
+                True,
+                "Fast shorts fade the local pump; BTC does not have to be short",
+            )
+        )
+    elif market.symbol != "BTCUSDT":
         btc_trend = trend(btc_hourly) if btc_hourly else "unavailable"
         relative = (
             (
@@ -798,12 +863,20 @@ def evaluate_intraday(
                 "BTC is the benchmark; no extra relative-strength gate",
             )
         )
-    setup = find_setup(bars, hourly, side, atr_value, vwap, cfg)
+    setup = (
+        find_fade_setup(bars, hourly, atr_value, cfg)
+        if fast
+        else find_setup(bars, hourly, side, atr_value, vwap, cfg)
+    )
     result.checks.append(
         make_check(
             "Completed 15m trigger",
             setup is not None,
-            "Waiting for a pullback reclaim, impulse continuation, or breakout retest",
+            (
+                "Waiting for a completed 15m pump-fade rejection"
+                if fast
+                else "Waiting for a pullback reclaim, impulse continuation, or breakout retest"
+            ),
         )
     )
     if setup:

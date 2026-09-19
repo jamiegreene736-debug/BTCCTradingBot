@@ -81,9 +81,22 @@ news/event feed.
 
 ## Planning and tracking
 
-The overlay's Edit button sets planning equity, risk per trade, leverage (1–40x),
-and maximum hold (12h/24h). Initial planning defaults are explicitly hypothetical:
-1,000 USDT equity, 0.5% risk, 25x, 24 hours. These are not an exchange balance.
+The overlay strategy dropdown switches the scanner. **Swing** is the 12h/24h
+long-or-short book at 25-40x. **Fast short** is a different model: completed 15m
+pump-fade rejections only, 1h or 2h hold, planning leverage up to 100x. It does
+not wait for a 4h/1h downtrend — that would be late for a 1-2h fade. A confirmed
+1h downtrend is treated as a chase and stays WAIT.
+
+100x is not a free lunch. Isolated 100x liquidates on about a 1% wick. The
+scanner still never tightens the stop to make leverage fit; if the fade stop
+sits past the estimated liquidation buffer, the card stays WATCH. Most names
+will. Fees and slippage also eat a large slice of margin at 100x. Use it only
+when the rejection wick is tight enough that the stop still fits.
+
+The overlay's Edit button sets planning equity, risk per trade, leverage, and
+maximum hold for the selected profile. Initial swing defaults are hypothetical:
+1,000 USDT equity, 0.5% risk, 25x, 24 hours. Switching to Fast short fills 100x
+and 2 hours. These are not an exchange balance.
 
 The overlay shows a ranked queue of the top five markets, each with the time
 the current state started. WATCH and ENTER alerts are stored with that
