@@ -47,19 +47,26 @@ def history(
     client: BitunixClient, symbol: str, interval: str, start: int, now: int
 ) -> list[Candle]:
     rows: dict[int, dict[str, object]] = {}
+    seconds_ms = INTERVALS[interval] * 1000
     cursor = now * 1000
     cutoff = start - 200 * INTERVALS[interval]
+    previous_oldest: int | None = None
     while cursor > cutoff * 1000:
         batch = client.klines(symbol, interval, limit=200, end_time=cursor)
         if not batch:
             raise ValueError(f"Incomplete historical candles: {symbol} {interval}")
         oldest = min(int(row["time"]) for row in batch)
-        if oldest >= cursor:
+        if previous_oldest is not None and oldest >= previous_oldest:
             raise ValueError("Provider pagination did not advance")
         rows.update({int(row["time"]): row for row in batch})
-        cursor = oldest - 1
+        # endTime is exclusive and pages can drop candles near their edges;
+        # overlap the next page by 30 bars and deduplicate by timestamp.
+        previous_oldest = oldest
+        cursor = oldest + 30 * seconds_ms
         time.sleep(0.15)
-    return closed_candles(list(rows.values()), interval, now, allow_gaps=True)
+    return closed_candles(
+        list(rows.values()), interval, now, allow_gaps=True, fill_gaps=INTERVALS[interval] < 900
+    )
 
 
 def complete_frames(frames: dict[str, list[Candle]], now: int) -> bool:
@@ -80,14 +87,13 @@ def pick_symbols(client: BitunixClient, top: int, min_leverage: int) -> list[str
     cfg = SignalsCfg()
 
     def change(row: dict[str, object]) -> float:
-        for key in ("priceChangePercent", "change24h", "changePercent", "priceChange"):
-            value = row.get(key)
-            if value not in (None, ""):
-                try:
-                    return float(str(value))
-                except ValueError:
-                    continue
-        return 0.0
+        # The ticker carries no change field; derive 24h change from open/last.
+        try:
+            opened = float(str(row.get("open") or 0))
+            last = float(str(row.get("last") or row.get("lastPrice") or 0))
+        except ValueError:
+            return 0.0
+        return (last / opened - 1) * 100 if opened > 0 and last > 0 else 0.0
 
     liquid = [
         t
@@ -96,7 +102,27 @@ def pick_symbols(client: BitunixClient, top: int, min_leverage: int) -> list[str
         and row_max_leverage(pairs[row_symbol(t)]) >= min_leverage
     ]
     liquid.sort(key=change, reverse=True)
+    excluded = sorted(
+        (
+            (row_symbol(t), change(t), row_max_leverage(pairs[row_symbol(t)]))
+            for t in rows
+            if row_quote_volume_usdt(t) >= cfg.min_quote_volume
+            and row_max_leverage(pairs[row_symbol(t)]) < min_leverage
+        ),
+        key=lambda item: item[1],
+        reverse=True,
+    )[:top]
+    if excluded:
+        print(
+            "Gainers excluded by leverage cap: "
+            + ", ".join(f"{s} {c:+.1f}% ({lev}x)" for s, c, lev in excluded),
+            file=sys.stderr,
+        )
     chosen = [row_symbol(t) for t in liquid[:top]]
+    print(
+        "Selected: " + ", ".join(f"{row_symbol(t)} {change(t):+.1f}%" for t in liquid[:top]),
+        file=sys.stderr,
+    )
     if "BTCUSDT" not in chosen:
         chosen.append("BTCUSDT")
     return chosen
