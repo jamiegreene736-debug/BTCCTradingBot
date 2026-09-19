@@ -21,6 +21,7 @@ import time
 from collections import Counter
 from dataclasses import asdict
 from pathlib import Path
+from typing import Any, cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -83,8 +84,8 @@ def pick_symbols(client: BitunixClient, top: int, min_leverage: int) -> list[str
             value = row.get(key)
             if value not in (None, ""):
                 try:
-                    return float(value)
-                except (TypeError, ValueError):
+                    return float(str(value))
+                except ValueError:
                     continue
         return 0.0
 
@@ -164,9 +165,9 @@ def replay(
                         blockers[check.label] += 1
             if any(t.symbol == symbol and t.outcome == "open" for t in tests.values()):
                 continue
-            test = forward_test_from_decision(decision, now)
-            if test is not None and test.id not in tests:
-                tests[test.id] = test
+            candidate = forward_test_from_decision(decision, now)
+            if candidate is not None and candidate.id not in tests:
+                tests[candidate.id] = candidate
     for test in tests.values():
         if test.outcome == "open":
             update_forward_test(test, histories[test.symbol][interval], end)
@@ -256,7 +257,7 @@ def main() -> int:
     text = json.dumps(report, indent=2)
     if args.output:
         Path(args.output).write_text(text)
-    summary = report["summary"]
+    summary = cast(dict[str, Any], report["summary"])
     print(
         f"{len(histories)} symbols, {args.hours}h at {args.leverage}x: "
         f"{summary['count']} signals, hit rate {summary['hit_rate']}, "

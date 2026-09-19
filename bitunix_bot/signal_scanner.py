@@ -17,7 +17,6 @@ import requests
 
 from .client import BitunixClient, BitunixError
 from .forward_test import (
-    ForwardTest,
     forward_test_from_decision,
     summarize_forward_tests,
     update_forward_test,
@@ -25,6 +24,7 @@ from .forward_test import (
 from .intraday import (
     INTERVALS,
     Candle,
+    Check,
     Decision,
     Market,
     Side,
@@ -759,7 +759,7 @@ class SignalScanner:
             int(time.time()),
         )
 
-    def _blank_checklist(self, settings: SignalSettings, detail: str):
+    def _blank_checklist(self, settings: SignalSettings, detail: str) -> list[Check]:
         if settings.profile == SCALP_PROFILE:
             return blank_scalp_checklist(detail)
         return blank_checklist(detail)

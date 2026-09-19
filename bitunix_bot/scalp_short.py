@@ -21,9 +21,9 @@ from .intraday import (
     Decision,
     Market,
     TradePlan,
+    ema_bias,
     session_vwap,
     trend,
-    ema_bias,
     volatility,
 )
 from .signal_config import ScalpCfg, SignalsCfg, SignalSettings

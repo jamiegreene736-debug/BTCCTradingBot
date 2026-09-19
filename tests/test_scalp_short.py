@@ -10,7 +10,6 @@ import pytest
 from bitunix_bot.client import BitunixClient
 from bitunix_bot.config import load
 from bitunix_bot.forward_test import (
-    ForwardTest,
     forward_test_from_decision,
     summarize_forward_tests,
     update_forward_test,
