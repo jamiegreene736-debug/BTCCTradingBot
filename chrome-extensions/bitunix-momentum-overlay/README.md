@@ -24,8 +24,9 @@ No extension action sends an exchange order or modifies a position.
   version **1.6.0**. Unpacked extensions do not refresh themselves after a git pull.
   Click **Reload** on this extension in `chrome://extensions`, then reload the
   Bitunix tab. A Bitunix in-page refresh is not enough. The panel header must
-  show **v1.6.0**, a drag grip, and ⤢. Drag the title to move; drag the
-  bottom-right corner to resize.
+  show **v1.6.0**, a drag grip, and ⤢. Drag the title or grip to move; drag the
+  bottom-right corner to resize. Empty header chrome lets Bitunix menus
+  (timeframes, short/long tickets) receive clicks through the overlay.
 - Use the complete extension folder from one release. Mixing the old manifest
   and panel with the new worker breaks message delivery and omits its alarms permission.
 - The panel displays **Connecting** immediately. A stalled or disconnected worker

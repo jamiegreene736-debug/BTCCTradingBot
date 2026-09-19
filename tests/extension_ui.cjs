@@ -94,6 +94,19 @@ async function main() {
     });
     assert.match(await page.locator('#bis-handoff').textContent(), /Switching to ETHUSDT/);
     assert.match(await page.locator('#bis-card').textContent(), /Shown /);
+    assert.equal(await page.locator('#bis-panel').evaluate(el => getComputedStyle(el).pointerEvents), 'none');
+    assert.equal(await page.locator('#bis-panel header').evaluate(el => getComputedStyle(el).pointerEvents), 'none');
+    const headerBox = await page.locator('#bis-panel header').boundingBox();
+    await page.evaluate(({ x, y }) => {
+      const button = document.createElement('button');
+      button.id = 'under-header';
+      button.textContent = '1-2 hours short';
+      button.style.cssText = `position:fixed;left:${x + 6}px;top:${y + 8}px;z-index:1;padding:4px 8px`;
+      button.addEventListener('click', () => { window.underHeaderClicked = true; });
+      document.body.appendChild(button);
+    }, headerBox);
+    await page.locator('#under-header').click();
+    assert.equal(await page.evaluate(() => window.underHeaderClicked), true);
     const beforeMove = await page.locator('#bis-panel').boundingBox();
     const title = await page.locator('#bis-panel header strong').boundingBox();
     await page.mouse.move(title.x + 24, title.y + 8);

@@ -145,7 +145,7 @@
       if (event.button && event.button !== 0) return;
       const hit = event.target;
       if (!(hit instanceof Node) || !target.contains(hit)) return;
-      if (hit.closest?.('button, a, input, select, textarea, summary')) return;
+      if (hit.closest?.('button, a, input, select, textarea, summary, option')) return;
       if (formOpen) return;
       event.preventDefault();
       event.stopPropagation();
@@ -264,7 +264,7 @@
       const left = item.expires_at && live.startsWith('ENTER_') ? remain(item.expires_at - nowSec) : '';
       return `<button type="button" class="bis-queue-row ${tone(live)}${item.symbol === symbol ? ' active' : ''}" data-action="pick" data-symbol="${esc(item.symbol)}"><b>${index + 1}</b><div><strong>${esc(item.symbol)}</strong><small>${esc(label(live))}${item.setup ? ' · ' + esc(item.setup) : ''}</small><small>${esc(clock(item.state_since || item.as_of))}${left ? ' · ' + left + ' left' : ''}</small></div><span>${price(item.price)}</span></button>`;
     }).join('') || '<p class="bis-empty">No ranked setups yet.</p>'}`;
-    if (document.activeElement?.id !== 'bis-symbol') host.querySelector('#bis-selection').innerHTML = `<label>Market <select id="bis-symbol"><option value="">Best setup</option>${rows.map(r => `<option value="${esc(r.symbol)}" ${selected === r.symbol ? 'selected' : ''}>${esc(r.symbol)} · ${esc(fresh(r) ? label(r.state) : 'WAIT')}</option>`).join('')}</select></label><button data-action="refresh" title="Refresh signals">↻</button>`;
+    if (!host.querySelector('#bis-symbol:focus')) host.querySelector('#bis-selection').innerHTML = `<label>Market <select id="bis-symbol"><option value="">Best setup</option>${rows.map(r => `<option value="${esc(r.symbol)}" ${selected === r.symbol ? 'selected' : ''}>${esc(r.symbol)} · ${esc(fresh(r) ? label(r.state) : 'WAIT')}</option>`).join('')}</select></label><button data-action="refresh" title="Refresh signals">↻</button>`;
     if (row) {
       const state = fresh(row) && (!row.plan || row.plan.expires_at > Date.now() / 1000) ? row.state : 'WAIT';
       const plan = row.plan;
@@ -472,7 +472,10 @@
     });
   } catch { payload = { error: connectionError }; render(); }
   timers.push(setInterval(() => refresh(), 5000));
-  timers.push(setInterval(() => { if (payload && !formOpen) render(); }, 1000));
+  timers.push(setInterval(() => {
+    if (!payload || formOpen || host.querySelector('select:focus, input:focus, textarea:focus')) return;
+    render();
+  }, 1000));
   window.__bisIntradayTeardown = () => {
     timers.forEach(clearInterval);
     listeners.forEach(unlisten => unlisten());
