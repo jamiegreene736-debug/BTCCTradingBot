@@ -434,7 +434,7 @@ def evaluate_exit(
                     proposed = covered
             if (
                 progress_r is not None
-                and progress_r >= cfg.trailing_activate_r
+                and progress_r >= trailing_activate_r
                 and last is not None
             ):
                 # Ratchet on observed closes; keep at least the original risk distance.

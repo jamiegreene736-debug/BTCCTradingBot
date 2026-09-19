@@ -80,12 +80,9 @@ def update_forward_test(test: ForwardTest, candles: list[Candle], now: int) -> F
         test.bars_seen += 1
         test.checked_at = candle.time
         last_close = candle.close
-        liquidated = (
-            test.liquidation is not None
-            and sign * (adverse - test.liquidation) <= 0
-        )
-        if liquidated:
-            test.outcome, test.exit_r = "liquidation", sign * (test.liquidation - test.entry) / risk
+        liquidation = test.liquidation
+        if liquidation is not None and sign * (adverse - liquidation) <= 0:
+            test.outcome, test.exit_r = "liquidation", sign * (liquidation - test.entry) / risk
         elif sign * (adverse - test.stop) <= 0:
             test.outcome, test.exit_r = "stop", -1.0
         elif sign * (favorable - test.target) >= 0:
@@ -106,7 +103,7 @@ def update_forward_test(test: ForwardTest, candles: list[Candle], now: int) -> F
 
 def summarize_forward_tests(tests: list[ForwardTest]) -> dict[str, object]:
     resolved = [t for t in tests if t.outcome not in ("open", "invalid")]
-    with_exit = [t for t in resolved if t.exit_r is not None]
+    exits = [r for t in resolved if (r := t.exit_r) is not None]
     counts = {
         outcome: sum(1 for t in tests if t.outcome == outcome)
         for outcome in ("open", "target", "stop", "liquidation", "expired")
@@ -118,11 +115,7 @@ def summarize_forward_tests(tests: list[ForwardTest]) -> dict[str, object]:
         "hit_rate": (
             round(counts["target"] / len(resolved), 3) if resolved else None
         ),
-        "average_r": (
-            round(sum(t.exit_r for t in with_exit) / len(with_exit), 3)
-            if with_exit
-            else None
-        ),
+        "average_r": round(sum(exits) / len(exits), 3) if exits else None,
         "average_mfe_r": (
             round(sum(t.mfe_r for t in resolved) / len(resolved), 3) if resolved else None
         ),

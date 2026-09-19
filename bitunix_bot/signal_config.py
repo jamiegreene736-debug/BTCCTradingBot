@@ -8,9 +8,10 @@ from dataclasses import dataclass, field, fields
 # "swing": 4h bias / 1h structure / 15m trigger, 12-24h hold, 25-40x band.
 # "scalp_short": parabolic-exhaustion fade on 1m/3m bars, 1-2h hold, up to the
 # exchange tier maximum. The stop must sit inside the liquidation distance.
-PROFILES: dict[str, dict[str, object]] = {
-    "swing": {"holds": (12, 24), "max_leverage": 40},
-    "scalp_short": {"holds": (1, 2), "max_leverage": 125},
+# profile -> (allowed hold hours, maximum planning leverage)
+PROFILES: dict[str, tuple[tuple[int, ...], int]] = {
+    "swing": ((12, 24), 40),
+    "scalp_short": ((1, 2), 125),
 }
 NUMERIC_SETTINGS = ("planning_equity", "risk_pct", "leverage", "hold_hours")
 
@@ -26,8 +27,7 @@ class SignalSettings:
     def validate(self) -> None:
         if self.profile not in PROFILES:
             raise ValueError("Profile must be swing or scalp_short")
-        holds = PROFILES[self.profile]["holds"]
-        max_leverage = PROFILES[self.profile]["max_leverage"]
+        holds, max_leverage = PROFILES[self.profile]
         if (
             not math.isfinite(self.planning_equity)
             or not 10 <= self.planning_equity <= 100_000_000
