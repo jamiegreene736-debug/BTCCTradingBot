@@ -1,7 +1,8 @@
 // Authenticated requests stay in the service worker; no exchange trading routes.
 const POLL_MS = 5000;
+const DEFAULT_DASHBOARD_URL = 'https://btcc-trading-bot-production.up.railway.app';
 let latest = null, fetchedAt = 0, inFlight = null;
-let settings = { dashboardUrl: '', password: '' };
+let settings = { dashboardUrl: DEFAULT_DASHBOARD_URL, password: '' };
 
 function validateSnapshot(payload) {
   if (payload?.strategy !== 'intraday' || payload?.mode !== 'alerts_only') {
@@ -30,9 +31,14 @@ function validDashboardUrl(raw) {
 async function loadSettings() {
   const local = await chrome.storage.local.get(['dashboardUrl', 'password']);
   const old = await chrome.storage.sync.get(['dashboardUrl', 'password']);
-  settings = { dashboardUrl: local.dashboardUrl || old.dashboardUrl || '', password: local.password || old.password || '' };
+  const dashboardUrl = local.dashboardUrl || old.dashboardUrl || DEFAULT_DASHBOARD_URL;
+  const password = local.password || old.password || '';
+  settings = { dashboardUrl, password };
+  const persist = {};
+  if (!local.dashboardUrl) persist.dashboardUrl = dashboardUrl;
+  if (!local.password && password) persist.password = password;
+  if (Object.keys(persist).length) await chrome.storage.local.set(persist);
   if (old.password || old.dashboardUrl) {
-    await chrome.storage.local.set(settings);
     await chrome.storage.sync.remove(['dashboardUrl', 'password']);
   }
 }

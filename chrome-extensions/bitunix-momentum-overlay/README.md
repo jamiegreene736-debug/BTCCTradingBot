@@ -1,14 +1,17 @@
-# Bitunix Intraday Signals — Chrome extension v1.5.7
+# Bitunix Intraday Signals — Chrome extension v1.5.8
 
 Long and short entry, hold, review and exit alerts for trades lasting up to
 12–24 hours. The backend computes the strategy; this extension displays it.
 No extension action sends an exchange order or modifies a position.
 
 1. Deploy/start the matching backend with `signals.enabled: true`.
-2. Open `chrome://extensions`, enable Developer mode, and Load unpacked this folder.
-3. Open Settings, enter the HTTPS Railway dashboard URL and dashboard password,
-   and click **Save and test connection**. Wait for **Connected**.
-4. Reload the Bitunix tab. For an existing installation, reload the extension first.
+2. Open `chrome://extensions`, enable Developer mode, and Load unpacked this folder once.
+3. Open Settings. The production Railway URL is already filled in. Enter the
+   dashboard password once and click **Save and test connection**. Wait for
+   **Connected**. The password stays in this Chrome profile; auto-reloads do
+   not wipe it, and it is never stored in git.
+4. Open Bitunix. After the Mac LaunchAgent is installed, later deploys pull
+   this folder and the overlay reloads itself — no Chrome Reload click.
 5. Edit the displayed planning equity, risk, leverage and maximum holding time.
    The scanner is built for isolated 25-40x and a 12h or 24h hold. Leverage
    never tightens the stop.
@@ -16,12 +19,10 @@ No extension action sends an exchange order or modifies a position.
 ## If the panel is empty
 
 - **Pump Fade Radar** or version **0.3.16** means old files or an old tab are
-  still loaded. Reload the extension from this folder in `chrome://extensions`,
-  then reload the Bitunix tab. The popup must say **Bitunix Intraday Signals**,
-  version **1.5.7**. Unpacked extensions do not refresh themselves after a git pull.
-  Click **Reload** on this extension in `chrome://extensions`, then reload the
-  Bitunix tab. A Bitunix in-page refresh is not enough. The panel header must
-  show **v1.5.7**, a drag grip, and ⤢. Drag the title to move; drag the
+  still loaded. Wait for auto-sync, or click **Reload** once in
+  `chrome://extensions` if the watcher is not installed yet. The popup must
+  say **Bitunix Intraday Signals**, version **1.5.8**. The panel header must
+  show **v1.5.8**, a drag grip, and ⤢. Drag the title to move; drag the
   bottom-right corner to resize.
 - Use the complete extension folder from one release. Mixing the old manifest
   and panel with the new worker breaks message delivery and omits its alarms permission.

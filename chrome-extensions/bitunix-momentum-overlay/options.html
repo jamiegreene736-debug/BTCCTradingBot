@@ -49,11 +49,11 @@
   <body>
     <main>
       <h1>Bitunix Intraday Signals</h1>
-      <p>Connect the Chrome overlay to your private Railway dashboard.</p>
+      <p>The production Railway URL is already filled in. Enter the dashboard password once. It stays in this Chrome profile after you save — auto-reloads do not wipe it, and it is never stored in git.</p>
       <label for="dashboardUrl">Dashboard URL</label>
-      <input id="dashboardUrl" placeholder="https://btcc-trading-bot-production.up.railway.app">
+      <input id="dashboardUrl" value="https://btcc-trading-bot-production.up.railway.app" placeholder="https://btcc-trading-bot-production.up.railway.app">
       <label for="password">Dashboard password</label>
-      <input id="password" type="password" autocomplete="current-password">
+      <input id="password" type="password" autocomplete="current-password" placeholder="Saved on this Chrome profile after one Save">
       <button id="save">Save and test connection</button>
       <span id="status" role="status" aria-live="polite"></span>
     </main>

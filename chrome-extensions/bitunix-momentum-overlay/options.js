@@ -1,14 +1,16 @@
+const DEFAULT_DASHBOARD_URL = 'https://btcc-trading-bot-production.up.railway.app';
+
 async function load() {
   try {
     const stored = await chrome.storage.local.get(["dashboardUrl", "password"]);
     const old = await chrome.storage.sync.get(["dashboardUrl", "password"]);
-    document.getElementById("dashboardUrl").value = stored.dashboardUrl || old.dashboardUrl || "";
+    document.getElementById("dashboardUrl").value = stored.dashboardUrl || old.dashboardUrl || DEFAULT_DASHBOARD_URL;
     document.getElementById("password").value = stored.password || old.password || "";
   } catch { document.getElementById('status').textContent = 'Could not load settings. Reload the extension and reopen Settings.'; }
 }
 
 async function save() {
-  const dashboardUrl = document.getElementById("dashboardUrl").value.trim().replace(/\/+$/, "");
+  const dashboardUrl = document.getElementById("dashboardUrl").value.trim().replace(/\/+$/, "") || DEFAULT_DASHBOARD_URL;
   const password = document.getElementById("password").value;
   const status = document.getElementById("status");
   const button = document.getElementById('save');
@@ -31,7 +33,7 @@ async function save() {
     if (response.payload.error) throw new Error('Settings saved. ' + response.payload.error);
     if (response.payload.strategy !== 'intraday' || response.payload.mode !== 'alerts_only') throw new Error('Settings saved, but the backend is outdated. Deploy the intraday release.');
     status.textContent = response.payload.status?.ready
-      ? 'Connected. Reload your Bitunix tab to see signals.'
+      ? 'Connected. No Chrome Reload needed — Bitunix uses these saved settings.'
       : 'Connected. The scanner is waiting for complete market data.';
   } catch (error) { status.textContent = error.message; }
   finally { clearTimeout(timer); button.disabled = false; }

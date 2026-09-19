@@ -8,6 +8,7 @@ const { chromium } = require('playwright');
 async function main() {
   const fixture = JSON.parse(fs.readFileSync(process.argv[2] || path.join(__dirname, 'fixtures/intraday_snapshot.json'), 'utf8'));
   const root = path.resolve(__dirname, '../chrome-extensions/bitunix-momentum-overlay');
+  const manifest = JSON.parse(fs.readFileSync(path.join(root, 'manifest.json'), 'utf8'));
   const macChrome = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome';
   const output = path.join(os.tmpdir(), 'bitunix-extension-qa');
   fs.mkdirSync(output, { recursive: true });
@@ -17,13 +18,13 @@ async function main() {
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
     await page.setContent('<html><body style="background:#080e17;color:#b2c3d9;font:16px sans-serif;padding:35px"><h1>Trading workspace</h1><p>Isolated extension fixture — no exchange connection</p></body></html>');
-    await page.evaluate(data => {
+    await page.evaluate(({ data, version }) => {
       window.testPayload = data;
       window.messages = [];
       window.listeners = [];
       window.savedLayout = {};
       window.chrome = { runtime: {
-        getManifest: () => ({ version: '1.5.7' }),
+        getManifest: () => ({ version }),
         sendMessage: async message => {
           window.messages.push(message);
           if (['save-planning', 'track-entry', 'close-track', 'confirm-stop', 'place-stop'].includes(message.type)) return { ok: true };
@@ -37,7 +38,7 @@ async function main() {
       } } };
       const now = Math.floor(Date.now() / 1000);
       for (const row of Object.values(data.symbols)) { row.as_of = now; row.plan.expires_at = now + 900; }
-    }, fixture);
+    }, { data: fixture, version: manifest.version });
     // A slow worker must never leave only an empty header on screen.
     await page.evaluate(() => {
       window.originalSend = chrome.runtime.sendMessage;
@@ -55,7 +56,7 @@ async function main() {
     });
     await page.addStyleTag({ path: path.join(root, 'content.css') });
     await page.addScriptTag({ path: path.join(root, 'content.js') });
-    assert.equal(await page.locator('#bis-panel').getAttribute('data-bis-version'), '1.5.7');
+    assert.equal(await page.locator('#bis-panel').getAttribute('data-bis-version'), manifest.version);
     assert.equal(await page.locator('#bis-panel').evaluate(el => el.textContent.includes('OLD IMMOVABLE PANEL')), false);
     assert.match(await page.locator('#bis-status').textContent(), /Connecting/);
     await page.evaluate(() => {
@@ -252,6 +253,22 @@ async function main() {
     });
     await options.addScriptTag({ path: path.join(root, 'options.js') });
     assert.equal(await options.locator('#dashboardUrl').inputValue(), 'https://old.up.railway.app');
+    const freshOptions = await browser.newPage();
+    freshOptions.on('pageerror', error => errors.push(error.message));
+    await freshOptions.setContent(fs.readFileSync(path.join(root, 'options.html'), 'utf8').replace(/<script[^>]*><\/script>/g, ''));
+    await freshOptions.evaluate(() => {
+      window.saved = {};
+      window.chrome = {
+        storage: {
+          local: { get: async () => ({}), set: async value => { Object.assign(window.saved, value); } },
+          sync: { get: async () => ({}), remove: async () => {} },
+        },
+        runtime: { sendMessage: async () => ({ payload: { strategy: 'intraday', mode: 'alerts_only', status: { ready: true } } }) },
+      };
+    });
+    await freshOptions.addScriptTag({ path: path.join(root, 'options.js') });
+    assert.equal(await freshOptions.locator('#dashboardUrl').inputValue(), 'https://btcc-trading-bot-production.up.railway.app');
+    assert.equal(await freshOptions.locator('#password').inputValue(), '');
     await options.locator('#dashboardUrl').fill('https://new.up.railway.app');
     await options.locator('#password').fill('new');
     await options.locator('#save').click();
@@ -267,15 +284,15 @@ async function main() {
     const popup = await browser.newPage();
     popup.on('pageerror', error => errors.push(error.message));
     await popup.setContent(fs.readFileSync(path.join(root, 'popup.html'), 'utf8').replace(/<script[^>]*><\/script>/g, ''));
-    await popup.evaluate(() => {
+    await popup.evaluate(version => {
       window.chrome = { runtime: {
-        getManifest: () => ({ version: '1.5.7' }),
+        getManifest: () => ({ version }),
         sendMessage: async () => ({ payload: { error: 'Cannot reach the dashboard.' } }),
       } };
-    });
+    }, manifest.version);
     await popup.addScriptTag({ path: path.join(root, 'popup.js') });
     assert.match(await popup.locator('#status').textContent(), /Cannot reach/);
-    assert.equal(await popup.locator('#version').textContent(), 'Version 1.5.7');
+    assert.equal(await popup.locator('#version').textContent(), 'Version ' + manifest.version);
     const stalled = await browser.newPage();
     stalled.on('pageerror', error => errors.push(error.message));
     await stalled.clock.install();

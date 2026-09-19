@@ -9,6 +9,7 @@ const fixture = JSON.parse(fs.readFileSync(require('node:path').join(__dirname, 
 function worker({ response = { ok: true, json: async () => structuredClone(fixture) }, configured = true } = {}) {
   const messages = [], requests = [];
   const local = configured ? { dashboardUrl: 'https://example.up.railway.app', password: 'secret' } : {};
+  const flags = { reloaded: 0 };
   const chrome = {
     runtime: {
       id: 'extension-id',
@@ -16,7 +17,7 @@ function worker({ response = { ok: true, json: async () => structuredClone(fixtu
       onInstalled: { addListener() {} },
       openOptionsPage() {},
       getManifest: () => ({ version: manifest.version }),
-      reload() {},
+      reload() { flags.reloaded += 1; },
     },
     storage: { local: {
       get: async keys => {
@@ -34,7 +35,7 @@ function worker({ response = { ok: true, json: async () => structuredClone(fixtu
     fetch: async (url, options) => { requests.push({ url, options }); return typeof response === 'function' ? response() : response; },
   });
   vm.runInContext(source, context);
-  return { context, requests, local, message: messages[0] };
+  return { context, requests, local, message: messages[0], flags };
 }
 test('dashboard credentials are constrained to the allowed HTTPS origin', async () => {
   const { context } = worker();
@@ -44,10 +45,33 @@ test('dashboard credentials are constrained to the allowed HTTPS origin', async 
   assert.equal(vm.runInContext("validDashboardUrl('https://example.up.railway.app/')", context), 'https://example.up.railway.app');
 });
 test('missing configuration produces a useful status without making requests', async () => {
-  const { context, requests } = worker({ configured: false });
+  const { context, requests, local } = worker({ configured: false });
   const { payload } = await vm.runInContext('refresh()', context);
   assert.match(payload.error, /Open Settings/);
   assert.equal(requests.length, 0);
+  assert.equal(local.dashboardUrl, 'https://btcc-trading-bot-production.up.railway.app');
+  assert.equal(local.password, undefined);
+});
+test('saved password uses the production Railway URL when no URL is stored', async () => {
+  const { context, requests, local } = worker({ configured: false });
+  local.password = 'secret';
+  await vm.runInContext('settingsReady = loadSettings(); await settingsReady; refresh()', context);
+  const { payload } = await vm.runInContext('refresh()', context);
+  assert.equal(payload.error, undefined);
+  assert.equal(requests.at(-1).url, 'https://btcc-trading-bot-production.up.railway.app/api/signals');
+  assert.equal(local.dashboardUrl, 'https://btcc-trading-bot-production.up.railway.app');
+  assert.equal(local.password, 'secret');
+});
+test('a newer backend version reloads the overlay without dropping credentials', async () => {
+  const snapshot = structuredClone(fixture);
+  snapshot.extension_version = '99.0.0';
+  const { context, local, flags } = worker({
+    response: { ok: true, json: async () => structuredClone(snapshot) },
+  });
+  await vm.runInContext('refresh()', context);
+  assert.equal(flags.reloaded, 1);
+  assert.equal(local.dashboardUrl, 'https://example.up.railway.app');
+  assert.equal(local.password, 'secret');
 });
 test('connection failures are actionable, including non-JSON error pages', async () => {
   const cases = [

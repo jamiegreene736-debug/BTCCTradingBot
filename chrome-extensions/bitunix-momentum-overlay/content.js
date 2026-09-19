@@ -226,7 +226,7 @@
       for (const id of ['card', 'selection', 'planning', 'queue', 'trades', 'history', 'closed']) host.querySelector('#bis-' + id).replaceChildren();
       const handoffEmpty = host.querySelector('#bis-handoff');
       if (handoffEmpty) { handoffEmpty.hidden = true; handoffEmpty.replaceChildren(); }
-      host.querySelector('#bis-card').innerHTML = '<div class="bis-buttons"><button data-action="settings">Open Settings</button><button data-action="refresh">Retry connection</button></div><p class="bis-empty">Signals need a running intraday backend and its dashboard password. Use Save and test connection in Settings.</p>';
+      host.querySelector('#bis-card').innerHTML = '<div class="bis-buttons"><button data-action="settings">Open Settings</button><button data-action="refresh">Retry connection</button></div><p class="bis-empty">The Railway URL is already filled in. Enter the dashboard password once in Settings — it stays saved on this Chrome profile.</p>';
       return;
     }
     const settings = payload.settings;

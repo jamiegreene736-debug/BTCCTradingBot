@@ -30,7 +30,10 @@ A LaunchAgent pulls that clone every two minutes and the overlay reloads itself
 when the backend version changes. Opening this repo in Cursor, starting the
 dashboard on the Mac, or running `scripts/update_overlay.sh --install-only`
 installs that agent once. After that, deploys do not need a manual pull or
-Chrome Reload.
+Chrome Reload. Settings prefill the production Railway URL
+(`https://btcc-trading-bot-production.up.railway.app`). Enter the dashboard
+password once; it stays in Chrome local storage across those reloads and is
+never committed.
 Drag the title to move the panel, the bottom-right corner to resize it, or
 double-click the header / use ⤢ to restore the default position. The layout is
 stored in local Chrome storage.
