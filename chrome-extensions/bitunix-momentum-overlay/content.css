@@ -1,9 +1,10 @@
-#bis-panel{all:initial;position:fixed;top:76px;right:18px;width:410px;max-width:calc(100vw - 24px);max-height:calc(100vh - 90px);z-index:2147483646;background:#101823;color:#e8eef6;border:1px solid #344254;border-radius:16px;box-shadow:0 14px 65px #0009;font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color-scheme:dark;overflow:hidden;display:flex;flex-direction:column;pointer-events:auto}
+#bis-panel{all:initial;position:fixed;top:76px;right:18px;width:410px;max-width:calc(100vw - 24px);max-height:calc(100vh - 90px);z-index:2147483646;background:#101823;color:#e8eef6;border:1px solid #344254;border-radius:16px;box-shadow:0 14px 65px #0009;font:13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;color-scheme:dark;overflow:visible;display:flex;flex-direction:column;pointer-events:none}
 #bis-panel *{box-sizing:border-box}
-#bis-panel header{display:flex;align-items:center;justify-content:space-between;padding:16px 18px;border-bottom:1px solid #2a3747;background:#151f2d;cursor:grab;user-select:none;touch-action:none;flex:0 0 auto}
-#bis-panel header strong{display:block;font-size:21px;letter-spacing:-.5px}
+#bis-panel header{display:flex;align-items:center;justify-content:space-between;padding:16px 18px;border-bottom:1px solid #2a3747;background:#151f2d;cursor:default;user-select:none;touch-action:none;flex:0 0 auto;pointer-events:none}
+#bis-panel .bis-grip,#bis-panel header strong,#bis-panel .bis-actions,#bis-panel #bis-body > *,#bis-panel #bis-form,#bis-panel .bis-resize{pointer-events:auto}
+#bis-panel header strong{display:block;font-size:21px;letter-spacing:-.5px;cursor:grab}
 #bis-panel .bis-drag{display:flex;align-items:center;gap:10px;min-width:0;flex:1}
-#bis-panel .bis-grip{flex:0 0 12px;width:12px;height:18px;border-radius:3px;background:radial-gradient(#8ea3ba 1.3px,transparent 1.4px) 0 0/6px 6px;opacity:.85}
+#bis-panel .bis-grip{flex:0 0 12px;width:12px;height:18px;border-radius:3px;background:radial-gradient(#8ea3ba 1.3px,transparent 1.4px) 0 0/6px 6px;opacity:.85;cursor:grab}
 #bis-panel .bis-eyebrow{font-size:10px;letter-spacing:1.8px;color:#94a9bf;font-weight:700}
 #bis-panel .bis-actions{display:flex;gap:6px}
 #bis-panel button,#bis-panel select,#bis-panel input{font:inherit;color:#e8eef6;background:#1d2a3b;border:1px solid #40526a;border-radius:7px;padding:7px 10px;cursor:pointer}

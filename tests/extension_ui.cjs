@@ -23,7 +23,7 @@ async function main() {
       window.listeners = [];
       window.savedLayout = {};
       window.chrome = { runtime: {
-        getManifest: () => ({ version: '1.5.3' }),
+        getManifest: () => ({ version: '1.5.4' }),
         sendMessage: async message => {
           window.messages.push(message);
           if (['save-planning', 'track-entry', 'close-track', 'confirm-stop', 'place-stop'].includes(message.type)) return { ok: true };
@@ -55,7 +55,7 @@ async function main() {
     });
     await page.addStyleTag({ path: path.join(root, 'content.css') });
     await page.addScriptTag({ path: path.join(root, 'content.js') });
-    assert.equal(await page.locator('#bis-panel').getAttribute('data-bis-version'), '1.5.3');
+    assert.equal(await page.locator('#bis-panel').getAttribute('data-bis-version'), '1.5.4');
     assert.equal(await page.locator('#bis-panel').evaluate(el => el.textContent.includes('OLD IMMOVABLE PANEL')), false);
     assert.match(await page.locator('#bis-status').textContent(), /Connecting/);
     await page.evaluate(() => {
@@ -94,6 +94,19 @@ async function main() {
     });
     assert.match(await page.locator('#bis-handoff').textContent(), /Switching to ETHUSDT/);
     assert.match(await page.locator('#bis-card').textContent(), /Shown /);
+    assert.equal(await page.locator('#bis-panel').evaluate(el => getComputedStyle(el).pointerEvents), 'none');
+    assert.equal(await page.locator('#bis-panel header').evaluate(el => getComputedStyle(el).pointerEvents), 'none');
+    const headerBox = await page.locator('#bis-panel header').boundingBox();
+    await page.evaluate(({ x, y }) => {
+      const button = document.createElement('button');
+      button.id = 'under-header';
+      button.textContent = '1-2 hours short';
+      button.style.cssText = `position:fixed;left:${x + 6}px;top:${y + 8}px;z-index:1;padding:4px 8px`;
+      button.addEventListener('click', () => { window.underHeaderClicked = true; });
+      document.body.appendChild(button);
+    }, headerBox);
+    await page.locator('#under-header').click();
+    assert.equal(await page.evaluate(() => window.underHeaderClicked), true);
     const beforeMove = await page.locator('#bis-panel').boundingBox();
     const title = await page.locator('#bis-panel header strong').boundingBox();
     await page.mouse.move(title.x + 24, title.y + 8);
@@ -263,13 +276,13 @@ async function main() {
     await popup.setContent(fs.readFileSync(path.join(root, 'popup.html'), 'utf8').replace(/<script[^>]*><\/script>/g, ''));
     await popup.evaluate(() => {
       window.chrome = { runtime: {
-        getManifest: () => ({ version: '1.5.3' }),
+        getManifest: () => ({ version: '1.5.4' }),
         sendMessage: async () => ({ payload: { error: 'Cannot reach the dashboard.' } }),
       } };
     });
     await popup.addScriptTag({ path: path.join(root, 'popup.js') });
     assert.match(await popup.locator('#status').textContent(), /Cannot reach/);
-    assert.equal(await popup.locator('#version').textContent(), 'Version 1.5.3');
+    assert.equal(await popup.locator('#version').textContent(), 'Version 1.5.4');
     const stalled = await browser.newPage();
     stalled.on('pageerror', error => errors.push(error.message));
     await stalled.clock.install();
