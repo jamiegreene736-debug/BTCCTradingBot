@@ -55,7 +55,7 @@ test('missing configuration produces a useful status without making requests', a
 test('saved password uses the production Railway URL when no URL is stored', async () => {
   const { context, requests, local } = worker({ configured: false });
   local.password = 'secret';
-  await vm.runInContext('settingsReady = loadSettings(); await settingsReady; refresh()', context);
+  await vm.runInContext('loadSettings()', context);
   const { payload } = await vm.runInContext('refresh()', context);
   assert.equal(payload.error, undefined);
   assert.equal(requests.at(-1).url, 'https://btcc-trading-bot-production.up.railway.app/api/signals');
