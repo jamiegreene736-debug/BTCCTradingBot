@@ -30,7 +30,7 @@ from .intraday import (
     upsert_check,
     volatility,
 )
-from .signal_config import SignalsCfg, SignalSettings
+from .signal_config import SignalsCfg, SignalSettings, apply_profile
 from .signal_store import SignalStore, TrackedTrade, evaluate_exit
 from .symbol_meta import (
     parse_symbol_meta,
@@ -787,7 +787,11 @@ class SignalScanner:
                 "Tracked portfolio risk or same-direction limit reached"
             ]
 
+    def _profile_cfg(self) -> SignalsCfg:
+        return apply_profile(self.cfg, self.store.settings())
+
     def _update_exits(self, decisions: dict[str, Decision], now: int) -> None:
+        cfg = self._profile_cfg()
         for trade in self.store.trades(active_only=True):
             previous = trade.state
             evaluate_exit(
@@ -795,7 +799,7 @@ class SignalScanner:
                 decisions.get(trade.symbol),
                 self.frames.get(trade.symbol, {}).get("15m", []),
                 now,
-                self.cfg,
+                cfg,
             )
             self.store.save_trade(trade)
             if trade.state != previous and (
@@ -1193,7 +1197,7 @@ class SignalScanner:
                 self.decisions.get(trade.symbol),
                 self.frames.get(trade.symbol, {}).get("15m", []),
                 int(time.time()),
-                self.cfg,
+                self._profile_cfg(),
             )
             self.store.save_trade(trade)
             return trade
@@ -1419,7 +1423,7 @@ class SignalScanner:
                 decision,
                 self.frames.get(trade.symbol, {}).get("15m", []),
                 int(time.time()),
-                self.cfg,
+                self._profile_cfg(),
             )
             self.store.save_trade(trade)
             return trade

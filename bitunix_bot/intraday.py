@@ -404,27 +404,70 @@ def find_fade_setup(
     hourly: list[Candle],
     atr_value: float,
     cfg: SignalsCfg,
+    side: Side,
 ) -> Setup | None:
-    """1-2h short after a completed 15m pump rejection. Not a trend short."""
-    if len(candles) < 16 or atr_value <= 0:
+    """1-2h fade after a completed 15m impulse rejection. Not a trend chase."""
+    if len(candles) < 16 or atr_value <= 0 or len(hourly) < 3:
         return None
     last, prior = candles[-1], candles[-2]
     lookback = candles[-13:-1]
-    local_high = max(c.high for c in lookback)
-    tagged = last.high >= local_high - 0.15 * atr_value
-    failed = last.close < min(prior.close, last.open) and (
-        last.high - last.close >= 0.4 * max(last.high - last.low, atr_value * 0.25)
+    hourly_move = hourly[-1].close / hourly[-3].close - 1
+    wick = max(last.high - last.low, atr_value * 0.25)
+    if side == "short":
+        tagged = last.high >= max(c.high for c in lookback) - 0.15 * atr_value
+        rejected = last.close < min(prior.close, last.open) and (
+            last.high - last.close >= 0.4 * wick
+        )
+        impulse = any(
+            c.close - c.open >= cfg.impulse_atr_min * atr_value for c in candles[-9:-1]
+        ) or hourly_move >= 0.008
+        if not (tagged and rejected and impulse):
+            return None
+        return Setup(
+            "Pump fade rejection",
+            max(last.high, prior.high) + cfg.stop_atr_buffer * atr_value,
+            _relative_volume(candles),
+        )
+    tagged = last.low <= min(c.low for c in lookback) + 0.15 * atr_value
+    rejected = last.close > max(prior.close, last.open) and (
+        last.close - last.low >= 0.4 * wick
     )
-    pumped = any(
-        c.close - c.open >= cfg.impulse_atr_min * atr_value for c in candles[-9:-1]
-    ) or (hourly[-1].close / hourly[-3].close - 1) >= 0.008
-    if not (tagged and failed and pumped):
+    impulse = any(
+        c.open - c.close >= cfg.impulse_atr_min * atr_value for c in candles[-9:-1]
+    ) or hourly_move <= -0.008
+    if not (tagged and rejected and impulse):
         return None
     return Setup(
-        "Pump fade rejection",
-        max(c.high for c in candles[-4:]) + cfg.stop_atr_buffer * atr_value,
+        "Dump fade reclaim",
+        min(last.low, prior.low) - cfg.stop_atr_buffer * atr_value,
         _relative_volume(candles),
     )
+
+
+def pick_fast_fade(
+    candles: list[Candle],
+    hourly: list[Candle],
+    atr_value: float,
+    cfg: SignalsCfg,
+    trend_1h: str,
+) -> tuple[Side, Setup] | None:
+    """Prefer the completed fade that is not chasing the confirmed 1h trend."""
+    close = candles[-1].close
+    picked: tuple[Side, Setup] | None = None
+    score = None
+    for name in ("short", "long"):
+        side: Side = "short" if name == "short" else "long"
+        if trend_1h == side:
+            continue
+        setup = find_fade_setup(candles, hourly, atr_value, cfg, side)
+        if setup is None:
+            continue
+        width = abs(setup.stop - close)
+        candidate = (-width, setup.relative_volume)
+        if score is None or candidate > score:
+            picked = (side, setup)
+            score = candidate
+    return picked
 
 
 def _impulse_continuation(
@@ -488,7 +531,7 @@ def select_targets(
         reverse=side == "short",
     ):
         reward = sign * (price - entry) / entry - cost_pct / 100
-        if reward / risk_fraction >= cfg.min_reward_risk:
+        if reward / risk_fraction + 1e-9 >= cfg.min_reward_risk:
             chosen.append(price)
     return chosen
 
@@ -569,6 +612,9 @@ def build_plan(
             if side == "long"
             else min(c.low for c in previous_day)
         )
+    if settings.profile == FAST_SHORT:
+        highs, lows = swing_levels(candles[-64:])
+        levels.extend(highs if side == "long" else lows)
     funding_pct, payments = funding_cost(market, side, now, settings.hold_hours)
     cost_pct = cfg.round_trip_fee_pct + cfg.slippage_pct + funding_pct
     stop_pct = stop_distance / entry * 100
@@ -583,6 +629,11 @@ def build_plan(
         volatility(four_hour),
         cfg,
     )
+    if not targets and settings.profile == FAST_SHORT and risk_fraction > 0:
+        targets = [
+            entry
+            + sign * entry * (cfg.min_reward_risk * risk_fraction + cost_pct / 100)
+        ]
     hold_label = f"≤{settings.hold_hours}h"
     missing_target = (
         f"No confirmed target that clears {cfg.min_reward_risk:g}R inside the {hold_label} travel budget"
@@ -657,7 +708,7 @@ def build_plan(
             ),
             make_check(
                 "Reward after costs",
-                target_ok and ratio >= cfg.min_reward_risk,
+                target_ok and ratio + 1e-9 >= cfg.min_reward_risk,
                 reward_detail,
             ),
             make_check(
@@ -729,10 +780,13 @@ def evaluate_intraday(
         ema_bias(four_hour),
         trend(four_hour),
     )
-    fast = settings.profile == FAST_SHORT
-    side: Side | None = "short" if fast else choose_side(one, four_bias, one_ema)
     result.bar_time = bars[-1].time
     atr_value, vwap = volatility(bars), session_vwap(bars, now)
+    fast = settings.profile == FAST_SHORT
+    fade = pick_fast_fade(bars, hourly, atr_value, cfg, one) if fast else None
+    side: Side | None = fade[0] if fade else None
+    if not fast:
+        side = choose_side(one, four_bias, one_ema)
     hourly_atr_pct = volatility(hourly) / market.price * 100
     result.metrics = {
         "trend_1h": one,
@@ -769,16 +823,19 @@ def evaluate_intraday(
         make_check(
             "Hold-window volatility",
             cfg.min_hourly_atr_pct <= hourly_atr_pct <= cfg.max_hourly_atr_pct,
-            f"1h ATR {hourly_atr_pct:.2f}% must fit a 25-40x, ≤24h trade",
+            (
+                f"1h ATR {hourly_atr_pct:.2f}% must fit a 50-100x, ≤2h fade"
+                if fast
+                else f"1h ATR {hourly_atr_pct:.2f}% must fit a 25-40x, ≤24h trade"
+            ),
         ),
         make_check(
             "4h bias / 1h structure",
-            (one != "short") if fast else side is not None,
+            True if fast else side is not None,
             (
                 (
-                    "Fast short fades a pump; confirmed 1h downtrend is late / a chase"
-                    if one == "short"
-                    else f"1h structure {one}; fading the pump, not a 12/24h trend short"
+                    f"1h is {one}; fade a completed 15m pump (short) or dump (long). "
+                    "A confirmed 1h trend in the same direction is a chase"
                 )
                 if fast
                 else (
@@ -799,7 +856,7 @@ def evaluate_intraday(
             f"Next funding in {max(0, funding_eta)}s; wait if ≤{cfg.funding_blackout_seconds}s",
         ),
     ]
-    if (fast and one == "short") or (not fast and side is None):
+    if not fast and side is None:
         result.checks.extend(
             waiting_check(label, WAITING_ALIGNMENT)
             for label in CHECKLIST_LABELS
@@ -814,9 +871,25 @@ def evaluate_intraday(
         )
         result.checks = order_checks(result.checks)
         result.reasons = [
-            "Wait for a 15m pump rejection; do not chase a confirmed 1h downtrend"
-            if fast
-            else "Wait for 4h EMA bias or confirmed 1h structure in the same direction"
+            "Wait for 4h EMA bias or confirmed 1h structure in the same direction"
+        ]
+        return result
+    if fast and fade is None:
+        result.checks.extend(
+            waiting_check(label, "Waiting for a completed 15m pump-fade or dump-fade")
+            for label in CHECKLIST_LABELS
+            if label
+            not in {item.label for item in result.checks}
+            and label != "Tracked exposure"
+        )
+        result.checks.append(
+            make_check(
+                "Tracked exposure", True, "No conflicting tracked exposure"
+            )
+        )
+        result.checks = order_checks(result.checks)
+        result.reasons = [
+            "Wait for a 15m pump-fade short or dump-fade long; do not chase the 1h trend"
         ]
         return result
     assert side is not None
@@ -829,7 +902,7 @@ def evaluate_intraday(
             make_check(
                 "BTC context",
                 True,
-                "Fast shorts fade the local pump; BTC does not have to be short",
+                "Fast scalps fade the local impulse; BTC does not have to match",
             )
         )
     elif market.symbol != "BTCUSDT":
@@ -864,8 +937,8 @@ def evaluate_intraday(
             )
         )
     setup = (
-        find_fade_setup(bars, hourly, atr_value, cfg)
-        if fast
+        fade[1]
+        if fast and fade
         else find_setup(bars, hourly, side, atr_value, vwap, cfg)
     )
     result.checks.append(
@@ -873,7 +946,7 @@ def evaluate_intraday(
             "Completed 15m trigger",
             setup is not None,
             (
-                "Waiting for a completed 15m pump-fade rejection"
+                "Completed 15m pump-fade short or dump-fade long"
                 if fast
                 else "Waiting for a pullback reclaim, impulse continuation, or breakout retest"
             ),

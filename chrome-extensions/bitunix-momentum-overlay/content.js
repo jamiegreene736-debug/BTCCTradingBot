@@ -245,8 +245,8 @@
     if (staleOverlay) status.className = 'bis-notice';
     const profile = settings.profile === 'fast_short' ? 'fast_short' : 'swing';
     const title = host.querySelector('header strong');
-    if (title) title.textContent = profile === 'fast_short' ? 'Fast short signals' : 'Trade signals';
-    host.querySelector('#bis-planning').innerHTML = `<label class="bis-profile"><small>Strategy</small><select id="bis-profile"><option value="swing" ${profile === 'swing' ? 'selected' : ''}>Swing · 12–24h · long/short</option><option value="fast_short" ${profile === 'fast_short' ? 'selected' : ''}>Fast short · 1–2h · up to 100x</option></select></label><div><small>Risk / trade</small><b>${fixed(settings.risk_pct)}%</b></div><div><small>Leverage / hold</small><b>${settings.leverage}x · ≤${settings.hold_hours}h</b></div><button data-action="planning">Edit</button>`;
+    if (title) title.textContent = profile === 'fast_short' ? 'Fast scalp signals' : 'Trade signals';
+    host.querySelector('#bis-planning').innerHTML = `<label class="bis-profile"><small>Strategy</small><select id="bis-profile"><option value="swing" ${profile === 'swing' ? 'selected' : ''}>Swing · 12–24h · long/short</option><option value="fast_short" ${profile === 'fast_short' ? 'selected' : ''}>Fast scalp · 1–2h · long/short · up to 100x</option></select></label><div><small>Risk / trade</small><b>${fixed(settings.risk_pct)}%</b></div><div><small>Leverage / hold</small><b>${settings.leverage}x · ≤${settings.hold_hours}h</b></div><button data-action="planning">Edit</button>`;
     const rows = Object.values(payload.symbols || {});
     if (selected && !payload.symbols[selected]) selected = '';
     const symbol = selected && payload.symbols[selected] ? selected : payload.best_symbol;
@@ -400,7 +400,7 @@
         planning_equity: Number(s.planning_equity),
         risk_pct: Number(s.risk_pct),
         leverage: nextProfile === 'fast_short' ? (s.profile === 'fast_short' ? Number(s.leverage) : 100) : (s.profile === 'swing' ? Number(s.leverage) : 25),
-        hold_hours: nextProfile === 'fast_short' ? (s.profile === 'fast_short' ? Number(s.hold_hours) : 2) : (s.profile === 'swing' ? Number(s.hold_hours) : 24),
+        hold_hours: nextProfile === 'fast_short' ? (s.profile === 'fast_short' ? Number(s.hold_hours) : 1) : (s.profile === 'swing' ? Number(s.hold_hours) : 24),
       };
       send('save-planning', body).then(response => {
         if (!response?.ok) throw new Error(response?.error || 'Could not switch strategy.');
@@ -438,9 +438,9 @@
         ? `<option value="1" ${s.hold_hours === 1 ? 'selected' : ''}>1 hour</option><option value="2" ${s.hold_hours === 2 ? 'selected' : ''}>2 hours</option>`
         : `<option value="12" ${s.hold_hours === 12 ? 'selected' : ''}>12 hours</option><option value="24" ${s.hold_hours === 24 ? 'selected' : ''}>24 hours</option>`;
       const copy = profile === 'fast_short'
-        ? 'Fast short looks for a completed 15m pump-fade rejection and plans a 1-2h short. 100x liquidates on about a 1% wick. Leverage never tightens the stop; if 100x would liquidate before that fade stop, the card stays WATCH.'
+        ? 'Fast scalp fades a completed 15m pump (short) or dump (long) and plans a 1-2h hold. It does not chase a confirmed 1h trend. 100x liquidates on about a 1% wick. Leverage never tightens the stop; if 100x would liquidate before that fade stop, the card stays WATCH.'
         : 'Swing plans isolated 25-40x longs or shorts for a 12h or 24h hold. Leverage never tightens the stop; if 40x would liquidate before the structural stop, the entry stays blocked.';
-      openForm('Planning settings', `<p>These are planning values, not your exchange balance. Existing tracked plans remain unchanged. ${copy}</p><label>Strategy<select name="profile"><option value="swing" ${profile === 'swing' ? 'selected' : ''}>Swing · 12–24h · long/short</option><option value="fast_short" ${profile === 'fast_short' ? 'selected' : ''}>Fast short · 1–2h · up to 100x</option></select></label><label>Planning equity (USDT)<input name="planning_equity" type="number" min="10" max="100000000" step="0.01" value="${s.planning_equity}" required></label><label>Risk per trade (%)<input name="risk_pct" type="number" min="0.01" max="2" step="0.01" value="${s.risk_pct}" required></label><label>Leverage (isolated)<input name="leverage" type="number" min="1" max="${profile === 'fast_short' ? 100 : 40}" step="1" value="${s.leverage}" required></label><label>Maximum hold<select name="hold_hours">${holdOpts}</select></label>`, 'Save settings', data => send('save-planning', {
+      openForm('Planning settings', `<p>These are planning values, not your exchange balance. Existing tracked plans remain unchanged. ${copy}</p><label>Strategy<select name="profile"><option value="swing" ${profile === 'swing' ? 'selected' : ''}>Swing · 12–24h · long/short</option><option value="fast_short" ${profile === 'fast_short' ? 'selected' : ''}>Fast scalp · 1–2h · long/short · up to 100x</option></select></label><label>Planning equity (USDT)<input name="planning_equity" type="number" min="10" max="100000000" step="0.01" value="${s.planning_equity}" required></label><label>Risk per trade (%)<input name="risk_pct" type="number" min="0.01" max="2" step="0.01" value="${s.risk_pct}" required></label><label>Leverage (isolated)<input name="leverage" type="number" min="1" max="${profile === 'fast_short' ? 100 : 40}" step="1" value="${s.leverage}" required></label><label>Maximum hold<select name="hold_hours">${holdOpts}</select></label>`, 'Save settings', data => send('save-planning', {
         profile: String(data.get('profile') || 'swing'),
         planning_equity: Number(data.get('planning_equity')),
         risk_pct: Number(data.get('risk_pct')),
@@ -452,7 +452,7 @@
         const hold = host.querySelector('#bis-form [name="hold_hours"]');
         const lev = host.querySelector('#bis-form [name="leverage"]');
         if (hold) hold.innerHTML = fast
-          ? '<option value="1">1 hour</option><option value="2" selected>2 hours</option>'
+          ? '<option value="1" selected>1 hour</option><option value="2">2 hours</option>'
           : '<option value="12">12 hours</option><option value="24" selected>24 hours</option>';
         if (lev) {
           lev.max = fast ? 100 : 40;

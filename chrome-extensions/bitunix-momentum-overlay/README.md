@@ -1,4 +1,4 @@
-# Bitunix Intraday Signals — Chrome extension v1.5.8
+# Bitunix Intraday Signals — Chrome extension v1.5.9
 
 Long and short entry, hold, review and exit alerts for trades lasting up to
 12–24 hours. The backend computes the strategy; this extension displays it.
@@ -13,16 +13,16 @@ No extension action sends an exchange order or modifies a position.
 4. Open Bitunix. After the Mac LaunchAgent is installed, later deploys pull
    this folder and the overlay reloads itself — no Chrome Reload click.
 5. Edit the displayed planning equity, risk, leverage and maximum holding time.
-   The scanner is built for isolated 25-40x and a 12h or 24h hold. Leverage
-   never tightens the stop.
+   Swing is isolated 25-40x and a 12h or 24h hold. Fast scalp is 1-2h longs or
+   shorts up to 100x. Leverage never tightens the stop.
 
 ## If the panel is empty
 
 - **Pump Fade Radar** or version **0.3.16** means old files or an old tab are
   still loaded. Wait for auto-sync, or click **Reload** once in
   `chrome://extensions` if the watcher is not installed yet. The popup must
-  say **Bitunix Intraday Signals**, version **1.5.8**. The panel header must
-  show **v1.5.8**, a drag grip, and ⤢. Drag the title to move; drag the
+  say **Bitunix Intraday Signals**, version **1.5.9**. The panel header must
+  show **v1.5.9**, a drag grip, and ⤢. Drag the title to move; drag the
   bottom-right corner to resize.
 - Use the complete extension folder from one release. Mixing the old manifest
   and panel with the new worker breaks message delivery and omits its alarms permission.
@@ -39,9 +39,9 @@ bottom-right corner to resize, or double-click the header / use ⤢ to restore
 the default spot. Reloading the extension replaces any leftover immovable
 panel from an older script. Size and position persist in local Chrome storage.
 
-The strategy dropdown switches Swing (12–24h long/short) and Fast short (1–2h
-pump-fade shorts, up to 100x). 100x still requires the fade stop to fit inside
-the estimated liquidation buffer.
+The strategy dropdown switches Swing (12–24h long/short) and Fast scalp (1–2h
+pump-fade shorts or dump-fade longs, up to 100x). 100x still requires the fade
+stop to fit inside the estimated liquidation buffer.
 
 The top-five queue lists the current ranked markets with the time each state
 started. A countdown warning appears before the featured card switches to the

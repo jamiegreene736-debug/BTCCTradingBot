@@ -81,6 +81,10 @@ def exchange_stop_ok(trade: TrackedTrade) -> bool:
     return trade.kind == "paper" or trade.exchange_stop_confirmed
 
 
+def _is_fast_hold(trade: TrackedTrade) -> bool:
+    return trade.plan.hold_hours in (1, 2)
+
+
 def _apply_live_suggestion(trade: TrackedTrade) -> None:
     side = trade.plan.side.upper()
     passed = sum(1 for item in trade.checks if item.passed)
@@ -142,7 +146,10 @@ def evaluate_exit(
         if live is not None and initial_risk > 0
         else None
     )
-    structure_reversed = trend_1h == ("short" if side == "long" else "long")
+    fast = _is_fast_hold(trade)
+    structure_reversed = (not fast) and trend_1h == (
+        "short" if side == "long" else "long"
+    )
     stop_hit = False
     target_hit = False
     stale = False
@@ -278,17 +285,27 @@ def evaluate_exit(
             ),
             hold_check(
                 "1h structure",
-                trend_1h == side,
+                True if fast else trend_1h == side,
                 (
-                    f"Completed 1h structure is {trend_1h}"
-                    if trend_1h
-                    else "1h structure unavailable"
+                    "1h structure is not a hold gate on a 1-2h fade"
+                    if fast
+                    else (
+                        f"Completed 1h structure is {trend_1h}"
+                        if trend_1h
+                        else "1h structure unavailable"
+                    )
                 ),
             ),
             hold_check(
                 "4h bias",
-                trend_4h == side,
-                f"4h EMA bias is {trend_4h}" if trend_4h else "4h bias unavailable",
+                True if fast else trend_4h == side,
+                (
+                    "4h bias is not a hold gate on a 1-2h fade"
+                    if fast
+                    else (
+                        f"4h EMA bias is {trend_4h}" if trend_4h else "4h bias unavailable"
+                    )
+                ),
             ),
             hold_check(
                 "Progress vs review window",
@@ -301,11 +318,17 @@ def evaluate_exit(
             ),
             hold_check(
                 "Session VWAP",
-                live is not None and vwap is not None and sign * (live - vwap) >= 0,
+                True
+                if fast
+                else live is not None and vwap is not None and sign * (live - vwap) >= 0,
                 (
-                    f"Price {live:.5g} vs session VWAP {vwap:.5g}; hold wants the {side} side"
-                    if live is not None and vwap is not None
-                    else "Session VWAP unavailable"
+                    "Session VWAP is not a hold gate on a 1-2h fade"
+                    if fast
+                    else (
+                        f"Price {live:.5g} vs session VWAP {vwap:.5g}; hold wants the {side} side"
+                        if live is not None and vwap is not None
+                        else "Session VWAP unavailable"
+                    )
                 ),
             ),
             hold_check(

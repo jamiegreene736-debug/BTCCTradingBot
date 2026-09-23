@@ -118,6 +118,16 @@ a completed 15m pump-fade rejection. It does not require a 4h/1h downtrend.
 100x still fails the isolated-margin buffer when the fade stop is too wide.
 This is not a measured edge.
 
+## Fast scalp — 1.5.9
+
+Fast short is now a two-sided scalp under the same `fast_short` setting key.
+It fades a completed 15m pump (short) or dump (long), skips a confirmed 1h
+trend in that direction, uses a measured 1.5R target when no nearby swing
+clears the hold budget, and exits on a 1h stale clock or −0.4R hope-cut
+instead of waiting for 1h/4h structure to flip. Switching the dropdown fills
+100x and a 1h hold. 100x still fails when the fade stop is wider than the
+isolated-margin buffer.
+
 ## Signal queue, timestamps and handoff
 
 The snapshot now includes a ranked `queue` of up to five markets, `state_since`

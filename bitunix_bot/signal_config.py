@@ -38,9 +38,9 @@ class SignalSettings:
             raise ValueError("Maximum holding time must be a whole number of hours")
         if self.profile == FAST_SHORT:
             if not 1 <= self.leverage <= 100:
-                raise ValueError("Fast-short leverage must be a whole number from 1 to 100")
+                raise ValueError("Fast-scalp leverage must be a whole number from 1 to 100")
             if self.hold_hours not in (1, 2):
-                raise ValueError("Fast-short hold must be 1 or 2 hours")
+                raise ValueError("Fast-scalp hold must be 1 or 2 hours")
         else:
             if not 1 <= self.leverage <= 40:
                 raise ValueError("Leverage must be a whole number from 1 to 40")
@@ -163,7 +163,7 @@ class SignalsCfg:
 
 
 def apply_profile(cfg: SignalsCfg, settings: SignalSettings) -> SignalsCfg:
-    """Tighten travel, stops and vol gates for a 1-2h 50-100x fade short."""
+    """Tighten travel, stops, exits and vol gates for a 1-2h 50-100x fade."""
     if settings.profile != FAST_SHORT:
         return cfg
     return replace(
@@ -180,4 +180,7 @@ def apply_profile(cfg: SignalsCfg, settings: SignalSettings) -> SignalsCfg:
         relative_volume_min=1.1,
         stale_trade_hours=1,
         stale_progress_r=0.15,
+        hope_exit_r=0.40,
+        breakeven_at_r=0.60,
+        trailing_activate_r=0.80,
     )

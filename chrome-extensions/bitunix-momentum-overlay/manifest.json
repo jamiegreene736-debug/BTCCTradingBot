@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Bitunix Intraday Signals",
-  "version": "1.5.8",
-  "description": "Long and short entry, hold and exit alerts for intraday trades up to 12–24 hours. No automatic orders.",
+  "version": "1.5.9",
+  "description": "Long and short entry, hold and exit alerts. Swing 12–24h or Fast scalp 1–2h up to 100x. No automatic orders.",
   "permissions": ["storage", "tabs", "alarms"],
   "host_permissions": [
     "https://*.bitunix.com/*",

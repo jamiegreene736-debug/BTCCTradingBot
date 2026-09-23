@@ -28,11 +28,12 @@ from bitunix_bot.intraday import (
     find_setup,
     funding_cost,
     make_check,
+    pick_fast_fade,
     select_targets,
     trend,
     waiting_check,
 )
-from bitunix_bot.signal_config import FAST_SHORT, SignalsCfg, SignalSettings
+from bitunix_bot.signal_config import FAST_SHORT, SignalsCfg, SignalSettings, apply_profile
 from bitunix_bot.signal_scanner import SignalScanner, parse_open_position
 from bitunix_bot.signal_store import (
     HOLD_CHECK_LABELS,
@@ -840,9 +841,9 @@ def fade_market():
 def test_fast_short_fade_setup_and_does_not_chase_1h_downtrend():
     market, frames = fade_market()
     atr_value = 0.45
-    setup = find_fade_setup(frames["15m"], frames["1h"], atr_value, SignalsCfg())
+    setup = find_fade_setup(frames["15m"], frames["1h"], atr_value, SignalsCfg(), "short")
     assert setup is not None and setup.name == "Pump fade rejection"
-    settings = SignalSettings(profile=FAST_SHORT, leverage=50, hold_hours=2)
+    settings = SignalSettings(profile=FAST_SHORT, leverage=50, hold_hours=1)
     decision = evaluate_intraday(
         market, frames, None, settings, SignalsCfg(), NOW
     )
@@ -851,6 +852,7 @@ def test_fast_short_fade_setup_and_does_not_chase_1h_downtrend():
     assert decision.state in ("ENTER_SHORT", "WATCH_SHORT"), decision.reasons
     if decision.state == "WATCH_SHORT":
         assert any(not item.passed for item in decision.checks)
+    assert decision.plan is not None
     chased = evaluate_intraday(
         market,
         {**frames, "1h": market_frames("short")[1]["1h"]},
@@ -859,10 +861,99 @@ def test_fast_short_fade_setup_and_does_not_chase_1h_downtrend():
         SignalsCfg(),
         NOW,
     )
-    assert not chased.state.startswith("ENTER")
-    assert "chase" in chased.reasons[0].lower() or any(
-        "chase" in item.detail.lower() for item in chased.checks
+    assert chased.side != "short" or not chased.state.startswith("ENTER")
+    assert chased.setup != "Pump fade rejection"
+
+
+def dump_market():
+    market, frames = market_frames("short")
+    bars = frames["15m"]
+    bars[-3] = replace(bars[-3], open=102.2, high=102.35, low=100.4, close=100.5, volume=300)
+    bars[-2] = replace(bars[-2], open=100.5, high=100.8, low=100.3, close=100.6, volume=180)
+    bars[-1] = replace(
+        bars[-1], open=100.6, high=101.35, low=100.25, close=101.2, volume=220
     )
+    price = bars[-1].close
+    market = replace(market, price=price, mark=price, bid=price - 0.005, ask=price + 0.005)
+    return market, frames
+
+
+def test_fast_scalp_dump_fade_long_and_does_not_chase_1h_uptrend():
+    market, frames = dump_market()
+    atr_value = 0.45
+    setup = find_fade_setup(frames["15m"], frames["1h"], atr_value, SignalsCfg(), "long")
+    assert setup is not None and setup.name == "Dump fade reclaim"
+    settings = SignalSettings(profile=FAST_SHORT, leverage=50, hold_hours=1)
+    decision = evaluate_intraday(
+        market, frames, None, settings, SignalsCfg(), NOW
+    )
+    assert decision.side == "long"
+    assert decision.setup == "Dump fade reclaim"
+    assert decision.state in ("ENTER_LONG", "WATCH_LONG"), decision.reasons
+    assert decision.plan is not None
+    chased = evaluate_intraday(
+        market,
+        {**frames, "1h": market_frames("long")[1]["1h"]},
+        None,
+        settings,
+        SignalsCfg(),
+        NOW,
+    )
+    assert chased.side != "long" or not chased.state.startswith("ENTER")
+    assert chased.setup != "Dump fade reclaim"
+
+
+def test_fast_scalp_picks_the_fade_that_is_not_the_1h_trend():
+    _, frames = fade_market()
+    picked = pick_fast_fade(frames["15m"], frames["1h"], 0.45, SignalsCfg(), "long")
+    assert picked is not None and picked[0] == "short"
+    picked_long = pick_fast_fade(
+        dump_market()[1]["15m"], dump_market()[1]["1h"], 0.45, SignalsCfg(), "short"
+    )
+    assert picked_long is not None and picked_long[0] == "long"
+    assert pick_fast_fade(frames["15m"], frames["1h"], 0.45, SignalsCfg(), "short") is None
+
+
+def test_fast_fade_does_not_exit_because_1h_is_still_the_impulse_side():
+    trade, decision, _ = new_trade("short")
+    trade.plan = replace(trade.plan, hold_hours=2)
+    decision.metrics["trend_1h"] = "long"
+    decision.metrics["trend_4h"] = "long"
+    evaluate_exit(
+        trade,
+        decision,
+        [],
+        NOW + 10,
+        apply_profile(
+            SignalsCfg(),
+            SignalSettings(profile=FAST_SHORT, leverage=50, hold_hours=2),
+        ),
+    )
+    assert trade.state == "HOLD_SHORT"
+
+
+def test_fast_profile_cuts_a_fading_loser_before_swing_hope_exit():
+    trade, decision, _ = new_trade("short")
+    trade.plan = replace(trade.plan, hold_hours=1)
+    risk = abs(trade.plan.entry - trade.plan.stop)
+    decision.price = trade.plan.entry + 0.45 * risk
+    decision.as_of = NOW + 10
+    evaluate_exit(
+        trade,
+        decision,
+        [],
+        NOW + 10,
+        apply_profile(
+            SignalsCfg(),
+            SignalSettings(profile=FAST_SHORT, leverage=50, hold_hours=1),
+        ),
+    )
+    assert trade.state == "EXIT_SHORT"
+    trade, decision, _ = new_trade("short")
+    decision.price = trade.plan.entry + 0.45 * risk
+    decision.as_of = NOW + 10
+    evaluate_exit(trade, decision, [], NOW + 10, SignalsCfg())
+    assert trade.state == "HOLD_SHORT"
 
 
 def scanner_with_entry(tmp_path):

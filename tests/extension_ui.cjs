@@ -194,7 +194,7 @@ async function main() {
     const switched = await page.evaluate(() => window.messages.filter(m => m.type === 'save-planning').at(-1).body);
     assert.equal(switched.profile, 'fast_short');
     assert.equal(switched.leverage, 100);
-    assert.equal(switched.hold_hours, 2);
+    assert.equal(switched.hold_hours, 1);
     await page.locator('#bis-symbol').selectOption('ETHUSDT');
     assert.equal(await page.locator('.bis-state').textContent(), 'ENTER SHORT');
     await page.locator('#bis-card summary').click();
