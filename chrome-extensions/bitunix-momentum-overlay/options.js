@@ -1,7 +1,12 @@
 async function load() {
   try {
-    const stored = await chrome.storage.local.get(["dashboardUrl", "password"]);
+    let stored = await chrome.storage.local.get(["dashboardUrl", "password"]);
     const old = await chrome.storage.sync.get(["dashboardUrl", "password"]);
+    if (!(stored.dashboardUrl || old.dashboardUrl) || !(stored.password || old.password)) {
+      // The worker seeds storage from config.local.json on startup; wait for it once.
+      await chrome.runtime.sendMessage({ type: 'check-connection' }).catch(() => {});
+      stored = await chrome.storage.local.get(["dashboardUrl", "password"]);
+    }
     document.getElementById("dashboardUrl").value = stored.dashboardUrl || old.dashboardUrl || "";
     document.getElementById("password").value = stored.password || old.password || "";
   } catch { document.getElementById('status').textContent = 'Could not load settings. Reload the extension and reopen Settings.'; }

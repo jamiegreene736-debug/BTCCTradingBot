@@ -28,6 +28,17 @@ function validDashboardUrl(raw) {
   }
   return url.origin;
 }
+// Optional, git-ignored config.local.json beside the manifest seeds the URL and
+// password on a fresh load, so a folder change never needs the Settings form.
+async function seedFromLocalConfig() {
+  try {
+    const response = await fetch(chrome.runtime.getURL('config.local.json'));
+    if (!response.ok) return null;
+    const config = await response.json();
+    if (typeof config?.dashboardUrl !== 'string' || typeof config?.password !== 'string' || !config.password) return null;
+    return { dashboardUrl: validDashboardUrl(config.dashboardUrl.trim()), password: config.password };
+  } catch { return null; }
+}
 async function loadSettings() {
   const local = await chrome.storage.local.get(['dashboardUrl', 'password']);
   const old = await chrome.storage.sync.get(['dashboardUrl', 'password']);
@@ -35,6 +46,10 @@ async function loadSettings() {
   if (old.password || old.dashboardUrl) {
     await chrome.storage.local.set(settings);
     await chrome.storage.sync.remove(['dashboardUrl', 'password']);
+  }
+  if (!settings.dashboardUrl || !settings.password) {
+    const seeded = await seedFromLocalConfig();
+    if (seeded) { settings = seeded; await chrome.storage.local.set(seeded); }
   }
 }
 let settingsReady = loadSettings();
