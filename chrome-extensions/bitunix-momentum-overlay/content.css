@@ -81,3 +81,10 @@
 #bis-panel.bis-flash{animation:bis-glow 1s ease 3}@keyframes bis-glow{50%{box-shadow:0 0 28px #6ed2b888}}
 @media(prefers-reduced-motion:reduce){#bis-panel.bis-flash{animation:none}}
 @media(max-width:600px){#bis-panel{top:12px;right:12px;max-height:calc(100dvh - 24px)}#bis-panel #bis-body{max-height:calc(100dvh - 108px)}}
+
+#bis-panel .bis-scan-head{font-size:10px;color:#9aacc1;margin:8px 0;line-height:1.6}#bis-panel .bis-scan-head b{color:#e6eef8}
+#bis-panel .bis-scan-row{display:flex;gap:8px;align-items:flex-start;padding:7px 8px;margin:4px 0;border:1px solid #263447;border-left:3px solid #4b5a6d;background:#121c2a;font-size:10px;line-height:1.5}
+#bis-panel .bis-scan-row time{flex:0 0 60px;color:#e6eef8;font-weight:700}#bis-panel .bis-scan-row div{min-width:0;flex:1}#bis-panel .bis-scan-row small{display:block;color:#9aacc1;overflow-wrap:anywhere}#bis-panel .bis-scan-row i{color:#61d6be;font-style:normal}
+#bis-panel .bis-scan-row.ok time{color:#55d8af}#bis-panel .bis-scan-row.late time{color:#f2c14e}#bis-panel .bis-scan-row.stale time{color:#fb929c}#bis-panel .bis-scan-row.stale{opacity:.75}
+#bis-panel .bis-scan-row.long{border-left-color:#55d8af}#bis-panel .bis-scan-row.short{border-left-color:#fb929c}#bis-panel .bis-scan-row.active{border-color:#61d6be}
+#bis-panel .bis-late{color:#f2c14e}

@@ -939,6 +939,7 @@ class SignalScanner:
     def _stamp_states(self, decisions: dict[str, Decision], now: int) -> None:
         previous = self.decisions
         for symbol, decision in decisions.items():
+            decision.evaluated_at = now
             prior = previous.get(symbol)
             identity = (
                 decision.state,
@@ -995,6 +996,7 @@ class SignalScanner:
             "side": decision.side,
             "setup": decision.setup,
             "as_of": decision.as_of,
+            "evaluated_at": decision.evaluated_at,
             "state_since": decision.state_since or decision.as_of or now,
             "expires_at": expires,
             "seconds_remaining": remaining,
@@ -1141,6 +1143,12 @@ class SignalScanner:
                     "hot": len(self._hot_symbols_last),
                     "hot_symbols": list(self._hot_symbols_last),
                     "evaluated": list(self._evaluated_last),
+                    "last_scan": int(self._last_scan),
+                    "next_scan": (
+                        int(self._last_scan) + self.cfg.refresh_seconds
+                        if self._last_scan
+                        else 0
+                    ),
                     "refresh_seconds": self.cfg.refresh_seconds,
                     "evaluate_batch": self.cfg.evaluate_batch,
                     "queue_size": self.cfg.queue_size,

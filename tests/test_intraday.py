@@ -1451,7 +1451,16 @@ def test_two_tier_scan_rotates_universe_and_retains_decisions(tmp_path):
     ]
     assert second_batch == ["DOGEUSDT", "ADAUSDT"]
     assert set(scanner.decisions) == set(UNIVERSE_NAMES)
-    assert len(scanner.snapshot()["queue"]) <= scanner.cfg.queue_size
+    with patch("time.time", return_value=NOW + 15):
+        snapshot = scanner.snapshot()
+    assert len(snapshot["queue"]) <= scanner.cfg.queue_size
+    # Freshness feed: the scan clock and each coin's last checklist run.
+    assert snapshot["scan"]["last_scan"] == NOW + 15
+    assert snapshot["scan"]["next_scan"] == NOW + 15 + scanner.cfg.refresh_seconds
+    for name, row in snapshot["symbols"].items():
+        expected = NOW + 15 if name in second["evaluated"] else NOW
+        assert row["evaluated_at"] == expected, name
+    assert all("evaluated_at" in item for item in snapshot["queue"])
 
 
 def test_watch_signal_is_promoted_to_hot_set(tmp_path):
