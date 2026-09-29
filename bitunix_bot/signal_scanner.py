@@ -1002,6 +1002,7 @@ class SignalScanner:
             "checks_total": len(decision.checks),
             "reason": decision.reasons[0] if decision.reasons else "",
             "price": decision.price,
+            "actions": list(decision.actions),
         }
 
     def _featured_and_handoff(

@@ -143,6 +143,13 @@ def test_completed_pullback_produces_entry_with_structural_stop(side):
     assert sign * (decision.plan.entry - decision.plan.stop) > 0
     assert sign * (decision.plan.target - decision.plan.entry) > 0
     assert not hasattr(decision, "confidence")
+    assert decision.actions == [
+        {
+            "label": f"Enter {side}",
+            "price": decision.plan.entry_low,
+            "price2": decision.plan.entry_high,
+        }
+    ]
 
 
 def test_partial_candle_cannot_change_closed_signal():
