@@ -1,1 +1,523 @@
-{"strategy":"intraday","mode":"alerts_only","settings":{"planning_equity":1000.0,"risk_pct":0.5,"leverage":25,"hold_hours":24},"status":{"ready":true,"error":null},"data_max_age":60,"symbols":{"BTCUSDT":{"symbol":"BTCUSDT","state":"ENTER_LONG","side":"long","setup":"Trend pullback","signal_id":"BTCUSDT:long:Trend pullback:1799999100","as_of":1789057959,"bar_time":1799999100,"price":98.7,"plan":{"side":"long","entry":98.705,"entry_low":98.61105246490123,"entry_high":98.81859671346504,"stop":97.83140328653496,"target":110,"target2":null,"quantity":4.756,"notional":469.44098,"margin":18.7776392,"risk_usdt":4.999819733239701,"risk_pct":0.49998197332397015,"net_reward_risk":10.575186518122639,"stop_pct":0.8850582173801061,"cost_pct":0.18,"funding_cost_pct":0.0,"funding_payments":3,"liquidation_estimate":95.31573192771084,"max_leverage":40,"leverage":25,"hold_hours":24,"expires_at":1789058859},"checks":[{"label":"Fresh market data","passed":true,"detail":"Market snapshot must be fresh"},{"label":"Liquid market","passed":true,"detail":"24h quote volume must pass the liquidity floor"},{"label":"Spread","passed":true,"detail":"Spread must fit the execution limit"},{"label":"4h / 1h alignment","passed":true,"detail":"4h long; 1h long"},{"label":"Completed 15m trigger","passed":true,"detail":"Waiting for a pullback reclaim or breakout retest"},{"label":"Volume confirmation","passed":true,"detail":"2.00 times baseline volume"},{"label":"Entry zone","passed":true,"detail":"Wait for the entry zone; do not chase"},{"label":"Stop outside normal noise","passed":true,"detail":"Structural stop must allow at least 0.75 ATR"},{"label":"Reward after costs","passed":true,"detail":"10.58R net; need 2R"},{"label":"Order size","passed":true,"detail":"Quantity must meet the exchange minimum"},{"label":"Execution depth","passed":true,"detail":"Both sides need at least 5 times the planned notional"},{"label":"Leverage buffer","passed":true,"detail":"Estimated isolated-margin buffer passes; verify exchange liquidation price"}],"reasons":["Trend pullback confirmed on a completed 15m candle"],"metrics":{"trend_1h":"long","trend_4h":"long","atr_pct":0.6007938878674359,"vwap":98.40656565656568,"funding_rate_pct":0,"next_funding":1800003660,"open_interest":null,"spread_pct":0.01013171225936262,"relative_volume":2.0},"state_since":1789057959},"ETHUSDT":{"symbol":"ETHUSDT","state":"ENTER_SHORT","side":"short","setup":"Trend pullback","signal_id":"BTCUSDT:short:Trend pullback:1799999100","as_of":1789057959,"bar_time":1799999100,"price":101.3,"plan":{"side":"short","entry":101.295,"entry_low":101.18140328653496,"entry_high":101.38894753509877,"stop":102.16859671346504,"target":90,"target2":null,"quantity":4.735,"notional":479.63182500000005,"margin":19.185273000000002,"risk_usdt":4.999817723256935,"risk_pct":0.4999817723256935,"net_reward_risk":10.524081202049054,"stop_pct":0.8624282674021756,"cost_pct":0.18,"funding_cost_pct":0.0,"funding_payments":3,"liquidation_estimate":104.74548705179282,"max_leverage":40,"leverage":25,"hold_hours":24,"expires_at":1789058859},"checks":[{"label":"Fresh market data","passed":true,"detail":"Market snapshot must be fresh"},{"label":"Liquid market","passed":true,"detail":"24h quote volume must pass the liquidity floor"},{"label":"Spread","passed":true,"detail":"Spread must fit the execution limit"},{"label":"4h / 1h alignment","passed":true,"detail":"4h short; 1h short"},{"label":"Completed 15m trigger","passed":true,"detail":"Waiting for a pullback reclaim or breakout retest"},{"label":"Volume confirmation","passed":true,"detail":"2.00 times baseline volume"},{"label":"Entry zone","passed":true,"detail":"Wait for the entry zone; do not chase"},{"label":"Stop outside normal noise","passed":true,"detail":"Structural stop must allow at least 0.75 ATR"},{"label":"Reward after costs","passed":true,"detail":"10.52R net; need 2R"},{"label":"Order size","passed":true,"detail":"Quantity must meet the exchange minimum"},{"label":"Execution depth","passed":true,"detail":"Both sides need at least 5 times the planned notional"},{"label":"Leverage buffer","passed":true,"detail":"Estimated isolated-margin buffer passes; verify exchange liquidation price"}],"reasons":["Trend pullback confirmed on a completed 15m candle"],"metrics":{"trend_1h":"short","trend_4h":"short","atr_pct":0.5853737091067713,"vwap":101.59343434343432,"funding_rate_pct":0,"next_funding":1800003660,"open_interest":null,"spread_pct":0.009871668311935741,"relative_volume":2.0},"state_since":1789057959}},"best_symbol":"BTCUSDT","trades":[],"closed_trades":[],"history":[{"id":"BTCUSDT:long:Trend pullback:1799999100","state":"ENTER_LONG","symbol":"BTCUSDT","reason":"Trend pullback confirmed on a completed 15m candle","time":1789057959,"setup":"Trend pullback","side":"long"}],"version":2,"handoff":null,"queue":[{"symbol":"BTCUSDT","state":"ENTER_LONG","side":"long","setup":"Trend pullback","as_of":1789057959,"state_since":1789057959,"expires_at":1789058859,"seconds_remaining":900,"checks_passed":12,"checks_total":12,"reason":"Trend pullback confirmed on a completed 15m candle","price":98.7},{"symbol":"ETHUSDT","state":"ENTER_SHORT","side":"short","setup":"Trend pullback","as_of":1789057959,"state_since":1789057959,"expires_at":1789058859,"seconds_remaining":900,"checks_passed":12,"checks_total":12,"reason":"Trend pullback confirmed on a completed 15m candle","price":101.3}],"positions":{"connected":false,"imported":0,"error":"Add Bitunix API keys to import live positions."}}
+{
+  "strategy": "intraday",
+  "mode": "alerts_only",
+  "settings": {
+    "planning_equity": 1000.0,
+    "risk_pct": 0.5,
+    "leverage": 50,
+    "hold_hours": 2,
+    "profile": "trend"
+  },
+  "status": {
+    "ready": true,
+    "error": null
+  },
+  "data_max_age": 60,
+  "symbols": {
+    "BTCUSDT": {
+      "symbol": "BTCUSDT",
+      "state": "ENTER_LONG",
+      "side": "long",
+      "setup": "Trend pullback",
+      "signal_id": "BTCUSDT:long:Trend pullback:1799999700",
+      "as_of": 1800000060,
+      "bar_time": 1799999700,
+      "state_since": 1800000060,
+      "evaluated_at": 1800000060,
+      "price": 98.7,
+      "plan": {
+        "side": "long",
+        "entry": 98.705,
+        "entry_low": 98.64727009579343,
+        "entry_high": 98.74394158683882,
+        "stop": 98.35984673052894,
+        "target": 99.93,
+        "target2": null,
+        "quantity": 9.563,
+        "notional": 943.915915,
+        "margin": 18.8783183,
+        "risk_usdt": 4.999749362951699,
+        "risk_pct": 0.4999749362951699,
+        "net_reward_risk": 2.0032256871146763,
+        "stop_pct": 0.3496816467970772,
+        "cost_pct": 0.18,
+        "funding_cost_pct": 0.0,
+        "funding_payments": 1,
+        "liquidation_estimate": 97.39554673366834,
+        "max_leverage": 78,
+        "leverage": 50,
+        "hold_hours": 2,
+        "expires_at": 1800000600,
+        "adverse_mark_basis": 0.0,
+        "profile": "trend",
+        "trigger_interval": "5m"
+      },
+      "checks": [
+        {
+          "label": "Fresh market data",
+          "passed": true,
+          "detail": "Market snapshot must be fresh",
+          "group": "market",
+          "waiting": false
+        },
+        {
+          "label": "Liquid market",
+          "passed": true,
+          "detail": "24h quote volume must pass the liquidity floor and the last hour's session volume must be at least 0.5x the 24h hourly average (0.67x)",
+          "group": "market",
+          "waiting": false
+        },
+        {
+          "label": "Spread",
+          "passed": true,
+          "detail": "Spread 0.010%; max 0.04% for the leverage",
+          "group": "market",
+          "waiting": false
+        },
+        {
+          "label": "Hold-window volatility",
+          "passed": true,
+          "detail": "1h ATR 0.65% must sit in 0.35-1.2% to carry a 1.5R target inside 120 min at 50x",
+          "group": "market",
+          "waiting": false
+        },
+        {
+          "label": "Mark vs last",
+          "passed": true,
+          "detail": "Mark is 0.000% from last; max 0.15%",
+          "group": "market",
+          "waiting": false
+        },
+        {
+          "label": "Funding print window",
+          "passed": true,
+          "detail": "Next funding in 3600s; wait if \u2264300s",
+          "group": "market",
+          "waiting": false
+        },
+        {
+          "label": "1h bias / 15m structure",
+          "passed": true,
+          "detail": "1h bias long; 15m structure long",
+          "group": "market",
+          "waiting": false
+        },
+        {
+          "label": "BTC context",
+          "passed": true,
+          "detail": "BTC is the benchmark; no extra relative-strength gate",
+          "group": "market",
+          "waiting": false
+        },
+        {
+          "label": "Not extended",
+          "passed": true,
+          "detail": "+1.3 hourly ATR from the 1h EMA20 in the trade direction; max 2",
+          "group": "market",
+          "waiting": false
+        },
+        {
+          "label": "Crowding headwind",
+          "passed": true,
+          "detail": "Funding +0.0000% per print (max 0.05% against the trade); OI history warming up with +1.3 ATR extension (crowded at \u22653% and \u22651.5 ATR)",
+          "group": "market",
+          "waiting": false
+        },
+        {
+          "label": "Completed trigger candle",
+          "passed": true,
+          "detail": "Waiting for a completed 5m pullback reclaim, impulse continuation, or breakout retest",
+          "group": "setup",
+          "waiting": false
+        },
+        {
+          "label": "Volume confirmation",
+          "passed": true,
+          "detail": "2.00 times baseline volume",
+          "group": "setup",
+          "waiting": false
+        },
+        {
+          "label": "Entry zone",
+          "passed": true,
+          "detail": "Wait for the entry zone; do not chase",
+          "group": "plan",
+          "waiting": false
+        },
+        {
+          "label": "Stop size",
+          "passed": true,
+          "detail": "Stop 0.35% must sit between 0.20% (5m noise) and 0.6% (50x limit)",
+          "group": "plan",
+          "waiting": false
+        },
+        {
+          "label": "Target inside hold budget",
+          "passed": true,
+          "detail": "Structural target inside the 120-minute travel budget (1.38%)",
+          "group": "plan",
+          "waiting": false
+        },
+        {
+          "label": "Reward after costs",
+          "passed": true,
+          "detail": "2.00R net; need 1.5R",
+          "group": "plan",
+          "waiting": false
+        },
+        {
+          "label": "Funding drag",
+          "passed": true,
+          "detail": "0.000% projected funding over 120 min; max 0.1%",
+          "group": "plan",
+          "waiting": false
+        },
+        {
+          "label": "Order size",
+          "passed": true,
+          "detail": "Quantity must meet the exchange minimum",
+          "group": "plan",
+          "waiting": false
+        },
+        {
+          "label": "Execution depth",
+          "passed": true,
+          "detail": "Both sides need at least 8 times the planned notional",
+          "group": "plan",
+          "waiting": false
+        },
+        {
+          "label": "Leverage ceiling",
+          "passed": true,
+          "detail": "50x fits: stop 0.35% sits 0.98% inside the estimated liquidation 97.396; ceiling 78x (pair cap 100x)",
+          "group": "plan",
+          "waiting": false
+        },
+        {
+          "label": "Tracked exposure",
+          "passed": true,
+          "detail": "No conflicting tracked exposure",
+          "group": "portfolio",
+          "waiting": false
+        }
+      ],
+      "reasons": [
+        "Trend pullback confirmed on a completed 5m candle"
+      ],
+      "metrics": {
+        "profile": "trend",
+        "trigger_interval": "5m",
+        "hold_minutes": 120,
+        "trend_1h": "long",
+        "trend_15m": "long",
+        "atr_pct": 0.1780814056284293,
+        "atr_15m_pct": 0.3046576273201748,
+        "hourly_atr_pct": 0.6484295845997835,
+        "extension_atr": 1.2544317070415412,
+        "session_volume_ratio": 0.672,
+        "vwap": 98.235,
+        "funding_rate_pct": 0,
+        "next_funding": 1800003660,
+        "open_interest": null,
+        "oi_change_pct": null,
+        "spread_pct": 0.01013171225936262,
+        "tier_max_leverage": 100,
+        "relative_volume": 2.0
+      },
+      "actions": [
+        {
+          "label": "Enter long",
+          "price": 98.64727009579343,
+          "price2": 98.74394158683882
+        }
+      ]
+    },
+    "ETHUSDT": {
+      "symbol": "ETHUSDT",
+      "state": "ENTER_SHORT",
+      "side": "short",
+      "setup": "Trend pullback",
+      "signal_id": "ETHUSDT:short:Trend pullback:1799999700",
+      "as_of": 1800000060,
+      "bar_time": 1799999700,
+      "state_since": 1800000060,
+      "evaluated_at": 1800000060,
+      "price": 101.3,
+      "plan": {
+        "side": "short",
+        "entry": 101.295,
+        "entry_low": 101.25605841316118,
+        "entry_high": 101.35272990420657,
+        "stop": 101.64015326947106,
+        "target": 100.07,
+        "target2": null,
+        "quantity": 9.478,
+        "notional": 960.07401,
+        "margin": 19.201480200000002,
+        "risk_usdt": 4.9994959060466595,
+        "risk_pct": 0.4999495906046659,
+        "net_reward_risk": 1.976682643153634,
+        "stop_pct": 0.340740677694906,
+        "cost_pct": 0.18,
+        "funding_cost_pct": 0.0,
+        "funding_payments": 1,
+        "liquidation_estimate": 102.62544179104479,
+        "max_leverage": 78,
+        "leverage": 50,
+        "hold_hours": 2,
+        "expires_at": 1800000600,
+        "adverse_mark_basis": 0.0,
+        "profile": "trend",
+        "trigger_interval": "5m"
+      },
+      "checks": [
+        {
+          "label": "Fresh market data",
+          "passed": true,
+          "detail": "Market snapshot must be fresh",
+          "group": "market",
+          "waiting": false
+        },
+        {
+          "label": "Liquid market",
+          "passed": true,
+          "detail": "24h quote volume must pass the liquidity floor and the last hour's session volume must be at least 0.5x the 24h hourly average (0.67x)",
+          "group": "market",
+          "waiting": false
+        },
+        {
+          "label": "Spread",
+          "passed": true,
+          "detail": "Spread 0.010%; max 0.04% for the leverage",
+          "group": "market",
+          "waiting": false
+        },
+        {
+          "label": "Hold-window volatility",
+          "passed": true,
+          "detail": "1h ATR 0.63% must sit in 0.35-1.2% to carry a 1.5R target inside 120 min at 50x",
+          "group": "market",
+          "waiting": false
+        },
+        {
+          "label": "Mark vs last",
+          "passed": true,
+          "detail": "Mark is 0.000% from last; max 0.15%",
+          "group": "market",
+          "waiting": false
+        },
+        {
+          "label": "Funding print window",
+          "passed": true,
+          "detail": "Next funding in 3600s; wait if \u2264300s",
+          "group": "market",
+          "waiting": false
+        },
+        {
+          "label": "1h bias / 15m structure",
+          "passed": true,
+          "detail": "1h bias short; 15m structure short",
+          "group": "market",
+          "waiting": false
+        },
+        {
+          "label": "BTC context",
+          "passed": true,
+          "detail": "BTC 1h bias short must not oppose the trade and the 2h relative strength (+0.00%) must favour it",
+          "group": "market",
+          "waiting": false
+        },
+        {
+          "label": "Not extended",
+          "passed": true,
+          "detail": "+1.3 hourly ATR from the 1h EMA20 in the trade direction; max 2",
+          "group": "market",
+          "waiting": false
+        },
+        {
+          "label": "Crowding headwind",
+          "passed": true,
+          "detail": "Funding +0.0000% per print (max 0.05% against the trade); OI history warming up with +1.3 ATR extension (crowded at \u22653% and \u22651.5 ATR)",
+          "group": "market",
+          "waiting": false
+        },
+        {
+          "label": "Completed trigger candle",
+          "passed": true,
+          "detail": "Waiting for a completed 5m pullback reclaim, impulse continuation, or breakout retest",
+          "group": "setup",
+          "waiting": false
+        },
+        {
+          "label": "Volume confirmation",
+          "passed": true,
+          "detail": "2.00 times baseline volume",
+          "group": "setup",
+          "waiting": false
+        },
+        {
+          "label": "Entry zone",
+          "passed": true,
+          "detail": "Wait for the entry zone; do not chase",
+          "group": "plan",
+          "waiting": false
+        },
+        {
+          "label": "Stop size",
+          "passed": true,
+          "detail": "Stop 0.34% must sit between 0.20% (5m noise) and 0.6% (50x limit)",
+          "group": "plan",
+          "waiting": false
+        },
+        {
+          "label": "Target inside hold budget",
+          "passed": true,
+          "detail": "Structural target inside the 120-minute travel budget (1.34%)",
+          "group": "plan",
+          "waiting": false
+        },
+        {
+          "label": "Reward after costs",
+          "passed": true,
+          "detail": "1.98R net; need 1.5R",
+          "group": "plan",
+          "waiting": false
+        },
+        {
+          "label": "Funding drag",
+          "passed": true,
+          "detail": "0.000% projected funding over 120 min; max 0.1%",
+          "group": "plan",
+          "waiting": false
+        },
+        {
+          "label": "Order size",
+          "passed": true,
+          "detail": "Quantity must meet the exchange minimum",
+          "group": "plan",
+          "waiting": false
+        },
+        {
+          "label": "Execution depth",
+          "passed": true,
+          "detail": "Both sides need at least 8 times the planned notional",
+          "group": "plan",
+          "waiting": false
+        },
+        {
+          "label": "Leverage ceiling",
+          "passed": true,
+          "detail": "50x fits: stop 0.34% sits 0.97% inside the estimated liquidation 102.63; ceiling 78x (pair cap 100x)",
+          "group": "plan",
+          "waiting": false
+        },
+        {
+          "label": "Tracked exposure",
+          "passed": true,
+          "detail": "No conflicting tracked exposure",
+          "group": "portfolio",
+          "waiting": false
+        }
+      ],
+      "reasons": [
+        "Trend pullback confirmed on a completed 5m candle"
+      ],
+      "metrics": {
+        "profile": "trend",
+        "trigger_interval": "5m",
+        "hold_minutes": 120,
+        "trend_1h": "short",
+        "trend_15m": "short",
+        "atr_pct": 0.1735107081493186,
+        "atr_15m_pct": 0.2968381818015919,
+        "hourly_atr_pct": 0.6317867719644485,
+        "extension_atr": -1.2544317070414968,
+        "session_volume_ratio": 0.672,
+        "vwap": 101.765,
+        "funding_rate_pct": 0,
+        "next_funding": 1800003660,
+        "open_interest": null,
+        "oi_change_pct": null,
+        "spread_pct": 0.009871668311935741,
+        "tier_max_leverage": 100,
+        "btc_trend": "short",
+        "relative_strength_pct": 0.0,
+        "relative_volume": 2.0
+      },
+      "actions": [
+        {
+          "label": "Enter short",
+          "price": 101.25605841316118,
+          "price2": 101.35272990420657
+        }
+      ]
+    }
+  },
+  "best_symbol": "BTCUSDT",
+  "trades": [],
+  "closed_trades": [],
+  "history": [
+    {
+      "id": "BTCUSDT:long:Trend pullback:1799999700",
+      "state": "ENTER_LONG",
+      "symbol": "BTCUSDT",
+      "reason": "Trend pullback confirmed on a completed 5m candle",
+      "time": 1800000060,
+      "setup": "Trend pullback",
+      "side": "long"
+    }
+  ],
+  "version": 2,
+  "handoff": null,
+  "queue": [
+    {
+      "symbol": "BTCUSDT",
+      "state": "ENTER_LONG",
+      "side": "long",
+      "setup": "Trend pullback",
+      "as_of": 1800000060,
+      "evaluated_at": 1800000060,
+      "state_since": 1800000060,
+      "expires_at": 1800000600,
+      "seconds_remaining": 540,
+      "checks_passed": 21,
+      "checks_total": 21,
+      "reason": "Trend pullback confirmed on a completed 5m candle",
+      "price": 98.7,
+      "actions": [
+        {
+          "label": "Enter long",
+          "price": 98.64727009579343,
+          "price2": 98.74394158683882
+        }
+      ]
+    },
+    {
+      "symbol": "ETHUSDT",
+      "state": "ENTER_SHORT",
+      "side": "short",
+      "setup": "Trend pullback",
+      "as_of": 1800000060,
+      "evaluated_at": 1800000060,
+      "state_since": 1800000060,
+      "expires_at": 1800000600,
+      "seconds_remaining": 540,
+      "checks_passed": 21,
+      "checks_total": 21,
+      "reason": "Trend pullback confirmed on a completed 5m candle",
+      "price": 101.3,
+      "actions": [
+        {
+          "label": "Enter short",
+          "price": 101.25605841316118,
+          "price2": 101.35272990420657
+        }
+      ]
+    }
+  ],
+  "positions": {
+    "connected": false,
+    "imported": 0,
+    "error": "Add Bitunix API keys to import live positions."
+  }
+}

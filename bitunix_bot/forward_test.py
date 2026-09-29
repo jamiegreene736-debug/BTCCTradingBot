@@ -48,6 +48,8 @@ def forward_test_from_decision(decision: Decision, now: int) -> ForwardTest | No
         decision.setup,
         plan.trigger_interval,
         now,
+        # 3600 / 7200 s on trigger-interval bars: the same horizon as the
+        # plan's funding cost and evaluate_exit's hard time-stop.
         plan.hold_hours * 3600,
         plan.entry,
         plan.stop,

@@ -9,33 +9,55 @@ signals:
   max_symbols: 12          # hot set: always rescanned at refresh_seconds
   universe_size: 80        # wide liquid list rotated through in batches
   evaluate_batch: 10       # extra universe names fully evaluated each refresh
-  min_reward_risk: 2.0
-  relative_volume_min: 1.2
-  breakout_volume_min: 1.5
-  stop_atr_buffer: 0.2
-  max_spread_pct: 0.08
   round_trip_fee_pct: 0.12   # Conservative estimate; reconcile against your fee tier.
   slippage_pct: 0.06        # Round trip estimate, additional to fees.
-  min_depth_ratio: 5.0
-  liquidation_buffer_pct: 0.5
-  hope_exit_r: 0.75          # Hard EXIT before the structural stop; do not wait for a bounce.
-  stale_trade_hours: 4
-  stale_progress_r: 0.25
-  trailing_activate_r: 1.5
-  breakeven_at_r: 1.0
   max_total_risk_pct: 1.5
   max_same_direction: 2
-  # 24h / 25-40x band: skip dead or blow-off hours, keep targets inside a
-  # hold-window travel budget, and reject funding that eats the edge.
-  min_hourly_atr_pct: 0.12
-  max_hourly_atr_pct: 5.0
-  max_target_atr_multiple: 8.0
-  max_target_4h_atr_multiple: 3.0
-  impulse_atr_min: 1.1
-  max_funding_cost_pct: 0.40
   queue_size: 5
   handoff_seconds: 20
   expiry_warn_seconds: 45
+  max_mark_basis_pct: 0.25     # scalp profile; trend carries its own below
+  funding_blackout_seconds: 180
+  # Trend profile (default): 1h EMA bias, 15m HH/HL structure, 5m trigger; 1-2h
+  # hold at 20-100x (50x default); the stop is capped at 0.60% and must sit
+  # 0.25% inside the estimated isolated liquidation.
+  trend:
+    trigger_interval: 5m          # 3m or 5m
+    min_hourly_atr_pct_1h: 0.60   # floor when hold is 60 min
+    min_hourly_atr_pct_2h: 0.35   # floor when hold is 120 min
+    max_hourly_atr_pct: 1.2
+    max_spread_pct: 0.04
+    max_mark_basis_pct: 0.15
+    funding_blackout_seconds: 300
+    session_volume_ratio: 0.5     # last hour's 15m quote volume vs 24h volume / 24
+    max_extension_atr: 2.0
+    max_funding_rate_pct: 0.05    # per print, in the trade direction
+    max_oi_change_pct: 3.0
+    crowd_extension_atr: 1.5
+    relative_volume_min: 1.2
+    breakout_volume_min: 1.5
+    impulse_atr_min: 1.1
+    stop_atr_buffer: 0.2
+    min_stop_atr: 1.0             # x ATR(5m)
+    min_stop_atr_15m: 0.35        # x ATR(15m)
+    min_stop_pct: 0.20
+    max_stop_pct: 0.60
+    entry_pullback_atr: 0.30
+    entry_chase_atr: 0.25
+    entry_chase_risk_fraction: 0.25
+    travel_atr_multiple: 1.5      # x ATR(1h) x sqrt(hold_minutes / 60)
+    min_reward_risk: 1.5
+    max_funding_cost_pct: 0.10
+    min_depth_ratio: 8.0
+    liquidation_buffer_pct: 0.25
+    entry_expiry_seconds: 600
+    stale_hold_fraction: 0.35
+    stale_progress_r: 0.3
+    late_hold_fraction: 0.75
+    late_hold_min_r: 0.5
+    breakeven_at_r: 1.0
+    trailing_activate_r: 1.25
+    hope_exit_r: 0.75
   # Scalp profile (choose it in the overlay's planning settings): long and
   # short parabolic-exhaustion fades held 1-2h at up to the pair's leverage
   # cap. A short needs a pump, climax volume, crowded longs and a failed

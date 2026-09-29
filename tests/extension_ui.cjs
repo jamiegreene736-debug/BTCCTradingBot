@@ -65,6 +65,31 @@ async function main() {
     await page.locator('.bis-state').waitFor();
     assert.equal(await page.locator('.bis-state').textContent(), 'ENTER LONG');
     assert.equal(await page.evaluate(() => window.__bisLastSpeak || ''), '');
+    // The 50x / 2h trend plan prints its leverage, hold, time-stop and ceiling.
+    assert.match(await page.locator('#bis-planning').textContent(), /50x · ≤120 min/);
+    assert.match(await page.locator('#bis-planning').textContent(), /Trend · long \/ short/);
+    const card = await page.locator('#bis-card').textContent();
+    assert.match(card, /Planned 50x/);
+    assert.match(card, /hold ≤ 120 min/);
+    assert.match(card, /time-stop 120 min after fill/);
+    assert.match(card, /Estimated leverage ceiling 78x/);
+    assert.match(card, /stop 0\.35% inside est\. liquidation 97\.39555/);
+    assert.match(card, /50x · ≤120 min/);
+    assert.match(card, /21\/21 checks/);
+    assert.match(card, /Stop loss = 26% of posted margin at 50x/);
+    assert.match(card, /1h bias: long · 15m structure: long/);
+    assert.match(card, /ATR 5m: 0\.18% · 15m: 0\.30% · 1h: 0\.65%/);
+    assert.match(card, /BTC relative strength \(2h\)/);
+    assert.equal(await page.locator('#bis-card .bis-levels > div').count(), 7);
+    // A saved legacy "swing" profile renders as Trend without a new backend round trip.
+    await page.evaluate(() => {
+      const legacy = structuredClone(window.testPayload);
+      legacy.settings.profile = 'swing';
+      window.listeners[0]({ type: 'signals-update', payload: legacy });
+    });
+    assert.match(await page.locator('#bis-planning').textContent(), /Trend · long \/ short/);
+    assert.equal(await page.locator('.bis-state').textContent(), 'ENTER LONG');
+    await page.evaluate(() => window.listeners[0]({ type: 'signals-update', payload: window.testPayload }));
     await page.evaluate(() => {
       const now = Math.floor(Date.now() / 1000);
       const template = structuredClone(window.testPayload.symbols.ETHUSDT);
@@ -79,6 +104,7 @@ async function main() {
     });
     assert.match(await page.evaluate(() => window.__bisLastSpeak || ''), /Trade entry waiting/);
     assert.match(await page.evaluate(() => window.__bisLastSpeak || ''), /Enter short/);
+    assert.match(await page.evaluate(() => window.__bisLastSpeak || ''), /50 x, 120 minute hold/);
     assert.match(await page.locator('#bis-panel footer').textContent(), /Trade entry waiting/);
     assert.match(await page.locator('#bis-queue').textContent(), /Top setups/);
     assert.match(await page.locator('#bis-queue').textContent(), /BTCUSDT/);
@@ -134,16 +160,17 @@ async function main() {
       const now = Math.floor(Date.now() / 1000);
       window.testPayload.trades = [{
         id: 'exchange:HYPE1', symbol: 'HYPEUSDT', kind: 'exchange', opened_at: now - 120,
-        plan: { side: 'short', entry: 80.37, stop: 81.6, target: 78, hold_hours: 24, quantity: 36.59 },
+        plan: { side: 'short', entry: 80.37, stop: 81.6, target: 78, hold_hours: 2, quantity: 36.59, leverage: 50, profile: 'trend', trigger_interval: '5m' },
         current_stop: 81.6, state: 'HOLD_SHORT', suggestion: 'HOLD_SHORT',
-        reason: 'Live: 80.21 · +0.12R · 1h short · 23.9h left',
+        reason: 'Live: 80.21 · +0.12R · 15m short · 118 min left',
         hold_confidence: 83, checked_at: now - 5,
         mark_price: 80.574, unrealized_pnl: -7.318, exchange_position_id: 'HYPE1',
         checks: [
           { label: 'Fresh market data', passed: true, detail: 'Live suggestion needs a fresh market snapshot', group: 'risk' },
           { label: 'Stop not reached', passed: true, detail: 'Stop still intact', group: 'risk' },
-          { label: '1h structure', passed: true, detail: 'Completed 1h structure is short', group: 'structure' },
-          { label: '4h bias', passed: false, detail: '4h EMA bias is mixed', group: 'structure' },
+          { label: 'Hold time remaining', passed: true, detail: '118 of 120 min hold left', group: 'risk' },
+          { label: 'Structure intact', passed: true, detail: '15m structure short', group: 'structure' },
+          { label: 'Bias intact', passed: false, detail: '1h bias mixed', group: 'structure' },
         ],
       }];
       window.testPayload.positions = { connected: true, imported: 1, error: null };
@@ -156,9 +183,11 @@ async function main() {
     assert.match(await page.locator('#bis-trades').textContent(), /83%/);
     assert.match(await page.locator('#bis-trades').textContent(), /HYPEUSDT/);
     assert.match(await page.locator('#bis-trades').textContent(), /Unrealized/);
+    assert.match(await page.locator('#bis-trades').textContent(), /Held 2 min \/ 120 min max/);
     await page.locator('#bis-trades summary').click();
     assert.match(await page.locator('#bis-trades').textContent(), /Hold \/ close checks/);
-    assert.match(await page.locator('#bis-trades').textContent(), /4h EMA bias is mixed/);
+    assert.match(await page.locator('#bis-trades').textContent(), /1h bias mixed/);
+    assert.match(await page.locator('#bis-trades').textContent(), /118 of 120 min hold left/);
     await page.evaluate(() => {
       window.testPayload.trades[0].suggestion = 'SET_STOP';
       window.testPayload.trades[0].exchange_stop_confirmed = false;
@@ -195,14 +224,33 @@ async function main() {
     await page.locator('.bis-modal').waitFor({ state: 'detached' });
     assert.equal(await page.evaluate(() => window.messages.find(m => m.type === 'track-entry' && m.body.kind === 'manual').body.exchange_stop_confirmed), false);
     await page.locator('[data-action="planning"]').click();
-    await page.locator('[name="leverage"]').fill('30');
-    await page.locator('[name="hold_hours"]').selectOption('12');
+    assert.match(await page.locator('.bis-modal').textContent(), /Trend · long and short · 1-2h · 20-100x/);
+    assert.match(await page.locator('.bis-modal').textContent(), /2 hours \(120 min\)/);
+    assert.equal(await page.locator('[name="hold_hours"]').inputValue(), '2');
+    assert.equal(await page.locator('[name="leverage"]').getAttribute('min'), '20');
+    assert.equal(await page.locator('[name="leverage"]').getAttribute('max'), '100');
+    // Switching profile clamps leverage into the new range both ways and keeps the hold.
+    await page.locator('[name="hold_hours"]').selectOption('1');
+    await page.locator('#bis-profile').selectOption('scalp');
+    assert.equal(await page.locator('[name="leverage"]').getAttribute('max'), '125');
+    assert.equal(await page.locator('[name="hold_hours"]').inputValue(), '1');
+    await page.locator('[name="leverage"]').fill('10');
+    await page.locator('#bis-profile').selectOption('trend');
+    assert.equal(await page.locator('[name="leverage"]').inputValue(), '20');
+    assert.equal(await page.locator('[name="hold_hours"]').inputValue(), '1');
+    await page.locator('[name="leverage"]').fill('130');
+    await page.locator('#bis-profile').selectOption('scalp');
+    await page.locator('#bis-profile').selectOption('trend');
+    assert.equal(await page.locator('[name="leverage"]').inputValue(), '100');
+    await page.locator('[name="leverage"]').fill('60');
+    await page.locator('[name="hold_hours"]').selectOption('1');
     await page.locator('.bis-modal [type="submit"]').click();
     await page.locator('.bis-modal').waitFor({ state: 'detached' });
     const saved = await page.evaluate(() => window.messages.find(m => m.type === 'save-planning').body);
-    assert.equal(saved.leverage, 30); assert.equal(saved.hold_hours, 12);
+    assert.equal(saved.leverage, 60); assert.equal(saved.hold_hours, 1); assert.equal(saved.profile, 'trend');
     await page.locator('#bis-symbol').selectOption('ETHUSDT');
     assert.equal(await page.locator('.bis-state').textContent(), 'ENTER SHORT');
+    assert.match(await page.locator('#bis-card').textContent(), /stop 0\.34% inside est\. liquidation 102\.63/);
     await page.locator('#bis-card summary').click();
     await page.locator('[data-action="refresh"]').click();
     assert.equal(await page.locator('#bis-card details').getAttribute('open'), '');

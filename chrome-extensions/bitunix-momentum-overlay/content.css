@@ -13,7 +13,10 @@
 #bis-panel #bis-body{overflow-y:auto;max-height:calc(100vh - 175px);padding:12px 16px 16px;flex:1 1 auto;min-height:0}
 #bis-panel p{margin:7px 0;line-height:1.55}#bis-panel small{display:block;font-size:10px;color:#9dafc3}#bis-panel b,#bis-panel strong{font-weight:650}
 #bis-panel .bis-status{font-size:11px;color:#9bceb9;margin-bottom:12px}#bis-panel .bis-notice{padding:16px;color:#ffd399}
-#bis-panel #bis-planning{display:grid;grid-template-columns:1.1fr .8fr 1.2fr auto;align-items:center;gap:8px;padding-bottom:14px;border-bottom:1px solid #2c3a4b}
+#bis-panel #bis-planning{display:grid;grid-template-columns:.95fr .65fr 1.05fr 1.35fr auto;align-items:center;gap:8px;padding-bottom:14px;border-bottom:1px solid #2c3a4b}
+#bis-panel #bis-planning > div{min-width:0}
+#bis-panel #bis-body{container-type:inline-size}
+@container (max-width:430px){#bis-panel #bis-planning{grid-template-columns:1fr 1fr 1.2fr}#bis-panel #bis-planning button{grid-column:3;justify-self:end}}
 #bis-panel #bis-planning b{font-size:11px}#bis-panel #bis-planning button{padding:4px 7px;font-size:11px}
 #bis-panel .bis-handoff{display:grid;grid-template-columns:1fr auto;gap:4px 8px;padding:10px 12px;margin:0 0 12px;border:1px solid #e9ac69;background:#352b24;border-radius:9px;color:#ffd399}
 #bis-panel .bis-handoff strong{font-size:12px}#bis-panel .bis-handoff span{font-size:12px;font-weight:700}
@@ -36,6 +39,7 @@
 #bis-panel .bis-meta{font-size:10px;color:#9aacc1;margin:8px 0;line-height:1.7}
 #bis-panel .bis-levels{display:grid;grid-template-columns:1fr 1fr;gap:13px 8px;border-top:1px solid #304157;border-bottom:1px solid #304157;padding:13px 0;margin:12px 0}
 #bis-panel .bis-levels b{font-size:12px;overflow-wrap:anywhere}
+#bis-panel .bis-levels > div:last-child:nth-child(odd){grid-column:1 / -1}
 #bis-panel .bis-buttons{display:flex;gap:8px;margin-top:12px}#bis-panel .bis-buttons button{flex:1;font-size:11px}
 #bis-panel .bis-buttons button:last-child{border-color:#6d9e9b;background:#264445}
 #bis-panel .bis-trade .bis-buttons button{font-size:13px;font-weight:700;padding:10px 12px;border-color:#f08a8a;background:#5a2428}

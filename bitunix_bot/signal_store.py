@@ -12,7 +12,7 @@ from typing import Any
 
 from .forward_test import ForwardTest
 from .intraday import INTERVALS, Candle, Check, Decision, TradePlan
-from .signal_config import SignalsCfg, SignalSettings
+from .signal_config import SCALP_PROFILES, SignalsCfg, SignalSettings
 
 
 @dataclass
@@ -49,8 +49,8 @@ HOLD_CHECK_GROUPS: dict[str, str] = {
     "Room to stop": "risk",
     "Liquidation buffer": "risk",
     "Exchange protective stop": "risk",
-    "1h structure": "structure",
-    "4h bias": "structure",
+    "Structure intact": "structure",
+    "Bias intact": "structure",
     "Progress vs review window": "structure",
     "Session VWAP": "tape",
     "Funding carry": "cost",
@@ -80,6 +80,61 @@ def _finite(value: object) -> float | None:
 
 def exchange_stop_ok(trade: TrackedTrade) -> bool:
     return trade.kind == "paper" or trade.exchange_stop_confirmed
+
+
+@dataclass(frozen=True)
+class ExitRules:
+    """Per-profile exit thresholds read once per evaluation."""
+
+    stale_after_s: int
+    stale_need_r: float
+    stale_window: str
+    breakeven_at_r: float
+    trailing_activate_r: float
+    liquidation_buffer_pct: float
+    hope_exit_r: float
+    structure_key: str | None
+    late_after_s: int | None
+    late_min_r: float | None
+
+
+def exit_rules(plan: TradePlan, cfg: SignalsCfg) -> ExitRules:
+    """Exit thresholds for a plan: scalp reads cfg.scalp, everything else cfg.trend.
+
+    Trend windows are fractions of the planned hold in minutes; the stale
+    review never fires before 10 minutes. A fade scalp is entered against the
+    trend by design, so it carries no structure-reversal exit and no late-hold
+    exit.
+    """
+    if plan.profile in SCALP_PROFILES:
+        s = cfg.scalp
+        return ExitRules(
+            s.stale_minutes * 60,
+            s.stale_progress_r,
+            f"{s.stale_minutes}m",
+            s.breakeven_at_r,
+            s.trailing_activate_r,
+            s.liquidation_buffer_pct,
+            0.75,
+            None,
+            None,
+            None,
+        )
+    t = cfg.trend
+    hold_minutes = plan.hold_hours * 60
+    stale_after_s = max(600, round(t.stale_hold_fraction * hold_minutes) * 60)
+    return ExitRules(
+        stale_after_s,
+        t.stale_progress_r,
+        f"{stale_after_s // 60}m",
+        t.breakeven_at_r,
+        t.trailing_activate_r,
+        t.liquidation_buffer_pct,
+        t.hope_exit_r,
+        "trend_15m",
+        round(t.late_hold_fraction * hold_minutes * 60),
+        t.late_hold_min_r,
+    )
 
 
 def _apply_live_suggestion(trade: TrackedTrade) -> None:
@@ -116,22 +171,21 @@ def evaluate_exit(
         return trade
     side = trade.plan.side
     sign = 1 if side == "long" else -1
-    scalp = trade.plan.profile in ("scalp", "scalp_short")
+    opposite = "short" if side == "long" else "long"
+    scalp = trade.plan.profile in SCALP_PROFILES
+    rules = exit_rules(trade.plan, cfg)
     interval_seconds = INTERVALS.get(trade.plan.trigger_interval, 900)
-    if scalp:
-        stale_after = cfg.scalp.stale_minutes * 60
-        stale_need_r = cfg.scalp.stale_progress_r
-        stale_window = f"{cfg.scalp.stale_minutes}m"
-        breakeven_at_r = cfg.scalp.breakeven_at_r
-        trailing_activate_r = cfg.scalp.trailing_activate_r
-    else:
-        stale_after = cfg.stale_trade_hours * 3600
-        stale_need_r = cfg.stale_progress_r
-        stale_window = f"{cfg.stale_trade_hours}h"
-        breakeven_at_r = cfg.breakeven_at_r
-        trailing_activate_r = cfg.trailing_activate_r
     age = now - trade.opened_at
-    hours_left = trade.plan.hold_hours - age / 3600
+    hold_minutes = trade.plan.hold_hours * 60
+    minutes_left = hold_minutes - age / 60
+    # Plans held for at most two hours read in minutes; older stored plans
+    # (pre-1.8 swing rows) keep their hour strings.
+    in_minutes = trade.plan.hold_hours <= 2
+    time_left = (
+        f"{max(0.0, minutes_left):.0f} min left"
+        if in_minutes
+        else f"{max(0.0, minutes_left / 60):.1f}h left"
+    )
     max_hold = age >= trade.plan.hold_hours * 3600
     data_fresh = (
         decision is not None
@@ -142,7 +196,7 @@ def evaluate_exit(
     mark = _finite(trade.mark_price) or last
     metrics = decision.metrics if decision else {}
     trend_1h = metrics.get("trend_1h")
-    trend_4h = metrics.get("trend_4h")
+    trend_15m = metrics.get("trend_15m")
     vwap = _finite(metrics.get("vwap"))
     funding_pct = _finite(metrics.get("funding_rate_pct"))
     initial_risk = abs(trade.plan.entry - trade.plan.stop)
@@ -157,10 +211,11 @@ def evaluate_exit(
         if live is not None and initial_risk > 0
         else None
     )
-    # A fade short is entered against the 1h trend by design; only swing
-    # trades exit on a completed structure reversal.
-    structure_reversed = not scalp and trend_1h == (
-        "short" if side == "long" else "long"
+    # A fade scalp is entered against the trend by design; only trend trades
+    # exit on a completed structure reversal (15m for trend).
+    structure_reversed = (
+        rules.structure_key is not None
+        and metrics.get(rules.structure_key) == opposite
     )
     stop_hit = False
     target_hit = False
@@ -197,9 +252,16 @@ def evaluate_exit(
         )
         stale = (
             progress_r is not None
-            and age >= stale_after
-            and progress_r < stale_need_r
+            and age >= rules.stale_after_s
+            and progress_r < rules.stale_need_r
         )
+    late = (
+        rules.late_after_s is not None
+        and rules.late_min_r is not None
+        and current_r is not None
+        and age >= rules.late_after_s
+        and current_r < rules.late_min_r
+    )
 
     liq = _finite(trade.plan.liquidation_estimate)
     liq_room_pct = (
@@ -248,7 +310,11 @@ def evaluate_exit(
             hold_check(
                 "Hold time remaining",
                 not max_hold,
-                f"{max(0.0, hours_left):.1f}h of {trade.plan.hold_hours}h hold left"
+                (
+                    f"{max(0.0, minutes_left):.0f} of {hold_minutes} min hold left"
+                    if in_minutes
+                    else f"{max(0.0, minutes_left / 60):.1f}h of {trade.plan.hold_hours}h hold left"
+                )
                 if not max_hold
                 else "Maximum holding time reached",
             ),
@@ -272,9 +338,9 @@ def evaluate_exit(
             ),
             hold_check(
                 "Liquidation buffer",
-                liq_room_pct is not None and liq_room_pct >= cfg.liquidation_buffer_pct,
+                liq_room_pct is not None and liq_room_pct >= rules.liquidation_buffer_pct,
                 (
-                    f"{liq_room_pct:.2f}% to estimated isolated liquidation; need ≥{cfg.liquidation_buffer_pct:g}%"
+                    f"{liq_room_pct:.2f}% to estimated isolated liquidation; need ≥{rules.liquidation_buffer_pct:g}%"
                     if liq_room_pct is not None
                     else "Estimated liquidation unavailable; verify the price on Bitunix"
                 ),
@@ -296,32 +362,32 @@ def evaluate_exit(
                 ),
             ),
             hold_check(
-                "1h structure",
-                scalp or trend_1h == side,
+                "Structure intact",
+                scalp or trend_15m == side,
                 (
-                    "Mean-reversion scalp; the 1h trend is faded by design"
+                    "Mean-reversion scalp; the trend structure is faded by design"
                     if scalp
-                    else f"Completed 1h structure is {trend_1h}"
-                    if trend_1h
-                    else "1h structure unavailable"
+                    else f"15m structure {trend_15m}"
+                    if trend_15m
+                    else "15m structure unavailable"
                 ),
             ),
             hold_check(
-                "4h bias",
-                scalp or trend_4h == side,
+                "Bias intact",
+                scalp or trend_1h == side,
                 (
-                    "Mean-reversion scalp; 4h bias is not required"
+                    "Mean-reversion scalp; the 1h bias is not required"
                     if scalp
-                    else f"4h EMA bias is {trend_4h}"
-                    if trend_4h
-                    else "4h bias unavailable"
+                    else f"1h bias {trend_1h}"
+                    if trend_1h
+                    else "1h bias unavailable"
                 ),
             ),
             hold_check(
                 "Progress vs review window",
                 data_fresh and not stale,
                 (
-                    f"{progress_r:.2f}R best progress; need {stale_need_r:g}R within {stale_window}"
+                    f"{progress_r:.2f}R best progress; need {rules.stale_need_r:g}R within {rules.stale_window}"
                     if progress_r is not None
                     else "Progress cannot be measured without a fresh price"
                 ),
@@ -388,18 +454,18 @@ def evaluate_exit(
     elif structure_reversed:
         trade.state, trade.reason = (
             f"EXIT_{side.upper()}",
-            "Completed 1h structure reversed against the trade",
+            "Completed 15m structure reversed against the trade",
         )
     elif (
         liq_room_pct is not None
-        and liq_room_pct < cfg.liquidation_buffer_pct
+        and liq_room_pct < rules.liquidation_buffer_pct
     ):
         trade.state, trade.reason = (
             f"EXIT_{side.upper()}",
             "Estimated liquidation buffer is gone. Close on Bitunix now. "
             "A reversal will not beat liquidation.",
         )
-    elif current_r is not None and current_r <= -cfg.hope_exit_r:
+    elif current_r is not None and current_r <= -rules.hope_exit_r:
         trade.state, trade.reason = (
             f"EXIT_{side.upper()}",
             f"Do not wait for a reversal. Live {current_r:+.2f}R; the structural "
@@ -422,10 +488,15 @@ def evaluate_exit(
                 f"EXIT_{side.upper()}",
                 "Trade failed to progress within the review window",
             )
+        elif late:
+            trade.state, trade.reason = (
+                f"EXIT_{side.upper()}",
+                "Hold window closing without progress; close on Bitunix",
+            )
         else:
             trade.state = f"HOLD_{side.upper()}"
             proposed = trade.current_stop
-            if progress_r is not None and progress_r >= breakeven_at_r:
+            if progress_r is not None and progress_r >= rules.breakeven_at_r:
                 covered = (
                     trade.plan.entry
                     + sign * trade.plan.entry * trade.plan.cost_pct / 100
@@ -434,7 +505,7 @@ def evaluate_exit(
                     proposed = covered
             if (
                 progress_r is not None
-                and progress_r >= trailing_activate_r
+                and progress_r >= rules.trailing_activate_r
                 and last is not None
             ):
                 # Ratchet on observed closes; keep at least the original risk distance.
@@ -449,9 +520,12 @@ def evaluate_exit(
                 )
                 stop_advanced = True
             elif current_r is not None:
+                structure_text = (
+                    f"1h {trend_1h or '—'}" if scalp else f"15m {trend_15m or '—'}"
+                )
                 trade.reason = (
-                    f"Live: {live:.5g} · {current_r:+.2f}R · 1h {trend_1h or '—'} · "
-                    f"{max(0.0, hours_left):.1f}h left"
+                    f"Live: {live:.5g} · {current_r:+.2f}R · {structure_text} · "
+                    f"{time_left}"
                 )
             else:
                 trade.reason = "Original setup remains active"

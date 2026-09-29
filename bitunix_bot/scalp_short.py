@@ -11,7 +11,6 @@ planned leverage.
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass, replace
 
 import numpy as np
@@ -27,7 +26,9 @@ from .intraday import (
     TradePlan,
     action,
     ema_bias,
+    liquidation_fit,
     session_vwap,
+    size_notional,
     trend,
     volatility,
 )
@@ -294,45 +295,6 @@ def scalp_targets(
     return chosen
 
 
-def liquidation_fit(
-    market: Market,
-    entry: float,
-    stop: float,
-    notional: float,
-    cost_pct: float,
-    atr_value: float,
-    leverage: int,
-    buffer_pct: float,
-    side: str = "short",
-) -> tuple[int, float | None, object]:
-    """Highest leverage whose estimated liquidation stays beyond the stop."""
-    sign = 1 if side == "long" else -1
-    tier = next(
-        (
-            t
-            for t in sorted(market.tiers, key=lambda t: t.minimum, reverse=True)
-            if t.minimum <= notional <= t.maximum
-        ),
-        None,
-    )
-    if tier is None:
-        return 0, None, None
-    adverse_basis = min(0.0, sign * (market.mark - market.price))
-    buffer = max(entry * buffer_pct / 100, atr_value * 0.5)
-    max_leverage, liquidation = 0, None
-    for level in range(1, tier.max_leverage + 1):
-        estimated = (
-            entry
-            * (1 - sign / level + sign * cost_pct / 100)
-            / (1 - sign * tier.maintenance_rate)
-        )
-        if sign * (stop - estimated) + adverse_basis >= buffer:
-            max_leverage = level
-        if level == leverage:
-            liquidation = estimated
-    return max_leverage, liquidation, tier
-
-
 def build_scalp_plan(
     market: Market,
     bars: list[Candle],
@@ -388,12 +350,15 @@ def build_scalp_plan(
     funding_cost_pct = funding_pct * funding_payments
     cost_pct = cfg.round_trip_fee_pct + cfg.slippage_pct + funding_cost_pct
     risk_fraction = (stop_pct + cost_pct) / 100
-    notional = min(
-        settings.planning_equity * settings.risk_pct / 100 / risk_fraction,
-        settings.planning_equity * settings.leverage * 0.9,
+    qty, notional = size_notional(
+        settings.planning_equity,
+        settings.risk_pct,
+        settings.leverage,
+        risk_fraction,
+        entry,
+        market.quantity_step,
     )
-    qty = math.floor(notional / entry / market.quantity_step) * market.quantity_step
-    notional = qty * entry
+    # Shared with the trend profile; the scalp searches up to the pair cap.
     max_leverage, liquidation, tier = liquidation_fit(
         market,
         entry,
@@ -404,6 +369,7 @@ def build_scalp_plan(
         settings.leverage,
         scalp.liquidation_buffer_pct,
         side,
+        cap=None,
     )
     hourly_atr = volatility(hourly)
     travel = scalp.travel_atr_multiple * hourly_atr

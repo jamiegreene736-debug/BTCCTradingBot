@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import base64
 import math
-from dataclasses import asdict, replace
+import re
+from dataclasses import asdict, fields, replace
 from unittest.mock import MagicMock, patch
 
 import pytest
 import requests
 
+from bitunix_bot import intraday, scalp_short
 from bitunix_bot.client import BitunixClient, BitunixError
 from bitunix_bot.config import load
 from bitunix_bot.dashboard import create_app
@@ -20,15 +22,18 @@ from bitunix_bot.intraday import (
     Tier,
     closed_candles,
     ema_bias,
+    estimate_liquidation,
     evaluate_intraday,
     find_setup,
     funding_cost,
+    liquidation_fit,
     make_check,
     select_targets,
+    travel_budget,
     trend,
     waiting_check,
 )
-from bitunix_bot.signal_config import SignalsCfg, SignalSettings
+from bitunix_bot.signal_config import SignalsCfg, SignalSettings, TrendCfg
 from bitunix_bot.signal_scanner import SignalScanner, parse_open_position
 from bitunix_bot.signal_store import (
     HOLD_CHECK_LABELS,
@@ -38,51 +43,109 @@ from bitunix_bot.signal_store import (
 )
 
 NOW = 1_800_000_060
+PRICE = 98.7
+# Structural pullback low of the happy-path 5m trigger: stop 98.36 (0.35%).
+PULLBACK_LOW = 98.395
+# A 15m swing high 1.25% above the entry: inside the 2h travel budget
+# (1.5 x ATR1h x sqrt(2) = 1.38%), outside the 1h budget (0.97%).
+TARGET_HIGH = 99.93
 
 
-def market_frames(side="long"):
-    frames = {}
-    for interval, seconds in (("1h", 3600), ("4h", 14400)):
-        values = [80 + i * 0.2 + math.sin(i * math.pi / 6) * 0.8 for i in range(100)]
-        frames[interval] = [
-            Candle(
-                NOW // seconds * seconds - (100 - i) * seconds,
-                c - 0.1,
-                c + 0.3,
-                c - 0.3,
-                c,
-                100,
-            )
-            for i, c in enumerate(values)
-        ]
-        frames[interval][6] = replace(frames[interval][6], high=110)
+def hourly_bars(drift=0.08, amp=0.25, span=0.32):
+    """100 EMA-stacked 1h bars ending at PRICE: ATR14 = 2 x span (0.65%)."""
+    return [
+        Candle(
+            NOW // 3600 * 3600 - (100 - i) * 3600,
+            c - 0.05,
+            c + span,
+            c - span,
+            c,
+            1000.0,
+        )
+        for i, c in (
+            (i, PRICE - (99 - i) * drift + amp * math.sin((i - 99) * math.pi / 6))
+            for i in range(100)
+        )
+    ]
+
+
+def fifteen_bars(drift=0.03, amp=0.12, span=0.15, volume=700_000.0):
+    """200 sine-drift 15m bars with HH/HL; per-bar volume clears the session gate."""
+    return [
+        Candle(
+            NOW // 900 * 900 - (200 - i) * 900,
+            c - 0.02,
+            c + span,
+            c - span,
+            c,
+            volume,
+        )
+        for i, c in (
+            (i, PRICE - (199 - i) * drift + amp * math.sin((i - 199) * math.pi / 8))
+            for i in range(200)
+        )
+    ]
+
+
+def pullback_bars(pullback_low=PULLBACK_LOW, price=PRICE):
+    """200 flat 5m bars (ATR ~0.17) ending in a 4-bar pullback and reclaim."""
+    base = pullback_low + 0.005
     bars = [
-        Candle(NOW // 900 * 900 - (200 - i) * 900, 98.3, 98.7, 98.1, 98.4, 100)
+        Candle(
+            NOW // 300 * 300 - (200 - i) * 300,
+            base,
+            base + 0.085,
+            base - 0.085,
+            base,
+            100.0,
+        )
         for i in range(200)
     ]
     bars[-4:] = [
-        replace(bars[-4], open=98.4, high=98.8, low=98.3, close=98.6),
-        replace(bars[-3], open=98.6, high=98.7, low=98.1, close=98.3),
-        replace(bars[-2], open=98.3, high=98.4, low=97.95, close=98.2),
-        replace(bars[-1], open=98.2, high=98.8, low=98.15, close=98.7, volume=200),
+        replace(
+            bars[-4], open=base, high=base + 0.2, low=pullback_low + 0.005, close=base + 0.15
+        ),
+        replace(
+            bars[-3],
+            open=base + 0.15,
+            high=base + 0.17,
+            low=pullback_low + 0.02,
+            close=base + 0.05,
+        ),
+        replace(
+            bars[-2], open=base + 0.05, high=base + 0.10, low=pullback_low, close=base + 0.03
+        ),
+        replace(
+            bars[-1],
+            open=base + 0.03,
+            high=price + 0.02,
+            low=base + 0.02,
+            close=price,
+            volume=200.0,
+        ),
     ]
-    frames["15m"] = bars
+    return bars
+
+
+def mirror(frames):
+    return {
+        key: [
+            Candle(c.time, 200 - c.open, 200 - c.low, 200 - c.high, 200 - c.close, c.volume)
+            for c in values
+        ]
+        for key, values in frames.items()
+    }
+
+
+def market_frames(side="long", pullback_low=PULLBACK_LOW, hourly=None):
+    frames = {
+        "5m": pullback_bars(pullback_low),
+        "15m": fifteen_bars(),
+        "1h": hourly or hourly_bars(),
+    }
     if side == "short":
-        frames = {
-            key: [
-                Candle(
-                    c.time,
-                    200 - c.open,
-                    200 - c.low,
-                    200 - c.high,
-                    200 - c.close,
-                    c.volume,
-                )
-                for c in values
-            ]
-            for key, values in frames.items()
-        }
-    price = frames["15m"][-1].close
+        frames = mirror(frames)
+    price = frames["5m"][-1].close
     market = Market(
         "BTCUSDT",
         price,
@@ -117,31 +180,41 @@ def candle_rows(bars):
     ]
 
 
-def ready_decision(side="long"):
-    market, frames = market_frames(side)
-    # Keep an actual, farther structural target; yesterday's near high blocks this fixture's baseline trade.
-    for i in range(96):
-        frames["15m"][i] = replace(
-            frames["15m"][i],
-            high=102.4 if side == "long" else frames["15m"][i].high,
-            low=97.6 if side == "short" else frames["15m"][i].low,
-        )
+def ready_decision(side="long", settings=None, **overrides):
+    market, frames = market_frames(side, **overrides)
+    # Lift one confirmed 15m swing high (low for shorts) inside the 2h travel
+    # budget; it sits outside the 64-bar structure window so trend() is unchanged.
+    frames["15m"][120] = replace(
+        frames["15m"][120],
+        **({"high": TARGET_HIGH} if side == "long" else {"low": 200 - TARGET_HIGH}),
+    )
     decision = evaluate_intraday(
-        market, frames, None, SignalSettings(), SignalsCfg(), NOW
+        market, frames, None, settings or SignalSettings(), SignalsCfg(), NOW
     )
     return decision, market, frames
 
 
 @pytest.mark.parametrize("side", ["long", "short"])
 def test_completed_pullback_produces_entry_with_structural_stop(side):
-    decision, _, _ = ready_decision(side)
+    decision, _, frames = ready_decision(side)
     assert decision.state == f"ENTER_{side.upper()}", decision.reasons
-    assert decision.plan is not None
-    assert decision.plan.net_reward_risk >= 2
-    assert decision.plan.risk_usdt <= 5
+    plan = decision.plan
+    assert plan is not None
+    assert plan.net_reward_risk >= 1.5
+    assert plan.risk_usdt <= 5
     sign = 1 if side == "long" else -1
-    assert sign * (decision.plan.entry - decision.plan.stop) > 0
-    assert sign * (decision.plan.target - decision.plan.entry) > 0
+    assert sign * (plan.entry - plan.stop) > 0
+    assert sign * (plan.target - plan.entry) > 0
+    assert plan.leverage == 50 and plan.hold_hours == 2
+    assert plan.profile == "trend" and plan.trigger_interval == "5m"
+    assert plan.max_leverage >= 50
+    assert plan.liquidation_estimate is not None
+    assert sign * (plan.stop - plan.liquidation_estimate) >= 0.0025 * plan.entry
+    assert plan.stop_pct <= 0.60
+    assert plan.stop_pct == pytest.approx(0.35, abs=0.01)
+    assert plan.margin == pytest.approx(plan.notional / 50)
+    assert plan.expires_at == frames["5m"][-1].time + 300 + 600
+    assert decision.metrics["trend_15m"] == side
     assert not hasattr(decision, "confidence")
     assert decision.actions == [
         {
@@ -154,10 +227,10 @@ def test_completed_pullback_produces_entry_with_structural_stop(side):
 
 def test_partial_candle_cannot_change_closed_signal():
     _, frames = market_frames()
-    rows = candle_rows(frames["15m"])
+    rows = candle_rows(frames["5m"])
     rows += [
         {
-            "time": NOW // 900 * 900 * 1000,
+            "time": NOW // 300 * 300 * 1000,
             "open": 99,
             "high": 200,
             "low": 1,
@@ -165,14 +238,14 @@ def test_partial_candle_cannot_change_closed_signal():
             "baseVol": 999999,
         }
     ]
-    assert closed_candles(rows, "15m", NOW) == frames["15m"]
-    assert closed_candles(list(reversed(rows)), "15m", NOW) == frames["15m"]
+    assert closed_candles(rows, "5m", NOW) == frames["5m"]
+    assert closed_candles(list(reversed(rows)), "5m", NOW) == frames["5m"]
 
 
 @pytest.mark.parametrize("fault", ["gap", "nan", "stale", "duplicate", "bad_ohlc"])
 def test_invalid_candles_fail_closed(fault):
     _, frames = market_frames()
-    rows = candle_rows(frames["15m"])
+    rows = candle_rows(frames["5m"])
     if fault == "gap":
         rows.pop(130)
     if fault == "nan":
@@ -184,7 +257,7 @@ def test_invalid_candles_fail_closed(fault):
     if fault == "bad_ohlc":
         rows[-1]["low"] = 101
     with pytest.raises(ValueError):
-        closed_candles(rows, "15m", NOW)
+        closed_candles(rows, "5m", NOW)
 
 
 @pytest.mark.parametrize("side", ["long", "short"])
@@ -192,7 +265,7 @@ def test_breakout_needs_later_retest_and_volume(side):
     _, frames = market_frames()
     bars = [
         replace(c, open=99.5, close=99.5, high=100, low=99, volume=100)
-        for c in frames["15m"]
+        for c in frames["5m"]
     ]
     bars[-3] = replace(
         bars[-3], open=99.5, close=100.7, high=100.8, low=99.4, volume=250
@@ -206,10 +279,11 @@ def test_breakout_needs_later_retest_and_volume(side):
             )
             for c in bars
         ]
-    setup = find_setup(bars, frames["1h"], side, 1, None, SignalsCfg())
+    structure = frames["15m"] if side == "long" else mirror(frames)["15m"]
+    setup = find_setup(bars, structure, side, 1, None, SignalsCfg().trend)
     assert setup is not None and setup.name == "Breakout & retest"
     bars[-3] = replace(bars[-3], volume=100)
-    setup = find_setup(bars, frames["1h"], side, 1, None, SignalsCfg())
+    setup = find_setup(bars, structure, side, 1, None, SignalsCfg().trend)
     assert setup is None or setup.name != "Breakout & retest"
 
 
@@ -222,8 +296,27 @@ def test_costs_and_actual_funding_schedule_can_block_trade():
         market, frames, None, SignalSettings(), SignalsCfg(), NOW
     )
     assert not decision.state.startswith("ENTER")
-    assert funding_cost(market, "long", NOW, 12) == (12.0, 12)
-    assert funding_cost(market, "short", NOW, 12) == (0, 12)
+    assert any(c.label == "Funding drag" and not c.passed for c in decision.checks)
+    # Two hourly prints fall inside a 120-minute hold.
+    assert funding_cost(market, "long", NOW, 120) == (2.0, 2)
+    assert funding_cost(market, "short", NOW, 120) == (0, 2)
+
+
+def test_funding_cost():
+    market, _ = market_frames()
+    rate = 0.0001
+    market = replace(market, funding_rate=rate, funding_interval_hours=8)
+    assert funding_cost(replace(market, next_funding=NOW + 3600), "long", NOW, 120) == (
+        pytest.approx(rate * 100),
+        1,
+    )
+    assert funding_cost(replace(market, next_funding=NOW + 7201), "long", NOW, 120) == (
+        0.0,
+        0,
+    )
+    hourly = replace(market, funding_interval_hours=1, next_funding=NOW + 1800)
+    assert funding_cost(hourly, "long", NOW, 120) == (pytest.approx(rate * 200), 2)
+    assert funding_cost(hourly, "long", NOW, 60) == (pytest.approx(rate * 100), 1)
 
 
 def test_exact_funding_settlement_is_charged():
@@ -231,8 +324,8 @@ def test_exact_funding_settlement_is_charged():
     market = replace(
         market, funding_rate=0.0001, next_funding=NOW, funding_interval_hours=8
     )
-    cost, payments = funding_cost(market, "long", NOW, 24)
-    assert payments == 4 and cost == pytest.approx(0.04)
+    cost, payments = funding_cost(market, "long", NOW, 120)
+    assert payments == 1 and cost == pytest.approx(0.01)
 
 
 @pytest.mark.parametrize(
@@ -255,80 +348,87 @@ def test_execution_and_data_gates_block_entries(change):
 
 def test_higher_leverage_does_not_tighten_stop():
     _, market, frames = ready_decision()
+    # A 2.5% maintenance tier: the 0.35% stop fits 20x but not 50x.
     market = replace(market, tiers=[Tier(0, 50_000, 0.025, 125)])
     low = evaluate_intraday(
-        market, frames, None, SignalSettings(leverage=10), SignalsCfg(), NOW
+        market, frames, None, SignalSettings(leverage=20), SignalsCfg(), NOW
     )
     high = evaluate_intraday(
-        market, frames, None, SignalSettings(leverage=40), SignalsCfg(), NOW
+        market, frames, None, SignalSettings(leverage=50), SignalsCfg(), NOW
     )
     assert low.plan.stop == high.plan.stop
-    assert low.state == "ENTER_LONG"
+    assert low.plan.stop_pct == high.plan.stop_pct
+    assert low.plan.notional == pytest.approx(high.plan.notional)
+    assert low.state == "ENTER_LONG", low.reasons
     assert high.state == "WATCH_LONG"
-    assert high.plan.max_leverage < 40
+    ceiling = next(c for c in high.checks if c.label == "Leverage ceiling")
+    assert not ceiling.passed and "ceiling 30x" in ceiling.detail
+    assert high.plan.max_leverage < 50
+    assert high.plan.max_leverage == 30
 
 
 def test_select_targets_skips_too_close_and_beyond_hold_budget():
-    targets = select_targets(
-        [100.2, 102.5, 140.0],
-        100.0,
-        "long",
-        0.8,
-        0.18,
-        0.5,
-        1.2,
-        SignalsCfg(),
-    )
-    assert targets == [102.5]
+    # 100.2 nets under 1.5R, 140 is beyond the travel budget; 101.2 clears both.
+    assert select_targets(
+        [100.2, 101.2, 140.0], 100.0, "long", 0.35, 0.18, 1.273, 1.5
+    ) == [101.2]
+    assert select_targets([100.2, 101.2, 140.0], 100.0, "long", 0.35, 0.18, 0.90, 1.5) == []
+    assert select_targets([99.8, 98.8, 60.0], 100.0, "short", 0.35, 0.18, 1.273, 1.5) == [98.8]
 
 
-def test_4h_ema_bias_can_enter_without_confirmed_4h_swings():
+def test_1h_ema_bias_can_enter_without_confirmed_1h_swings():
     _, market, frames = ready_decision()
-    base = frames["4h"][0].close
-    frames["4h"] = [
+    # A straight 1h ramp has no pivots, so trend() is mixed while the EMA bias is long.
+    frames["1h"] = [
         replace(
             c,
-            open=base + i * 0.15 - 0.04,
-            close=base + i * 0.15,
-            high=base + i * 0.15 + 0.02,
-            low=base + i * 0.15 - 0.06,
+            open=PRICE - (99 - i) * 0.08 - 0.05,
+            close=PRICE - (99 - i) * 0.08,
+            high=PRICE - (99 - i) * 0.08 + 0.32,
+            low=PRICE - (99 - i) * 0.08 - 0.32,
         )
-        for i, c in enumerate(frames["4h"])
+        for i, c in enumerate(frames["1h"])
     ]
-    assert trend(frames["4h"]) == "mixed"
-    assert ema_bias(frames["4h"]) == "long"
+    assert trend(frames["1h"]) == "mixed"
+    assert ema_bias(frames["1h"]) == "long"
     decision = evaluate_intraday(
         market, frames, None, SignalSettings(), SignalsCfg(), NOW
     )
     assert decision.state == "ENTER_LONG", decision.reasons
-    assert decision.metrics["trend_4h"] == "long"
-    assert decision.metrics["trend_4h_structure"] == "mixed"
+    assert decision.metrics["trend_1h"] == "long"
+    assert decision.metrics["trend_15m"] == "long"
+    assert "trend_4h" not in decision.metrics
 
 
-def test_opposite_4h_bias_blocks_entry():
+def test_opposite_1h_bias_blocks_entry():
     _, market, frames = ready_decision()
-    frames["4h"] = [
+    frames["1h"] = [
         replace(
             c,
-            open=c.close + 0.05,
-            high=c.close + 0.06,
-            low=c.close - 0.02,
-            close=max(70, 100 - i * 0.25),
+            open=110 - i * 0.08 + 0.05,
+            close=110 - i * 0.08,
+            high=110 - i * 0.08 + 0.32,
+            low=110 - i * 0.08 - 0.32,
         )
-        for i, c in enumerate(frames["4h"])
+        for i, c in enumerate(frames["1h"])
     ]
-    assert ema_bias(frames["4h"]) != "long"
+    assert ema_bias(frames["1h"]) == "short"
     decision = evaluate_intraday(
         market, frames, None, SignalSettings(), SignalsCfg(), NOW
     )
-    assert not decision.state.startswith("ENTER")
+    assert decision.state == "WAIT" and decision.side == ""
+    alignment = next(c for c in decision.checks if c.label == "1h bias / 15m structure")
+    assert not alignment.passed and "1h bias short; 15m structure long" == alignment.detail
+    assert all(
+        c.waiting for c in decision.checks if c.label in ("Entry zone", "BTC context")
+    )
 
 
 def test_impulse_continuation_after_pullback():
     _, frames = market_frames()
     bars = [
         replace(c, open=80.4, close=80.5, high=80.7, low=80.3, volume=100)
-        for c in frames["15m"]
+        for c in frames["5m"]
     ]
     bars[-6] = replace(
         bars[-6], open=105.5, close=107.2, high=107.3, low=105.4, volume=220
@@ -340,7 +440,7 @@ def test_impulse_continuation_after_pullback():
     bars[-1] = replace(
         bars[-1], open=106.4, close=106.85, high=106.9, low=106.35, volume=180
     )
-    setup = find_setup(bars, frames["1h"], "long", 0.7, None, SignalsCfg())
+    setup = find_setup(bars, frames["15m"], "long", 0.7, None, SignalsCfg().trend)
     assert setup is not None and setup.name == "Impulse continuation"
 
 
@@ -386,29 +486,65 @@ def new_trade(side="long"):
     return trade, decision, frames
 
 
+def flat_bars(entry, start, minutes, interval=300):
+    """Completed trigger bars pinned at the entry price: no progress in either direction."""
+    return [
+        Candle(start // interval * interval + k * interval, entry, entry, entry, entry, 100)
+        for k in range(minutes * 60 // interval)
+    ]
+
+
 @pytest.mark.parametrize("side", ["long", "short"])
-@pytest.mark.parametrize("exit_type", ["stop", "target", "time", "structure", "stale"])
+@pytest.mark.parametrize(
+    "exit_type", ["stop", "target", "time", "structure", "stale", "late"]
+)
 def test_exit_rules_are_position_specific_and_sticky(side, exit_type):
     trade, decision, frames = new_trade(side)
+    sign = 1 if side == "long" else -1
     now = NOW + 20
+    bars = frames["5m"]
     if exit_type == "stop":
         decision.price = trade.plan.stop
     if exit_type == "target":
         decision.price = trade.plan.target
     if exit_type == "time":
-        now += 24 * 3600
+        now = NOW + 2 * 3600
     if exit_type == "structure":
-        decision.metrics["trend_1h"] = "short" if side == "long" else "long"
+        decision.metrics["trend_15m"] = "short" if side == "long" else "long"
     if exit_type == "stale":
-        now += 4 * 3600
+        # 35% of the 120-minute hold: 42 minutes; one minute earlier still holds.
+        decision.price = trade.plan.entry
+        bars = flat_bars(trade.plan.entry, NOW, 42)
+        decision.as_of = NOW + 41 * 60
+        evaluate_exit(trade, decision, bars, NOW + 41 * 60, SignalsCfg())
+        assert trade.state == f"HOLD_{side.upper()}"
+        now = NOW + 42 * 60 + 60
+    if exit_type == "late":
+        # Best progress cleared the stale review (0.3R) but the trade sits at
+        # +0.2R when 75% of the hold has gone.
+        risk = abs(trade.plan.entry - trade.plan.stop)
+        trade.best_price = trade.plan.entry + sign * 0.4 * risk
+        decision.price = trade.plan.entry + sign * 0.2 * risk
+        bars = []
+        now = NOW + 90 * 60
     decision.as_of = now
-    evaluate_exit(trade, decision, frames["15m"], now, SignalsCfg())
-    assert trade.state == f"EXIT_{side.upper()}"
+    evaluate_exit(trade, decision, bars, now, SignalsCfg())
+    assert trade.state == f"EXIT_{side.upper()}", trade.reason
     assert trade.suggestion == f"CLOSE_{side.upper()}"
     assert trade.hold_confidence is not None and trade.hold_confidence <= 10
     assert [item.label for item in trade.checks] == list(HOLD_CHECK_LABELS)
+    if exit_type == "late":
+        assert "Hold window closing" in trade.reason
+    if exit_type == "structure":
+        assert "15m structure reversed" in trade.reason
+    hold_left = next(c for c in trade.checks if c.label == "Hold time remaining")
+    if exit_type == "time":
+        assert hold_left.detail == "Maximum holding time reached"
+    else:
+        assert re.fullmatch(r"\d+ of 120 min hold left", hold_left.detail)
     decision.price = trade.plan.entry
     decision.metrics["trend_1h"] = side
+    decision.metrics["trend_15m"] = side
     evaluate_exit(trade, decision, [], now + 1, SignalsCfg())
     assert trade.state == f"EXIT_{side.upper()}"
     assert trade.closed_at is None
@@ -418,7 +554,7 @@ def test_stale_market_causes_review_and_time_exit_still_works():
     trade, decision, _ = new_trade()
     evaluate_exit(trade, decision, [], NOW + 100, SignalsCfg())
     assert trade.state == "REVIEW"
-    evaluate_exit(trade, None, [], NOW + 24 * 3600, SignalsCfg())
+    evaluate_exit(trade, None, [], NOW + 2 * 3600, SignalsCfg())
     assert trade.state == "EXIT_LONG"
 
 
@@ -437,21 +573,45 @@ def test_hold_suggestion_is_live_with_fixed_close_checks():
     assert [item.label for item in trade.checks] == list(HOLD_CHECK_LABELS)
     assert trade.hold_confidence >= 70
     assert trade.reason.startswith("Live:")
-    assert "1h short" in trade.reason
+    assert "15m short" in trade.reason
+    assert "min left" in trade.reason
+
+
+def test_hold_reason_and_check_use_minutes():
+    trade, decision, _ = new_trade()
+    now = NOW + 30 * 60
+    decision.as_of = now
+    evaluate_exit(trade, decision, [], now, SignalsCfg())
+    assert trade.state == "HOLD_LONG"
+    assert trade.reason.endswith("90 min left")
+    hold_left = next(c for c in trade.checks if c.label == "Hold time remaining")
+    assert hold_left.detail == "90 of 120 min hold left"
+    progress = next(c for c in trade.checks if c.label == "Progress vs review window")
+    assert progress.detail.endswith("need 0.3R within 42m")
+    one_hour = replace(trade.plan, hold_hours=1)
+    trade = TrackedTrade("t1", "BTCUSDT", "paper", NOW, one_hour, one_hour.stop, one_hour.entry)
+    now = NOW + 15 * 60
+    decision.as_of = now
+    evaluate_exit(trade, decision, [], now, SignalsCfg())
+    assert trade.state == "HOLD_LONG"
+    assert trade.reason.endswith("45 min left")
+    progress = next(c for c in trade.checks if c.label == "Progress vs review window")
+    assert progress.detail.endswith("need 0.3R within 21m")
 
 
 def test_soft_hold_failures_suggest_close_without_latching_exit():
     trade, decision, _ = new_trade("short")
     risk = abs(trade.plan.entry - trade.plan.stop)
     decision.price = trade.plan.entry + 0.6 * risk
-    decision.metrics["trend_4h"] = "long"
+    decision.metrics["trend_1h"] = "long"
     decision.metrics["vwap"] = decision.price - 1
     decision.metrics["funding_rate_pct"] = -0.05
     evaluate_exit(trade, decision, [], NOW + 10, SignalsCfg())
     assert trade.state == "HOLD_SHORT"
     assert trade.suggestion == "CONSIDER_CLOSE"
     assert trade.hold_confidence < 70
-    assert any(item.label == "4h bias" and not item.passed for item in trade.checks)
+    assert any(item.label == "Bias intact" and not item.passed for item in trade.checks)
+    assert any(item.label == "Structure intact" and item.passed for item in trade.checks)
     assert any(
         item.label == "Drawdown contained" and not item.passed for item in trade.checks
     )
@@ -477,11 +637,66 @@ def test_hope_hold_and_liquidation_latch_exit(side):
 
     trade, decision, _ = new_trade(side)
     trade.plan = replace(
-        trade.plan, liquidation_estimate=decision.price - sign * decision.price * 0.001
+        trade.plan, liquidation_estimate=decision.price - sign * decision.price * 0.0030
     )
     evaluate_exit(trade, decision, [], NOW + 10, SignalsCfg())
+    assert trade.state == f"HOLD_{side.upper()}"
+    trade.plan = replace(
+        trade.plan, liquidation_estimate=decision.price - sign * decision.price * 0.0020
+    )
+    evaluate_exit(trade, decision, [], NOW + 15, SignalsCfg())
     assert trade.state == f"EXIT_{side.upper()}"
     assert "liquidation" in trade.reason.lower()
+
+
+def test_liquidation_buffer_exit_uses_profile_buffer():
+    cfg = SignalsCfg()
+    assert cfg.trend.liquidation_buffer_pct == 0.25
+    assert cfg.scalp.liquidation_buffer_pct == 0.15
+    trade, decision, _ = new_trade()
+    price = decision.price
+    trade.plan = replace(trade.plan, liquidation_estimate=price * (1 - 0.0020))
+    evaluate_exit(trade, decision, [], NOW + 10, cfg)
+    assert trade.state == "EXIT_LONG" and "liquidation" in trade.reason.lower()
+
+    trade, decision, _ = new_trade()
+    scalp_plan = replace(
+        trade.plan, profile="scalp", trigger_interval="1m", liquidation_estimate=price * (1 - 0.0020)
+    )
+    trade = TrackedTrade("s", "BTCUSDT", "paper", NOW, scalp_plan, scalp_plan.stop, scalp_plan.entry)
+    evaluate_exit(trade, decision, [], NOW + 10, cfg)
+    assert trade.state == "HOLD_LONG"
+    buffer_check = next(c for c in trade.checks if c.label == "Liquidation buffer")
+    assert buffer_check.passed and "need ≥0.15%" in buffer_check.detail
+    trade.plan = replace(scalp_plan, liquidation_estimate=price * (1 - 0.0010))
+    evaluate_exit(trade, decision, [], NOW + 15, cfg)
+    assert trade.state == "EXIT_LONG" and "liquidation" in trade.reason.lower()
+
+
+def test_late_hold_exit():
+    cfg = SignalsCfg()
+    late_at = NOW + round(cfg.trend.late_hold_fraction * 120) * 60
+    assert late_at == NOW + 90 * 60
+    trade, decision, _ = new_trade()
+    risk = abs(trade.plan.entry - trade.plan.stop)
+    # Best progress cleared the stale review; the live price has faded to +0.2R.
+    trade.best_price = trade.plan.entry + 0.4 * risk
+    decision.price = trade.plan.entry + 0.2 * risk
+    decision.as_of = late_at - 60
+    evaluate_exit(trade, decision, [], late_at - 60, cfg)
+    assert trade.state == "HOLD_LONG", trade.reason
+    decision.as_of = late_at
+    evaluate_exit(trade, decision, [], late_at, cfg)
+    assert trade.state == "EXIT_LONG"
+    assert trade.reason == "Hold window closing without progress; close on Bitunix"
+    assert trade.suggestion == "CLOSE_LONG"
+
+    trade, decision, _ = new_trade()
+    decision.price = trade.plan.entry + 0.6 * risk
+    decision.as_of = late_at
+    evaluate_exit(trade, decision, [], late_at, cfg)
+    assert trade.state == "HOLD_LONG", trade.reason
+    assert trade.reason.endswith("30 min left")
 
 
 def test_unconfirmed_stop_blocks_hold_and_losing_unprotected_exits():
@@ -660,6 +875,169 @@ def test_place_stop_tightens_a_wider_existing_stop(tmp_path):
     )
 
 
+def test_place_stop_and_confirm_stop_evaluate_on_trigger_frame(tmp_path):
+    row = {
+        "positionId": "HYPE1",
+        "symbol": "HYPEUSDT",
+        "qty": "36.59",
+        "side": "SHORT",
+        "avgOpenPrice": "80.37",
+        "markPrice": "80.574",
+        "unrealizedPNL": "-7.318",
+        "leverage": 40,
+        "ctime": (NOW - 120) * 1000,
+    }
+    scanner, decision = _live_scanner(tmp_path, [row])
+    # Only the trigger frame is held for every tracked symbol; no 15m frame.
+    scanner.frames = {
+        symbol: {"5m": frames["5m"]} for symbol, frames in scanner.frames.items()
+    }
+    scanner.frames["HYPEUSDT"] = {"5m": []}
+    parsed = parse_open_position(row)
+    assert parsed is not None
+    with patch("time.time", return_value=NOW):
+        manual = scanner.track(
+            {
+                "signal_id": decision.signal_id,
+                "kind": "manual",
+                "entry": decision.plan.entry,
+                "quantity": decision.plan.quantity,
+            }
+        )
+        confirmed = scanner.confirm_stop({"id": manual.id})
+        scanner._sync_exchange_positions([parsed], scanner.decisions, NOW, fetch_ok=True)
+        trade = next(t for t in scanner.store.trades(active_only=True) if t.symbol == "HYPEUSDT")
+        assert trade.plan.trigger_interval == "5m"
+        scanner.client.pending_tpsl.return_value = []
+        scanner.client.place_qty_tpsl.return_value = {"orderId": "SL1"}
+        placed = scanner.place_stop({"id": trade.id})
+    assert placed.exchange_stop_confirmed and confirmed.exchange_stop_confirmed
+    assert confirmed.state == "HOLD_LONG" and confirmed.suggestion == "HOLD_LONG"
+    assert all(
+        call.args[1] != "15m" for call in scanner.client.klines.call_args_list
+    )
+
+
+def _hype_position(side: str, leverage: int):
+    parsed = parse_open_position(
+        {
+            "positionId": f"HYPE-{side}-{leverage}",
+            "symbol": "HYPEUSDT",
+            "qty": "36.59",
+            "side": side.upper(),
+            "avgOpenPrice": "80.37",
+            "markPrice": "80.37",
+            "unrealizedPNL": "0",
+            "leverage": leverage,
+        }
+    )
+    assert parsed is not None
+    return parsed
+
+
+def _imported_trade(scanner, plan, side, position_id):
+    return TrackedTrade(
+        f"exchange:{position_id}",
+        "HYPEUSDT",
+        "exchange",
+        NOW,
+        plan,
+        plan.stop,
+        80.37,
+        state=f"HOLD_{side.upper()}",
+        reason="imported",
+        checked_at=NOW,
+        mark_price=80.37,
+        unrealized_pnl=0.0,
+        exchange_position_id=position_id,
+    )
+
+
+def test_imported_position_fallback_plan_is_fifty_x_safe(tmp_path):
+    scanner, _ = _live_scanner(tmp_path, [])
+    scanner.client.position_tiers.return_value = []  # tiers unknown
+    for side in ("long", "short"):
+        parsed = _hype_position(side, 50)
+        with patch("time.time", return_value=NOW):
+            plan = scanner._plan_for_position(parsed, None, SignalSettings(), NOW)
+        sign = 1 if side == "long" else -1
+        cost_pct = SignalsCfg().round_trip_fee_pct + SignalsCfg().slippage_pct
+        assert plan.profile == "trend" and plan.trigger_interval == "5m"
+        assert plan.leverage == 50 and plan.hold_hours == 2
+        assert 0 < plan.stop_pct <= 0.60
+        # A 1% maintenance guess still leaves the 0.20% stop a buffer inside.
+        assert plan.liquidation_estimate == pytest.approx(
+            estimate_liquidation(80.37, 50, cost_pct, 0.01, side)
+        )
+        assert sign * (plan.stop - plan.liquidation_estimate) > 0
+        assert plan.max_leverage >= 50
+        assert sign * (plan.target - plan.entry) > 0
+        assert plan.net_reward_risk >= SignalsCfg().trend.min_reward_risk - 1e-9
+        assert plan.expires_at == NOW + 1800
+
+
+@pytest.mark.parametrize("leverage", [70, 75, 85, 100, 125])
+@pytest.mark.parametrize("side", ["long", "short"])
+def test_imported_position_without_tiers_starts_in_hold_at_high_leverage(
+    tmp_path, leverage, side
+):
+    """A guessed maintenance tier must never raise a sticky liquidation EXIT."""
+    scanner, _ = _live_scanner(tmp_path, [])
+    scanner.client.position_tiers.return_value = []
+    parsed = _hype_position(side, leverage)
+    settings = SignalSettings(leverage=min(leverage, 100))
+    with patch("time.time", return_value=NOW):
+        plan = scanner._plan_for_position(parsed, None, settings, NOW)
+    sign = 1 if side == "long" else -1
+    buffer = SignalsCfg().trend.liquidation_buffer_pct
+    assert plan.leverage == leverage
+    assert plan.liquidation_estimate is not None
+    assert sign * (plan.stop - plan.liquidation_estimate) / plan.entry * 100 >= buffer
+    assert plan.max_leverage >= leverage
+    trade = _imported_trade(scanner, plan, side, parsed.position_id)
+    decision = intraday.Decision(
+        "HYPEUSDT", state="WAIT", as_of=NOW, price=80.37, evaluated_at=NOW
+    )
+    for now in (NOW, NOW + 60):
+        evaluate_exit(trade, decision, [], now, SignalsCfg())
+        assert trade.state == f"HOLD_{side.upper()}", trade.reason
+        liq = next(c for c in trade.checks if c.label == "Liquidation buffer")
+        assert liq.passed, liq.detail
+
+
+def test_imported_position_uses_the_pair_tier_when_available(tmp_path):
+    scanner, _ = _live_scanner(tmp_path, [])
+    scanner.client.position_tiers.return_value = [
+        {"startValue": 0, "endValue": 50000, "maintenanceMarginRate": 0.005, "leverage": 100}
+    ]
+    cost_pct = SignalsCfg().round_trip_fee_pct + SignalsCfg().slippage_pct
+    for side in ("long", "short"):
+        parsed = _hype_position(side, 50)
+        with patch("time.time", return_value=NOW):
+            plan = scanner._plan_for_position(parsed, None, SignalSettings(), NOW)
+        assert plan.liquidation_estimate == pytest.approx(
+            estimate_liquidation(80.37, 50, cost_pct, 0.005, side)
+        )
+        # 0.20% stop + 0.25% buffer on a 0.5% tier: ceiling 88x, not the echoed 50x.
+        assert plan.max_leverage == 88
+    scanner.client.position_tiers.assert_called_once_with("HYPEUSDT")
+    # Above the pair cap the estimate still uses the real tier rate, and a real
+    # tier that puts 100x inside the buffer is a genuine alarm.
+    parsed = _hype_position("long", 125)
+    with patch("time.time", return_value=NOW):
+        plan = scanner._plan_for_position(parsed, None, SignalSettings(), NOW)
+    assert plan.liquidation_estimate == pytest.approx(
+        estimate_liquidation(80.37, 125, cost_pct, 0.005, "long")
+    )
+    assert plan.max_leverage == 88 < plan.leverage
+    trade = _imported_trade(scanner, plan, "long", parsed.position_id)
+    decision = intraday.Decision(
+        "HYPEUSDT", state="WAIT", as_of=NOW, price=80.37, evaluated_at=NOW
+    )
+    evaluate_exit(trade, decision, [], NOW, SignalsCfg())
+    assert trade.state == "EXIT_LONG" and "liquidation buffer" in trade.reason
+
+
 def test_place_stop_refuses_paper_and_missing_keys(tmp_path):
     scanner, decision = scanner_with_entry(tmp_path)
     with patch("time.time", return_value=NOW):
@@ -706,10 +1084,22 @@ def test_paper_track_does_not_require_exchange_stop(tmp_path):
 def test_trailing_stop_never_widens():
     trade, decision, _ = new_trade()
     original = trade.current_stop
-    decision.price = trade.plan.entry + 2 * (trade.plan.entry - original)
+    risk = trade.plan.entry - original
+    decision.price = trade.plan.entry + 1.2 * risk
+    evaluate_exit(trade, decision, [], NOW + 5, SignalsCfg())
+    covered = trade.plan.entry * (1 + trade.plan.cost_pct / 100)
+    assert trade.current_stop == pytest.approx(covered)
+    # Trailing activates at 1.25R; the trail (last - 1R) only replaces the
+    # cost-covered stop once it sits above it.
+    decision.price = trade.plan.entry + 1.3 * risk
     evaluate_exit(trade, decision, [], NOW + 10, SignalsCfg())
+    assert trade.current_stop == pytest.approx(max(covered, decision.price - risk))
+    assert trade.current_stop > original
+    decision.price = trade.plan.entry + 1.6 * risk
+    evaluate_exit(trade, decision, [], NOW + 12, SignalsCfg())
     tightened = trade.current_stop
-    assert tightened > original
+    assert tightened > covered
+    assert tightened == pytest.approx(decision.price - risk)
     decision.price -= 0.1
     evaluate_exit(trade, decision, [], NOW + 15, SignalsCfg())
     assert trade.current_stop >= tightened and trade.plan.stop == original
@@ -719,10 +1109,12 @@ def test_trailing_stop_never_widens():
     "values",
     [
         {"planning_equity": float("nan")},
-        {"leverage": 41},
-        {"hold_hours": 48},
+        {"leverage": 101},
+        {"leverage": 19},
+        {"hold_hours": 24},
+        {"hold_hours": 3},
         {"risk_pct": 0},
-        {"leverage": 25.5},
+        {"leverage": 50.5},
     ],
 )
 def test_invalid_planning_values_rejected(values):
@@ -775,7 +1167,7 @@ def test_settings_invalidate_old_entries_not_existing_plans(tmp_path):
                 "quantity": decision.plan.quantity,
             }
         )
-    scanner.update_settings(asdict(SignalSettings(leverage=40)))
+    scanner.update_settings(asdict(SignalSettings(leverage=100)))
     assert (
         not scanner.decisions
         and scanner.store.trades()[0].plan.leverage == trade.plan.leverage
@@ -1282,21 +1674,43 @@ def test_checklist_length_is_stable_from_wait_to_entry():
     )
     assert [c.label for c in mixed.checks] == list(CHECKLIST_LABELS)
     assert mixed.state == "WATCH_LONG"
-    assert len(waiting.checks) == len(mixed.checks) == 19
+    assert len(waiting.checks) == len(mixed.checks) == 21
+    assert [c.label for c in waiting.checks if c.group == "plan"] == [
+        "Entry zone",
+        "Stop size",
+        "Target inside hold budget",
+        "Reward after costs",
+        "Funding drag",
+        "Order size",
+        "Execution depth",
+        "Leverage ceiling",
+    ]
+    assert [c.label for c in waiting.checks if c.group == "market"] == [
+        "Fresh market data",
+        "Liquid market",
+        "Spread",
+        "Hold-window volatility",
+        "Mark vs last",
+        "Funding print window",
+        "1h bias / 15m structure",
+        "BTC context",
+        "Not extended",
+        "Crowding headwind",
+    ]
 
 
 def test_waiting_checks_are_distinct_from_failed_checks():
-    waiting = waiting_check("Entry zone", "Waiting for a completed 15m setup")
+    waiting = waiting_check("Entry zone", "Waiting for a completed 5m setup")
     failed = make_check(
-        "Structural target",
+        "Target inside hold budget",
         False,
-        "No confirmed target that clears 2R inside the ≤24h travel budget",
+        "No structural target that clears 1.5R inside the 120-minute travel budget (1.27%)",
     )
     assert waiting.waiting and not waiting.passed
     assert not failed.waiting and not failed.passed
 
 
-def test_missing_2r_target_still_scores_remaining_plan_gates():
+def test_missing_target_still_scores_remaining_plan_gates():
     _decision, market, frames = ready_decision()
     with patch("bitunix_bot.intraday.select_targets", return_value=[]):
         blocked = evaluate_intraday(
@@ -1305,10 +1719,11 @@ def test_missing_2r_target_still_scores_remaining_plan_gates():
     plan = [check for check in blocked.checks if check.group == "plan"]
     assert len(plan) == 8
     assert all(not check.waiting for check in plan)
-    assert any(
-        check.label == "Structural target" and not check.passed for check in plan
-    )
+    target = next(check for check in plan if check.label == "Target inside hold budget")
+    assert not target.passed
+    assert "1.5R inside the 120-minute travel budget" in target.detail
     assert any(check.label == "Funding drag" and not check.waiting for check in plan)
+    assert any(check.label == "Leverage ceiling" and check.passed for check in plan)
     assert blocked.state == "WATCH_LONG"
     assert blocked.plan is None
 
@@ -1316,33 +1731,43 @@ def test_missing_2r_target_still_scores_remaining_plan_gates():
 def test_funding_print_window_blocks_entry():
     decision, market, frames = ready_decision()
     assert decision.state == "ENTER_LONG"
-    blocked = evaluate_intraday(
-        replace(market, next_funding=NOW + 60),
-        frames,
-        None,
-        SignalSettings(),
-        SignalsCfg(),
-        NOW,
+    for eta in (60, 300):
+        blocked = evaluate_intraday(
+            replace(market, next_funding=NOW + eta),
+            frames,
+            None,
+            SignalSettings(),
+            SignalsCfg(),
+            NOW,
+        )
+        assert blocked.state == "WATCH_LONG"
+        assert any(
+            c.label == "Funding print window" and not c.passed for c in blocked.checks
+        )
+    allowed = evaluate_intraday(
+        replace(market, next_funding=NOW + 301), frames, None, SignalSettings(), SignalsCfg(), NOW
     )
-    assert blocked.state == "WATCH_LONG"
-    assert any(
-        c.label == "Funding print window" and not c.passed for c in blocked.checks
-    )
+    assert allowed.state == "ENTER_LONG"
 
 
 def test_mark_basis_blocks_entry():
     decision, market, frames = ready_decision()
     assert decision.state == "ENTER_LONG"
-    blocked = evaluate_intraday(
-        replace(market, mark=market.price * 1.01),
-        frames,
-        None,
-        SignalSettings(),
-        SignalsCfg(),
-        NOW,
+    for basis in (1.01, 1.002):
+        blocked = evaluate_intraday(
+            replace(market, mark=market.price * basis),
+            frames,
+            None,
+            SignalSettings(),
+            SignalsCfg(),
+            NOW,
+        )
+        assert blocked.state == "WATCH_LONG"
+        assert any(c.label == "Mark vs last" and not c.passed for c in blocked.checks)
+    allowed = evaluate_intraday(
+        replace(market, mark=market.price * 1.001), frames, None, SignalSettings(), SignalsCfg(), NOW
     )
-    assert blocked.state == "WATCH_LONG"
-    assert any(c.label == "Mark vs last" and not c.passed for c in blocked.checks)
+    assert next(c for c in allowed.checks if c.label == "Mark vs last").passed
 
 
 def test_portfolio_gate_does_not_change_checklist_length(tmp_path):
@@ -1463,6 +1888,24 @@ def test_two_tier_scan_rotates_universe_and_retains_decisions(tmp_path):
     assert all("evaluated_at" in item for item in snapshot["queue"])
 
 
+def test_universe_filters_pairs_below_planned_leverage_for_trend(tmp_path):
+    scanner = _universe_scanner(tmp_path, UNIVERSE_NAMES)
+    rows = scanner.client.trading_pairs.return_value
+    rows[2]["maxLeverage"] = 25
+    assert rows[2]["symbol"] == "SOLUSDT"
+    assert scanner.store.settings().profile == "trend"
+    assert scanner.store.settings().leverage == 50
+    with patch("time.time", return_value=NOW), patch("time.sleep"):
+        scanner.refresh(force=True)
+    assert "SOLUSDT" not in scanner._universe
+    assert scanner.snapshot()["scan"]["universe"] == 5
+    scanner.update_settings(asdict(SignalSettings(leverage=20)))
+    scanner._cache.pop("pairs", None)
+    with patch("time.time", return_value=NOW + 15), patch("time.sleep"):
+        scanner.refresh(force=True)
+    assert "SOLUSDT" in scanner._universe
+
+
 def test_watch_signal_is_promoted_to_hot_set(tmp_path):
     scanner = _universe_scanner(tmp_path, UNIVERSE_NAMES)
     with patch("time.time", return_value=NOW), patch("time.sleep"):
@@ -1511,3 +1954,291 @@ def test_universe_config_bounds_and_shipped_yaml():
     assert cfg.signals.universe_size == 80
     assert cfg.signals.evaluate_batch == 10
     assert cfg.signals.max_symbols == 12
+    assert cfg.signals.trend.trigger_interval == "5m"
+    assert cfg.signals.trend.max_stop_pct == 0.60
+    assert cfg.signals.trend.min_reward_risk == 1.5
+    assert cfg.signals.trend.liquidation_buffer_pct == 0.25
+
+
+def test_signals_cfg_matches_config_yaml():
+    shipped = load("config.yaml", "/dev/null").signals
+    defaults = SignalsCfg()
+    for name in (f.name for f in fields(SignalsCfg)):
+        if name == "enabled":
+            continue
+        assert getattr(shipped, name) == getattr(defaults, name), name
+    assert asdict(shipped.trend) == asdict(TrendCfg())
+    assert shipped.enabled is True and defaults.enabled is False
+    with pytest.raises(TypeError):
+        SignalsCfg(trend={"bogus": 1})
+    with pytest.raises(TypeError):
+        SignalsCfg(min_reward_risk=2.0)
+
+
+@pytest.mark.parametrize(
+    "values, match",
+    [
+        ({"stale_hold_fraction": 0.1}, "10 minutes"),
+        ({"breakeven_at_r": 1.5}, "breakeven < trailing"),
+        ({"trigger_interval": "1m"}, "trigger_interval"),
+        ({"min_hourly_atr_pct_2h": 0.7}, "hourly ATR band"),
+        ({"max_stop_pct": 0.15}, "stop band"),
+        ({"late_hold_fraction": 0.3}, "hold fractions"),
+        ({"late_hold_min_r": 1.6}, "late_hold_min_r"),
+        ({"hope_exit_r": 1.0}, "hope_exit_r"),
+        ({"entry_expiry_seconds": 30}, "entry_expiry_seconds"),
+        ({"entry_expiry_seconds": 600.0}, "whole number"),
+        ({"max_spread_pct": 0.2}, "max_spread_pct"),
+        ({"entry_chase_risk_fraction": 1.5}, "entry_chase_risk_fraction"),
+        ({"min_stop_atr": 0}, "finite positive"),
+    ],
+)
+def test_trend_cfg_validation(values, match):
+    with pytest.raises(ValueError, match=match):
+        SignalsCfg(trend=TrendCfg(**values)).validate()
+    SignalsCfg(trend={"trigger_interval": "3m"}).validate()
+
+
+def test_legacy_swing_settings_rebase_to_trend():
+    legacy = SignalSettings.from_dict(
+        {"planning_equity": 1000, "risk_pct": 0.5, "leverage": 25, "hold_hours": 24, "profile": "swing"}
+    )
+    assert legacy == SignalSettings(1000, 0.5, 25, 2, "trend")
+    # Leverage inside 20-100 is kept; only an out-of-band value rebases to 50x.
+    kept = SignalSettings.from_dict(
+        {"planning_equity": 2500, "risk_pct": 0.75, "leverage": 41, "hold_hours": 12, "profile": "swing"}
+    )
+    assert kept == SignalSettings(2500, 0.75, 41, 2, "trend")
+    rebased = SignalSettings.from_dict(
+        {"planning_equity": 2500, "risk_pct": 0.75, "leverage": 10, "hold_hours": 12, "profile": "swing"}
+    )
+    assert rebased == SignalSettings(2500, 0.75, 50, 2, "trend")
+    profile_less = SignalSettings.from_dict(
+        {"planning_equity": 1000, "risk_pct": 0.5, "leverage": 10, "hold_hours": 24}
+    )
+    assert profile_less == SignalSettings(1000, 0.5, 50, 2, "trend")
+    assert SignalSettings.from_dict(
+        {"planning_equity": 1000, "risk_pct": 0.5, "leverage": 50, "hold_hours": 2, "profile": "swing"}
+    ) == SignalSettings(1000, 0.5, 50, 2, "trend")
+    # Rows already saying "trend" are a client bug, not legacy data.
+    with pytest.raises(ValueError, match="1 or 2 hours"):
+        SignalSettings.from_dict(
+            {"planning_equity": 1000, "risk_pct": 0.5, "leverage": 50, "hold_hours": 24, "profile": "trend"}
+        )
+    with pytest.raises(ValueError, match="from 20 to 100"):
+        SignalSettings.from_dict(
+            {"planning_equity": 1000, "risk_pct": 0.5, "leverage": 10, "hold_hours": 2, "profile": "trend"}
+        )
+    assert SignalSettings() == SignalSettings(1000.0, 0.5, 50, 2, "trend")
+
+
+def test_fifty_x_liquidation_arithmetic():
+    market, _ = market_frames()
+
+    def fit(mmr, stop, leverage=50, cap=100):
+        tiers = replace(market, tiers=[Tier(0, 80_000, mmr, 100)])
+        return liquidation_fit(
+            replace(tiers, price=100.0, mark=100.0),
+            100.0,
+            stop,
+            943.4,
+            0.18,
+            0.17,
+            leverage,
+            0.25,
+            "long",
+            cap=cap,
+        )
+
+    ceiling, liquidation, tier = fit(0.005, 99.65)
+    assert ceiling == 78 and tier is not None and tier.maintenance_rate == 0.005
+    assert liquidation == pytest.approx(98.673, abs=1e-3)
+    assert estimate_liquidation(100.0, 50, 0.18, 0.005, "long") == pytest.approx(98.673, abs=1e-3)
+    assert estimate_liquidation(100.0, 50, 0.18, 0.005, "short") == pytest.approx(101.313, abs=1e-3)
+    ceiling, liquidation, _ = fit(0.003, 99.80)
+    assert ceiling == 100
+    assert liquidation == pytest.approx(98.475, abs=1e-3)
+    ceiling, liquidation, _ = fit(0.010, 99.40)
+    assert ceiling == 49 and 50 > ceiling
+    assert liquidation is not None and 99.40 - liquidation < 0.25
+    # The profile cap bounds the search even when the pair allows more.
+    assert fit(0.003, 99.80, cap=60)[0] == 60
+    assert fit(0.005, 99.65, leverage=100)[1] is not None
+    assert liquidation_fit(replace(market, tiers=[]), 100.0, 99.65, 943.4, 0.18, 0.17, 50, 0.25, "long") == (
+        0,
+        None,
+        None,
+    )
+
+
+def test_liquidation_fit_is_shared():
+    assert scalp_short.liquidation_fit is intraday.liquidation_fit
+    assert scalp_short.size_notional is intraday.size_notional
+    assert travel_budget(0.64, 120, 1.5) == pytest.approx(1.5 * 0.64 * math.sqrt(2))
+    assert travel_budget(0.64, 60, 1.5) == pytest.approx(0.96)
+
+
+def test_stop_cap_blocks_wide_stops():
+    decision, _, _ = ready_decision(pullback_low=PRICE - 0.70)
+    assert decision.state == "WATCH_LONG"
+    stop = next(c for c in decision.checks if c.label == "Stop size")
+    assert not stop.passed and "0.6%" in stop.detail and "50x limit" in stop.detail
+    assert decision.metrics["hold_minutes"] == 120
+
+
+def test_stop_floor_blocks_sub_noise_stops():
+    decision, _, _ = ready_decision(pullback_low=PRICE - 0.11)
+    assert decision.state == "WATCH_LONG"
+    stop = next(c for c in decision.checks if c.label == "Stop size")
+    assert not stop.passed and "(5m noise)" in stop.detail
+    assert decision.plan is not None and decision.plan.stop_pct < 0.20
+
+
+def test_entry_zone_is_capped_by_stop_distance():
+    decision, _, frames = ready_decision(pullback_low=PRICE - 0.11)
+    plan = decision.plan
+    assert plan is not None
+    anchor = frames["5m"][-1].close
+    atr_value = decision.metrics["atr_pct"] * decision.price / 100
+    assert plan.entry_high - anchor <= 0.25 * (plan.entry - plan.stop) + 1e-9
+    assert plan.entry_high - anchor < 0.25 * atr_value
+    assert anchor - plan.entry_low == pytest.approx(0.30 * atr_value)
+    wide, _, _ = ready_decision()
+    wide_atr = wide.metrics["atr_pct"] * wide.price / 100
+    assert wide.plan.entry_high - anchor == pytest.approx(0.25 * wide_atr)
+    assert 0.25 * wide_atr < 0.25 * (wide.plan.entry - wide.plan.stop)
+
+
+def test_entry_expires_ten_minutes_after_trigger_close():
+    decision, market, frames = ready_decision()
+    assert decision.plan.expires_at == frames["5m"][-1].time + 900
+    at_expiry = evaluate_intraday(
+        replace(market, as_of=decision.plan.expires_at),
+        frames,
+        None,
+        SignalSettings(),
+        SignalsCfg(),
+        decision.plan.expires_at,
+    )
+    assert at_expiry.state == "WATCH_LONG"
+    assert at_expiry.plan is not None
+
+
+def test_travel_budget_scales_with_hold():
+    two, _, _ = ready_decision(settings=SignalSettings(hold_hours=2))
+    one, _, _ = ready_decision(settings=SignalSettings(hold_hours=1))
+    assert two.state == "ENTER_LONG", two.reasons
+    assert one.state == "WATCH_LONG"
+    assert one.plan is None and two.plan.target == TARGET_HIGH
+    target = next(c for c in one.checks if c.label == "Target inside hold budget")
+    assert not target.passed and "60-minute" in target.detail
+    assert "120-minute" in next(c for c in two.checks if c.label == "Target inside hold budget").detail
+    assert one.metrics["hold_minutes"] == 60 and two.metrics["hold_minutes"] == 120
+
+
+def test_low_volatility_is_blocked_by_hold_window_gate():
+    quiet = hourly_bars(drift=0.05, amp=0.1, span=0.12)
+    two, _, _ = ready_decision(hourly=quiet)
+    assert two.state == "WATCH_LONG"
+    assert two.metrics["hourly_atr_pct"] < 0.35
+    gate = next(c for c in two.checks if c.label == "Hold-window volatility")
+    assert not gate.passed and "0.35-1.2%" in gate.detail and "120 min at 50x" in gate.detail
+    one, _, _ = ready_decision(hourly=quiet, settings=SignalSettings(hold_hours=1))
+    gate = next(c for c in one.checks if c.label == "Hold-window volatility")
+    assert not gate.passed and "0.60-1.2%" in gate.detail
+    # The 1h hold demands more volatility than the 2h hold.
+    base, _, _ = ready_decision(settings=SignalSettings(hold_hours=1))
+    assert next(c for c in base.checks if c.label == "Hold-window volatility").passed
+
+
+def test_not_extended_and_crowding_gates():
+    decision, market, frames = ready_decision()
+    extension = decision.metrics["extension_atr"]
+    atr_1h = decision.metrics["hourly_atr_pct"] * market.price / 100
+    assert 0 < extension < 1.5
+
+    def at(target_extension):
+        price = market.price + (target_extension - extension) * atr_1h
+        return replace(market, price=price, mark=price, bid=price - 0.005, ask=price + 0.005)
+
+    def check(decision, label):
+        return next(c for c in decision.checks if c.label == label)
+
+    stretched = evaluate_intraday(at(2.5), frames, None, SignalSettings(), SignalsCfg(), NOW)
+    assert not check(stretched, "Not extended").passed
+    assert stretched.metrics["extension_atr"] == pytest.approx(2.5)
+    assert check(decision, "Not extended").passed
+    crowded = evaluate_intraday(
+        replace(market, funding_rate=0.0006), frames, None, SignalSettings(), SignalsCfg(), NOW
+    )
+    assert not check(crowded, "Crowding headwind").passed and crowded.state == "WATCH_LONG"
+    # Negative funding pays the long; it is never a headwind.
+    paid = evaluate_intraday(
+        replace(market, funding_rate=-0.0006), frames, None, SignalSettings(), SignalsCfg(), NOW
+    )
+    assert check(paid, "Crowding headwind").passed
+    oi_crowded = evaluate_intraday(at(1.6), frames, None, SignalSettings(), SignalsCfg(), NOW, 4.0)
+    assert not check(oi_crowded, "Crowding headwind").passed
+    assert oi_crowded.metrics["oi_change_pct"] == 4.0
+    oi_calm = evaluate_intraday(market, frames, None, SignalSettings(), SignalsCfg(), NOW, 4.0)
+    assert check(oi_calm, "Crowding headwind").passed and oi_calm.state == "ENTER_LONG"
+    warming = evaluate_intraday(market, frames, None, SignalSettings(), SignalsCfg(), NOW, None)
+    assert check(warming, "Crowding headwind").passed and warming.state == "ENTER_LONG"
+
+
+def test_session_activity_blocks_dead_hour():
+    decision, market, frames = ready_decision()
+    assert decision.metrics["session_volume_ratio"] >= 0.5
+    dead = dict(frames)
+    dead["15m"] = frames["15m"][:-4] + [replace(c, volume=0.0) for c in frames["15m"][-4:]]
+    blocked = evaluate_intraday(market, dead, None, SignalSettings(), SignalsCfg(), NOW)
+    liquid = next(c for c in blocked.checks if c.label == "Liquid market")
+    assert not liquid.passed and "session" in liquid.detail
+    assert blocked.state == "WATCH_LONG"
+    assert blocked.metrics["session_volume_ratio"] == 0
+
+
+def test_btc_context_not_opposed():
+    _, market, frames = ready_decision()
+    eth = replace(market, symbol="ETHUSDT")
+    flat = [Candle(c.time, 50_000, 50_100, 49_900, 50_000, 1000.0) for c in frames["1h"]]
+    assert ema_bias(flat) == "mixed"
+    aligned = evaluate_intraday(eth, frames, flat, SignalSettings(), SignalsCfg(), NOW)
+    assert aligned.state == "ENTER_LONG", aligned.reasons
+    assert aligned.metrics["btc_trend"] == "mixed"
+    assert aligned.metrics["relative_strength_pct"] > 0
+    btc_outran = flat[:-1] + [replace(flat[-1], close=50_500, high=50_600)]
+    lagging = evaluate_intraday(eth, frames, btc_outran, SignalSettings(), SignalsCfg(), NOW)
+    context = next(c for c in lagging.checks if c.label == "BTC context")
+    assert not context.passed and lagging.metrics["relative_strength_pct"] < 0
+    opposed_btc = [
+        Candle(c.time, 60_000 - i * 40, 60_010 - i * 40, 59_900 - i * 40, 60_000 - i * 40, 1000.0)
+        for i, c in enumerate(frames["1h"])
+    ]
+    assert ema_bias(opposed_btc) == "short"
+    opposed = evaluate_intraday(eth, frames, opposed_btc, SignalSettings(), SignalsCfg(), NOW)
+    assert not next(c for c in opposed.checks if c.label == "BTC context").passed
+    missing = evaluate_intraday(eth, frames, None, SignalSettings(), SignalsCfg(), NOW)
+    context = next(c for c in missing.checks if c.label == "BTC context")
+    assert not context.passed and context.detail == "BTC candles unavailable"
+    assert missing.state == "WATCH_LONG"
+
+
+def test_watch_actions_name_trigger_interval_and_pullback_level():
+    market, frames = market_frames()
+    frames["5m"] = frames["5m"][:-1] + [
+        replace(frames["5m"][-1], close=frames["5m"][-1].open - 0.01, high=frames["5m"][-1].open)
+    ]
+    decision = evaluate_intraday(market, frames, None, SignalSettings(), SignalsCfg(), NOW)
+    assert decision.state == "WATCH_LONG" and decision.plan is None
+    assert decision.actions[0]["label"] == "Long on 5m close above"
+    assert decision.actions[0]["price"] >= frames["5m"][-1].close
+    assert decision.actions[1]["label"] == "or pullback to"
+    assert decision.actions[1]["price"] < frames["5m"][-1].close
+    trigger = next(c for c in decision.checks if c.label == "Completed trigger candle")
+    assert not trigger.passed and "completed 5m pullback reclaim" in trigger.detail
+    assert all(
+        c.waiting and c.detail == "Waiting for a completed 5m setup"
+        for c in decision.checks
+        if c.group == "plan"
+    )
