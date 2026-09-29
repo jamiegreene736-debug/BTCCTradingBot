@@ -6,13 +6,16 @@ import math
 from dataclasses import dataclass, field, fields
 
 # "swing": 4h bias / 1h structure / 15m trigger, 12-24h hold, 25-40x band.
-# "scalp_short": parabolic-exhaustion fade on 1m/3m bars, 1-2h hold, up to the
-# exchange tier maximum. The stop must sit inside the liquidation distance.
+# "scalp": parabolic-exhaustion fade, long or short, on 1m/3m bars, 1-2h hold,
+# up to the exchange tier maximum. The stop must sit inside the liquidation
+# distance. "scalp_short" is the pre-1.7 name and is read as "scalp".
 # profile -> (allowed hold hours, maximum planning leverage)
 PROFILES: dict[str, tuple[tuple[int, ...], int]] = {
     "swing": ((12, 24), 40),
+    "scalp": ((1, 2), 125),
     "scalp_short": ((1, 2), 125),
 }
+LEGACY_PROFILE_NAMES: dict[str, str] = {"scalp_short": "scalp"}
 NUMERIC_SETTINGS = ("planning_equity", "risk_pct", "leverage", "hold_hours")
 
 
@@ -26,7 +29,7 @@ class SignalSettings:
 
     def validate(self) -> None:
         if self.profile not in PROFILES:
-            raise ValueError("Profile must be swing or scalp_short")
+            raise ValueError("Profile must be swing or scalp")
         holds, max_leverage = PROFILES[self.profile]
         if (
             not math.isfinite(self.planning_equity)
@@ -58,7 +61,8 @@ class SignalSettings:
         if any(type(v) not in (int, float) for v in payload.values()):
             raise ValueError("Planning settings must be numbers")
         if type(profile) is not str:
-            raise ValueError("Profile must be swing or scalp_short")
+            raise ValueError("Profile must be swing or scalp")
+        profile = LEGACY_PROFILE_NAMES.get(profile, profile)
         settings = cls(profile=profile, **payload)  # type: ignore[arg-type]
         settings.validate()
         return settings

@@ -37,8 +37,7 @@ from .intraday import (
     upsert_check,
     volatility,
 )
-from .scalp_short import PROFILE as SCALP_PROFILE
-from .scalp_short import blank_scalp_checklist, evaluate_scalp_short
+from .scalp_short import SCALP_PROFILES, blank_scalp_checklist, evaluate_scalp
 from .signal_config import SignalsCfg, SignalSettings
 from .signal_store import SignalStore, TrackedTrade, evaluate_exit
 from .symbol_meta import (
@@ -187,7 +186,7 @@ class SignalScanner:
         self._oi_history: dict[str, deque[tuple[int, float]]] = {}
 
     def _intervals(self, settings: SignalSettings) -> tuple[str, ...]:
-        if settings.profile == SCALP_PROFILE:
+        if settings.profile in SCALP_PROFILES:
             return (self.cfg.scalp.trigger_interval, "15m", "1h", "4h")
         return ("15m", "1h", "4h")
 
@@ -462,7 +461,7 @@ class SignalScanner:
             profile = settings.profile
             trigger_interval = (
                 self.cfg.scalp.trigger_interval
-                if settings.profile == SCALP_PROFILE
+                if settings.profile in SCALP_PROFILES
                 else "15m"
             )
             bars = self.frames.get(position.symbol, {}).get("15m", [])
@@ -676,7 +675,7 @@ class SignalScanner:
         # planned leverage; a 50x pair can never fit a 100x plan.
         min_leverage = (
             settings.leverage
-            if settings is not None and settings.profile == SCALP_PROFILE
+            if settings is not None and settings.profile in SCALP_PROFILES
             else 0
         )
         return sorted(
@@ -742,8 +741,8 @@ class SignalScanner:
     ) -> Decision:
         frames[symbol] = self._frames(symbol, now, self._intervals(settings))
         market = self._market(symbol, by_ticker[symbol], by_pair[symbol])
-        if settings.profile == SCALP_PROFILE:
-            return evaluate_scalp_short(
+        if settings.profile in SCALP_PROFILES:
+            return evaluate_scalp(
                 market,
                 frames[symbol],
                 frames.get("BTCUSDT", {}).get("1h"),
@@ -762,7 +761,7 @@ class SignalScanner:
         )
 
     def _blank_checklist(self, settings: SignalSettings, detail: str) -> list[Check]:
-        if settings.profile == SCALP_PROFILE:
+        if settings.profile in SCALP_PROFILES:
             return blank_scalp_checklist(detail)
         return blank_checklist(detail)
 

@@ -1,4 +1,4 @@
-# Bitunix Intraday Signals — Chrome extension v1.6.1
+# Bitunix Intraday Signals — Chrome extension v1.7.0
 
 Long and short entry, hold, review and exit alerts for trades lasting up to
 12–24 hours. The backend computes the strategy; this extension displays it.
@@ -11,20 +11,20 @@ No extension action sends an exchange order or modifies a position.
 4. Reload the Bitunix tab. For an existing installation, reload the extension first.
 5. Edit the displayed profile, planning equity, risk, leverage and maximum
    holding time. **Swing** is built for isolated 25-40x and a 12h or 24h hold.
-   **Scalp short** fades parabolic exhaustion on 1m bars for a 1h or 2h hold
-   at up to the pair's leverage cap (125x maximum). Leverage never tightens
-   the stop; the scalp card reports the highest leverage whose estimated
-   liquidation still sits beyond the stop.
+   **Scalp** fades parabolic exhaustion on 1m bars, long or short, for a 1h
+   or 2h hold at 25x up to the pair's leverage cap (125x maximum). Leverage
+   never tightens the stop; the scalp card reports the highest leverage whose
+   estimated liquidation still sits beyond the stop.
 
 ## If the panel is empty
 
 - **Pump Fade Radar** or version **0.3.16** means old files or an old tab are
   still loaded. Reload the extension from this folder in `chrome://extensions`,
   then reload the Bitunix tab. The popup must say **Bitunix Intraday Signals**,
-  version **1.6.1**. Unpacked extensions do not refresh themselves after a git pull.
+  version **1.7.0**. Unpacked extensions do not refresh themselves after a git pull.
   Click **Reload** on this extension in `chrome://extensions`, then reload the
   Bitunix tab. A Bitunix in-page refresh is not enough. The panel header must
-  show **v1.6.1**, a drag grip, and ⤢. Drag the title or grip to move; drag the
+  show **v1.7.0**, a drag grip, and ⤢. Drag the title or grip to move; drag the
   bottom-right corner to resize. Empty header chrome lets Bitunix menus
   (timeframes, short/long tickets) receive clicks through the overlay.
 - Use the complete extension folder from one release. Mixing the old manifest
@@ -49,14 +49,18 @@ next setup. Recent alerts keep WATCH and ENTER rows with full timestamps.
 The card shows WAIT, WATCH LONG/SHORT or ENTER LONG/SHORT, an entry zone,
 structural stop, profit target, estimated net reward/risk, planning size and
 estimated leverage ceiling. Open the checklist for the underlying evidence. Every card lists the same
-gates for its profile (19 swing, 20 scalp short), grouped as market / setup / plan / book.
+gates for its profile (19 swing, 20 scalp), grouped as market / setup / plan / book.
 
-In the scalp-short profile the market gates require an extended coin (1h and
-4h gain, distance above the 1h EMA20 in hourly ATRs), a climactic volume bar,
-crowded longs (positive funding or open interest built over the last hour),
-and an alt that outran BTC. The setup is a completed 1m close back through a
-spike bar's body with no new high (failed high) and net selling since the
-spike. The plan needs the stop inside the liquidation distance at the planned
+In the scalp profile a short needs an extended coin (1h and 4h gain, distance
+above the 1h EMA20 in hourly ATRs), a climactic volume bar, crowded longs
+(positive funding or open interest built over the last hour), and an alt that
+outran BTC. The setup is a completed 1m close back through a spike bar's body
+with no new high (failed high) and net selling since the spike. A long is the
+mirror: a capitulation dump, climax volume, crowded shorts (negative funding or
+open-interest build), an alt that fell harder than BTC, and a completed close
+back above a spike low's body with no new low (failed low) and net buying. Both
+sides are scored every scan and the card shows the more advanced one; a WAIT
+card spells out both thresholds. The plan needs the stop inside the liquidation distance at the planned
 leverage, a VWAP / EMA / spike-base target inside 1.5 hourly ATR that clears
 2R net, a 0.03% spread cap and eight times depth. Tracked scalps exit at the
 hold cap or after 20 minutes below 0.3R; the 1h trend is faded by design and
