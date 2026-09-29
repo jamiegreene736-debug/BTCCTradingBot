@@ -25,6 +25,7 @@ from .intraday import (
     Market,
     Side,
     TradePlan,
+    action,
     ema_bias,
     session_vwap,
     trend,
@@ -518,6 +519,8 @@ class _Context:
     relative: float | None
     atr_value: float
     common: list[Check]
+    short_watch: float
+    long_watch: float
 
 
 def _context(
@@ -607,8 +610,31 @@ def _context(
             f"Next funding in {max(0, funding_eta)}s; wait if ≤{cfg.funding_blackout_seconds}s",
         ),
     ]
+    # Prices at which the extension gates would pass on the current bars:
+    # the tightest of the 1h gain, 4h gain and ATR-above-EMA requirements.
+    ref_1h = bars[-1 - back_1h].close
+    ref_4h = quarter[-17].close
+    short_watch = max(
+        ref_1h * (1 + scalp.min_gain_1h_pct / 100),
+        ref_4h * (1 + scalp.min_gain_4h_pct / 100),
+        h_ema20 + scalp.min_extension_atr * hourly_atr,
+    )
+    long_watch = min(
+        ref_1h * (1 - scalp.min_gain_1h_pct / 100),
+        ref_4h * (1 - scalp.min_gain_4h_pct / 100),
+        h_ema20 - scalp.min_extension_atr * hourly_atr,
+    )
     return _Context(
-        gain_1h, gain_4h, extension, climax, funding_pct, relative, atr_value, common
+        gain_1h,
+        gain_4h,
+        extension,
+        climax,
+        funding_pct,
+        relative,
+        atr_value,
+        common,
+        short_watch,
+        long_watch,
     )
 
 
@@ -745,6 +771,27 @@ def _evaluate_side(
             scalp_waiting(label, WAITING_TRIGGERS[side])
             for label in ("Flow divergence",) + SCALP_PLAN_LABELS
         )
+        window = bars[-scalp.spike_lookback :]
+        if side == "short":
+            spike = max(window, key=lambda c: c.high)
+            result.actions = [
+                action(
+                    f"Short on {scalp.trigger_interval} close below",
+                    min(spike.open, spike.close),
+                )
+            ]
+        else:
+            spike = min(window, key=lambda c: c.low)
+            result.actions = [
+                action(
+                    f"Long on {scalp.trigger_interval} close above",
+                    max(spike.open, spike.close),
+                )
+            ]
+    if result.plan:
+        result.actions = [
+            action(f"Enter {side}", result.plan.entry_low, result.plan.entry_high)
+        ]
     checks.append(scalp_check("Tracked exposure", True, "No conflicting tracked exposure"))
     result.checks = order_scalp_checks(checks, side)
     if (
@@ -795,6 +842,10 @@ def evaluate_scalp(
     )
     if len(decisions) > 1 and best.state == "WAIT":
         best.side = ""
+        best.actions = [
+            action("Short watch above", ctx.short_watch),
+            action("Long watch below", ctx.long_watch),
+        ]
         best.reasons = [
             f"No exhaustion move to fade: {ctx.gain_1h:+.2f}% 1h, {ctx.gain_4h:+.2f}% 4h, "
             f"{ctx.extension:+.1f} ATR from the 1h EMA20. Short needs "

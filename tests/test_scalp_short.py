@@ -541,3 +541,26 @@ def test_legacy_scalp_short_profile_name_is_read_as_scalp():
         {"planning_equity": 1000, "risk_pct": 0.5, "leverage": 100, "hold_hours": 2, "profile": "scalp_short"}
     )
     assert settings.profile == "scalp"
+
+
+def test_cards_carry_the_price_levels_needed_for_action():
+    market, frames, btc = pump_frames()
+    entered = evaluate(market, frames, btc)
+    assert entered.state == "ENTER_SHORT"
+    assert entered.actions[0]["label"] == "Enter short"
+    assert entered.actions[0]["price"] == entered.plan.entry_low
+    assert entered.actions[0]["price2"] == entered.plan.entry_high
+    calm = dict(frames)
+    calm["1m"] = [replace(c, volume=100) for c in frames["1m"]]
+    waiting = evaluate(market, calm, btc)
+    labels = [a["label"] for a in waiting.actions]
+    assert labels == ["Short watch above", "Long watch below"]
+    assert waiting.actions[0]["price"] > waiting.actions[1]["price"]
+    # Candidate gates pass but the failed high has not printed: name the spike body.
+    no_trigger = dict(frames)
+    no_trigger["1m"] = frames["1m"][:-1] + [replace(frames["1m"][-1], close=frames["1m"][-1].open + 0.02)]
+    watching = evaluate(market, no_trigger, btc)
+    assert watching.state == "WATCH_SHORT"
+    assert watching.actions[0]["label"] == "Short on 1m close below"
+    spike = max(frames["1m"][-30:], key=lambda c: c.high)
+    assert watching.actions[0]["price"] == pytest.approx(min(spike.open, spike.close))

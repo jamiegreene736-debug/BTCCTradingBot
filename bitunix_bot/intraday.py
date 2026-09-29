@@ -308,6 +308,45 @@ class Decision:
     checks: list[Check] = field(default_factory=list)
     reasons: list[str] = field(default_factory=list)
     metrics: dict[str, float | str | None] = field(default_factory=dict)
+    # Price levels that would move this card to the next state, for the
+    # overlay's "what does it need" line: {label, price, price2?}.
+    actions: list[dict[str, object]] = field(default_factory=list)
+
+
+def action(label: str, price: float, price2: float | None = None) -> dict[str, object]:
+    item: dict[str, object] = {"label": label, "price": float(price)}
+    if price2 is not None:
+        item["price2"] = float(price2)
+    return item
+
+
+def swing_actions(
+    bars: list[Candle], hourly: list[Candle], side: Side, vwap: float | None
+) -> list[dict[str, object]]:
+    """Levels a WATCH card needs: the breakout boundary and the nearest pullback level."""
+    price = bars[-1].close
+    if side == "long":
+        boundary = max(c.high for c in bars[-26:-6])
+    else:
+        boundary = min(c.low for c in bars[-26:-6])
+    h_closes = np.array([c.close for c in hourly])
+    m_closes = np.array([c.close for c in bars])
+    levels = [float(ema(h_closes, 20)[-1]), float(ema(m_closes, 20)[-1])]
+    highs, lows = swing_levels(hourly[-64:])
+    levels.extend(lows[-3:] if side == "long" else highs[-3:])
+    if vwap is not None:
+        levels.append(vwap)
+    if side == "long":
+        pullback = [level for level in levels if level < price]
+        nearest = max(pullback) if pullback else None
+        items = [action("Long on 15m close above", max(boundary, price))]
+    else:
+        pullback = [level for level in levels if level > price]
+        nearest = min(pullback) if pullback else None
+        items = [action("Short on 15m close below", min(boundary, price))]
+    if nearest is not None:
+        items.append(action("or pullback to", nearest))
+    return items
 
 
 def normalize(candles: list[Candle], side: Side) -> list[Candle]:
@@ -810,11 +849,18 @@ def evaluate_intraday(
             market, bars, hourly, four_hour, setup, side, now, settings, cfg
         )
         result.checks.extend(checks)
+        if result.plan:
+            result.actions = [
+                action(f"Enter {side}", result.plan.entry_low, result.plan.entry_high)
+            ]
+        else:
+            result.actions = swing_actions(bars, hourly, side, vwap)
     else:
         result.checks.extend(
             waiting_check(label, WAITING_SETUP)
             for label in ("Volume confirmation",) + PLAN_LABELS
         )
+        result.actions = swing_actions(bars, hourly, side, vwap)
     result.checks.append(
         make_check("Tracked exposure", True, "No conflicting tracked exposure")
     )
