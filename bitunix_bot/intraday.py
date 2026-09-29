@@ -303,6 +303,9 @@ class Decision:
     as_of: int = 0
     bar_time: int = 0
     state_since: int = 0
+    # Scan time at which the checklist was last run for this symbol. Symbols
+    # outside the hot set keep an older value until their rotation comes round.
+    evaluated_at: int = 0
     price: float | None = None
     plan: TradePlan | None = None
     checks: list[Check] = field(default_factory=list)
