@@ -4,16 +4,29 @@ from __future__ import annotations
 
 import itertools
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from typing import Literal
 
 import numpy as np
 
 from .indicators import atr, ema
-from .signal_config import SignalsCfg, SignalSettings
+from .signal_config import (
+    PROFILES,
+    SignalsCfg,
+    SignalSettings,
+    TrendCfg,
+    min_hourly_atr_pct,
+)
 
 Side = Literal["long", "short"]
 INTERVALS = {"1m": 60, "3m": 180, "5m": 300, "15m": 900, "1h": 3600, "4h": 14400}
+
+PROFILE = "trend"
+LEGACY_PROFILES: tuple[str, ...] = ("swing",)
+TREND_PROFILES: tuple[str, ...] = (PROFILE, *LEGACY_PROFILES)
+STRUCTURE_INTERVAL = "15m"
+BIAS_INTERVAL = "1h"
 
 
 def number(value: object) -> float:
@@ -128,17 +141,17 @@ def _ema_stack(candles: list[Candle]) -> str:
 
 
 def ema_bias(candles: list[Candle]) -> str:
-    """4h directional filter for ≤24h holds.
+    """Directional bias of the higher frame (1h for the trend profile).
 
-    Confirmed 4h swings need two closed bars on each side (16 hours) and often
-    arrive after the move a 12/24h trade can capture. EMA stack plus slope is
-    the bias; 1h structure still has to confirm.
+    Confirmed swings on the bias frame need two closed bars on each side and
+    often arrive after the move a 1-2h trade can capture. EMA stack plus slope
+    is the bias; the structure frame still has to confirm with HH/HL.
     """
     return _ema_stack(candles)
 
 
 def trend(candles: list[Candle]) -> str:
-    """1h working trend: EMA stack, slope, and confirmed HH/HL or LH/LL."""
+    """Working trend of the structure frame: EMA stack, slope, and confirmed HH/HL or LH/LL."""
     highs, lows = swing_levels(candles[-64:])
     if min(len(highs), len(lows)) < 2:
         return "mixed"
@@ -165,6 +178,10 @@ def session_vwap(candles: list[Candle], now: int) -> float | None:
         if total > 0
         else None
     )
+
+
+def _ema20(candles: list[Candle]) -> float:
+    return float(ema(np.array([c.close for c in candles]), 20)[-1])
 
 
 @dataclass(frozen=True)
@@ -209,28 +226,33 @@ CHECK_GROUPS: dict[str, str] = {
     "Liquid market": "market",
     "Spread": "market",
     "Hold-window volatility": "market",
-    "4h bias / 1h structure": "market",
-    "BTC context": "market",
     "Mark vs last": "market",
     "Funding print window": "market",
-    "Completed 15m trigger": "setup",
+    "1h bias / 15m structure": "market",
+    "BTC context": "market",
+    "Not extended": "market",
+    "Crowding headwind": "market",
+    "Completed trigger candle": "setup",
     "Volume confirmation": "setup",
     "Entry zone": "plan",
-    "Stop outside normal noise": "plan",
-    "Structural target": "plan",
+    "Stop size": "plan",
+    "Target inside hold budget": "plan",
     "Reward after costs": "plan",
     "Funding drag": "plan",
     "Order size": "plan",
     "Execution depth": "plan",
-    "Leverage buffer": "plan",
+    "Leverage ceiling": "plan",
     "Tracked exposure": "portfolio",
 }
 CHECKLIST_LABELS: tuple[str, ...] = tuple(CHECK_GROUPS)
 PLAN_LABELS: tuple[str, ...] = tuple(
     label for label, group in CHECK_GROUPS.items() if group == "plan"
 )
-WAITING_ALIGNMENT = "Waiting for 4h EMA bias and confirmed 1h structure"
-WAITING_SETUP = "Waiting for a completed 15m setup"
+WAITING_ALIGNMENT = "Waiting for 1h EMA bias and confirmed 15m structure"
+
+
+def waiting_setup(interval: str) -> str:
+    return f"Waiting for a completed {interval} setup"
 
 
 def make_check(label: str, passed: bool, detail: str, *, waiting: bool = False) -> Check:
@@ -289,8 +311,8 @@ class TradePlan:
     hold_hours: int
     expires_at: int
     adverse_mark_basis: float = 0.0
-    profile: str = "swing"
-    trigger_interval: str = "15m"
+    profile: str = PROFILE
+    trigger_interval: str = "5m"
 
 
 @dataclass
@@ -323,30 +345,45 @@ def action(label: str, price: float, price2: float | None = None) -> dict[str, o
     return item
 
 
-def swing_actions(
-    bars: list[Candle], hourly: list[Candle], side: Side, vwap: float | None
-) -> list[dict[str, object]]:
-    """Levels a WATCH card needs: the breakout boundary and the nearest pullback level."""
-    price = bars[-1].close
-    if side == "long":
-        boundary = max(c.high for c in bars[-26:-6])
-    else:
-        boundary = min(c.low for c in bars[-26:-6])
-    h_closes = np.array([c.close for c in hourly])
-    m_closes = np.array([c.close for c in bars])
-    levels = [float(ema(h_closes, 20)[-1]), float(ema(m_closes, 20)[-1])]
-    highs, lows = swing_levels(hourly[-64:])
+def _pullback_levels(
+    bars: list[Candle],
+    structure: list[Candle],
+    side: Side,
+    vwap: float | None,
+    extra_levels: Sequence[float],
+) -> list[float]:
+    """Raw-price pullback levels: EMA20 of both frames, the last three structure
+    swing lows (highs for shorts), session VWAP and any caller-supplied levels."""
+    levels = [_ema20(structure), _ema20(bars)]
+    highs, lows = swing_levels(structure[-64:])
     levels.extend(lows[-3:] if side == "long" else highs[-3:])
     if vwap is not None:
         levels.append(vwap)
+    levels.extend(extra_levels)
+    return levels
+
+
+def watch_actions(
+    bars: list[Candle],
+    structure: list[Candle],
+    side: Side,
+    vwap: float | None,
+    interval: str,
+    extra_levels: Sequence[float] = (),
+) -> list[dict[str, object]]:
+    """Levels a WATCH card needs: the breakout boundary and the nearest pullback level."""
+    price = bars[-1].close
+    levels = _pullback_levels(bars, structure, side, vwap, extra_levels)
     if side == "long":
+        boundary = max(c.high for c in bars[-26:-6])
         pullback = [level for level in levels if level < price]
         nearest = max(pullback) if pullback else None
-        items = [action("Long on 15m close above", max(boundary, price))]
+        items = [action(f"Long on {interval} close above", max(boundary, price))]
     else:
+        boundary = min(c.low for c in bars[-26:-6])
         pullback = [level for level in levels if level > price]
         nearest = min(pullback) if pullback else None
-        items = [action("Short on 15m close below", min(boundary, price))]
+        items = [action(f"Short on {interval} close below", min(boundary, price))]
     if nearest is not None:
         items.append(action("or pullback to", nearest))
     return items
@@ -373,8 +410,8 @@ def _relative_volume(bars: list[Candle]) -> float:
 
 
 def _reclaim(last: Candle, prior: Candle) -> bool:
-    # Close through the prior close, not the prior high — chasing the high is
-    # late for a 25-40x entry and spends the 24h hold on already-extended price.
+    # Close through the prior close, not the prior high: chasing the high at
+    # 50x puts the structural stop too far from a 1-2h entry.
     span = last.high - last.low
     return last.close > max(prior.close, last.open) and (
         span <= 0 or last.close >= last.low + 0.4 * span
@@ -383,12 +420,17 @@ def _reclaim(last: Candle, prior: Candle) -> bool:
 
 def find_setup(
     candles: list[Candle],
-    hourly: list[Candle],
+    structure: list[Candle],
     side: Side,
     atr_value: float,
     vwap: float | None,
-    cfg: SignalsCfg,
+    t: TrendCfg,
+    *,
+    extra_levels: Sequence[float] = (),
 ) -> Setup | None:
+    """Completed continuation trigger on the trigger frame; ``structure`` is the
+    15m frame. ``extra_levels`` are raw prices (e.g. the 1h EMA20) that join the
+    pullback level set; they are side-normalised here like VWAP."""
     sign = 1 if side == "long" else -1
     bars = normalize(candles, side)
     last = bars[-1]
@@ -399,7 +441,7 @@ def find_setup(
         relative = bars[i].volume / baseline if baseline > 0 else 0
         if (
             bars[i - 1].close <= boundary < bars[i].close
-            and relative >= cfg.breakout_volume_min
+            and relative >= t.breakout_volume_min
         ):
             retest = bars[i + 1 :]
             if (
@@ -410,19 +452,13 @@ def find_setup(
                 return Setup(
                     "Breakout & retest",
                     sign
-                    * (min(c.low for c in retest) - cfg.stop_atr_buffer * atr_value),
+                    * (min(c.low for c in retest) - t.stop_atr_buffer * atr_value),
                     relative,
                 )
-    h_closes = np.array([c.close for c in hourly])
-    m_closes = np.array([c.close for c in candles])
-    _, support_lows = swing_levels(normalize(hourly[-64:], side))
     levels = [
-        sign * float(ema(h_closes, 20)[-1]),
-        sign * float(ema(m_closes, 20)[-1]),
+        sign * level
+        for level in _pullback_levels(candles, structure, side, vwap, extra_levels)
     ]
-    levels.extend(support_lows[-3:])
-    if vwap is not None:
-        levels.append(sign * vwap)
     pullback_low = min(c.low for c in bars[-4:-1])
     touched = any(
         abs(pullback_low - level) <= 0.5 * atr_value and last.close > level
@@ -432,14 +468,14 @@ def find_setup(
     if touched and pulled_back and _reclaim(last, bars[-2]):
         return Setup(
             "Trend pullback",
-            sign * (min(c.low for c in bars[-4:]) - cfg.stop_atr_buffer * atr_value),
+            sign * (min(c.low for c in bars[-4:]) - t.stop_atr_buffer * atr_value),
             _relative_volume(bars),
         )
-    return _impulse_continuation(bars, side, atr_value, cfg)
+    return _impulse_continuation(bars, side, atr_value, t)
 
 
 def _impulse_continuation(
-    bars: list[Candle], side: Side, atr_value: float, cfg: SignalsCfg
+    bars: list[Candle], side: Side, atr_value: float, t: TrendCfg
 ) -> Setup | None:
     sign = 1 if side == "long" else -1
     last = bars[-1]
@@ -447,7 +483,7 @@ def _impulse_continuation(
         return None
     for idx in range(len(bars) - 8, len(bars) - 3):
         impulse = bars[idx]
-        if impulse.close - impulse.open < cfg.impulse_atr_min * atr_value:
+        if impulse.close - impulse.open < t.impulse_atr_min * atr_value:
             continue
         pullback = bars[idx + 1 : -1]
         if len(pullback) < 2:
@@ -466,10 +502,15 @@ def _impulse_continuation(
             continue
         return Setup(
             "Impulse continuation",
-            sign * (min(pullback_low, last.low) - cfg.stop_atr_buffer * atr_value),
+            sign * (min(pullback_low, last.low) - t.stop_atr_buffer * atr_value),
             _relative_volume(bars),
         )
     return None
+
+
+def travel_budget(hourly_atr: float, hold_minutes: int, multiple: float) -> float:
+    """Price distance a hold window can carry: multiple x ATR(1h) x sqrt(hold / 60 min)."""
+    return multiple * hourly_atr * math.sqrt(hold_minutes / 60)
 
 
 def select_targets(
@@ -478,38 +519,31 @@ def select_targets(
     side: Side,
     stop_distance: float,
     cost_pct: float,
-    hourly_atr: float,
-    four_atr: float,
-    cfg: SignalsCfg,
+    travel: float,
+    min_reward_risk: float,
 ) -> list[float]:
-    """Nearest structural targets that still clear 2R and a ≤24h travel budget."""
+    """Nearest structural targets that clear the profile R inside the hold-window travel budget."""
     sign = 1 if side == "long" else -1
     risk_fraction = (stop_distance / entry * 100 + cost_pct) / 100
-    if risk_fraction <= 0:
+    if risk_fraction <= 0 or travel <= 0:
         return []
-    min_distance = (cfg.min_reward_risk * risk_fraction + cost_pct / 100) * entry
-    max_distance = max(
-        cfg.max_target_atr_multiple * hourly_atr,
-        cfg.max_target_4h_atr_multiple * four_atr,
-        min_distance,
-    )
     chosen: list[float] = []
     for price in sorted(
-        {p for p in levels if 0 < sign * (p - entry) <= max_distance},
+        {p for p in levels if 0 < sign * (p - entry) <= travel},
         reverse=side == "short",
     ):
         reward = sign * (price - entry) / entry - cost_pct / 100
-        if reward / risk_fraction >= cfg.min_reward_risk:
+        if reward / risk_fraction >= min_reward_risk:
             chosen.append(price)
     return chosen
 
 
 def funding_cost(
-    market: Market, side: Side, now: int, hold_hours: int
+    market: Market, side: Side, now: int, hold_minutes: int
 ) -> tuple[float, int]:
     if market.next_funding < now or market.funding_interval_hours <= 0:
         raise ValueError("Funding schedule is missing or stale")
-    end = now + hold_hours * 3600
+    end = now + hold_minutes * 60
     payments = (
         0
         if market.next_funding > end
@@ -521,164 +555,295 @@ def funding_cost(
     return rate * payments * 100, payments
 
 
+def estimate_liquidation(
+    entry: float, leverage: int, cost_pct: float, maintenance_rate: float, side: str
+) -> float:
+    """Isolated-margin liquidation estimate after round-trip costs."""
+    sign = 1 if side == "long" else -1
+    return (
+        entry
+        * (1 - sign / leverage + sign * cost_pct / 100)
+        / (1 - sign * maintenance_rate)
+    )
+
+
+def select_tier(tiers: Sequence[Tier], notional: float) -> Tier | None:
+    """The highest-minimum position tier whose range contains ``notional``."""
+    return next(
+        (
+            t
+            for t in sorted(tiers, key=lambda t: t.minimum, reverse=True)
+            if t.minimum <= notional <= t.maximum
+        ),
+        None,
+    )
+
+
+def liquidation_fit(
+    market: Market,
+    entry: float,
+    stop: float,
+    notional: float,
+    cost_pct: float,
+    atr_value: float,
+    leverage: int,
+    buffer_pct: float,
+    side: str = "short",
+    cap: int | None = None,
+) -> tuple[int, float | None, Tier | None]:
+    """Highest leverage whose estimated liquidation stays beyond the stop.
+
+    Returns (ceiling, liquidation at ``leverage`` or None past the pair cap, tier).
+    ``cap`` bounds the search (the profile's maximum); the tier cap always applies.
+    """
+    sign = 1 if side == "long" else -1
+    return fit_leverage(
+        market.tiers,
+        entry,
+        stop,
+        notional,
+        cost_pct,
+        atr_value,
+        leverage,
+        buffer_pct,
+        side,
+        cap=cap,
+        adverse_basis=min(0.0, sign * (market.mark - market.price)),
+    )
+
+
+def fit_leverage(
+    tiers: Sequence[Tier],
+    entry: float,
+    stop: float,
+    notional: float,
+    cost_pct: float,
+    atr_value: float,
+    leverage: int,
+    buffer_pct: float,
+    side: str = "short",
+    *,
+    cap: int | None = None,
+    adverse_basis: float = 0.0,
+) -> tuple[int, float | None, Tier | None]:
+    """``liquidation_fit`` over a bare tier list (no Market needed).
+
+    ``adverse_basis`` is the mark-vs-last basis working against the trade
+    (``<= 0``); pass 0 when only the mark price is known.
+    """
+    sign = 1 if side == "long" else -1
+    tier = select_tier(tiers, notional)
+    if tier is None:
+        return 0, None, None
+    buffer = max(entry * buffer_pct / 100, atr_value * 0.5)
+    max_leverage, liquidation = 0, None
+    for level in range(1, min(cap or tier.max_leverage, tier.max_leverage) + 1):
+        estimated = estimate_liquidation(
+            entry, level, cost_pct, tier.maintenance_rate, side
+        )
+        if sign * (stop - estimated) + adverse_basis >= buffer:
+            max_leverage = level
+        if level == leverage:
+            liquidation = estimated
+    return max_leverage, liquidation, tier
+
+
+def size_notional(
+    planning_equity: float,
+    risk_pct: float,
+    leverage: int,
+    risk_fraction: float,
+    entry: float,
+    quantity_step: float,
+) -> tuple[float, float]:
+    """Risk-based size rounded to the quantity step: (quantity, notional).
+
+    Leverage only caps the notional at 90% of the buying power; it never
+    enlarges the position.
+    """
+    notional = min(
+        planning_equity * risk_pct / 100 / risk_fraction,
+        planning_equity * leverage * 0.9,
+    )
+    qty = math.floor(notional / entry / quantity_step) * quantity_step
+    return qty, qty * entry
+
+
+def _target_levels(
+    fifteen: list[Candle], hourly: list[Candle], side: Side, now: int
+) -> list[float]:
+    """Structural levels in the trade direction: 15m (24h) and 1h (4 days) swings,
+    the prior UTC day's extreme and the current session's extreme."""
+    levels: list[float] = []
+    for bars in (fifteen[-96:], hourly[-96:]):
+        highs, lows = swing_levels(bars)
+        levels.extend(highs if side == "long" else lows)
+    midnight = now // 86400 * 86400
+    previous_day = [c for c in fifteen if midnight - 86400 <= c.time < midnight]
+    session = [c for c in fifteen if c.time >= midnight]
+    for bars in (previous_day if len(previous_day) == 96 else [], session if len(session) >= 4 else []):
+        if bars:
+            levels.append(
+                max(c.high for c in bars) if side == "long" else min(c.low for c in bars)
+            )
+    return levels
+
+
 def build_plan(
     market: Market,
-    candles: list[Candle],
+    five: list[Candle],
+    fifteen: list[Candle],
     hourly: list[Candle],
-    four_hour: list[Candle],
     setup: Setup,
     side: Side,
     now: int,
     settings: SignalSettings,
     cfg: SignalsCfg,
 ) -> tuple[TradePlan | None, list[Check]]:
+    t = cfg.trend
     sign = 1 if side == "long" else -1
     entry = market.ask if side == "long" else market.bid
     stop_distance = sign * (entry - setup.stop)
-    atr_value = volatility(candles)
-    anchor = candles[-1].close
+    if stop_distance <= 0:
+        blocked = "Price has passed the setup's stop"
+        return None, [make_check(label, False, blocked) for label in PLAN_LABELS]
+    atr_value = volatility(five)
+    atr_15m = volatility(fifteen)
+    hourly_atr = volatility(hourly)
+    hold_minutes = settings.hold_hours * 60
+    anchor = five[-1].close
     low, high = sorted(
-        (anchor - sign * 0.15 * atr_value, anchor + sign * 0.2 * atr_value)
+        (
+            anchor - sign * t.entry_pullback_atr * atr_value,
+            anchor
+            + sign
+            * min(
+                t.entry_chase_atr * atr_value,
+                t.entry_chase_risk_fraction * stop_distance,
+            ),
+        )
     )
+    funding_pct, payments = funding_cost(market, side, now, hold_minutes)
+    cost_pct = cfg.round_trip_fee_pct + cfg.slippage_pct + funding_pct
+    stop_pct = stop_distance / entry * 100
+    risk_fraction = (stop_pct + cost_pct) / 100
+    floor = max(
+        t.min_stop_atr * atr_value,
+        t.min_stop_atr_15m * atr_15m,
+        entry * t.min_stop_pct / 100,
+    )
+    travel = travel_budget(hourly_atr, hold_minutes, t.travel_atr_multiple)
+    targets = select_targets(
+        _target_levels(fifteen, hourly, side, now),
+        entry,
+        side,
+        stop_distance,
+        cost_pct,
+        travel,
+        t.min_reward_risk,
+    )
+    missing_target = (
+        f"No structural target that clears {t.min_reward_risk:g}R inside the "
+        f"{hold_minutes}-minute travel budget ({travel / entry * 100:.2f}%)"
+    )
+    if not targets:
+        ratio = 0.0
+        reward_detail = missing_target
+    else:
+        reward = sign * (targets[0] - entry) / entry - cost_pct / 100
+        ratio = reward / risk_fraction
+        reward_detail = f"{ratio:.2f}R net; need {t.min_reward_risk:g}R"
+    qty, notional = size_notional(
+        settings.planning_equity,
+        settings.risk_pct,
+        settings.leverage,
+        risk_fraction,
+        entry,
+        market.quantity_step,
+    )
+    max_leverage, liquidation, tier = liquidation_fit(
+        market,
+        entry,
+        setup.stop,
+        notional,
+        cost_pct,
+        atr_value,
+        settings.leverage,
+        t.liquidation_buffer_pct,
+        side,
+        cap=PROFILES[PROFILE][2],
+    )
+    lev = settings.leverage
+    fits = tier is not None and lev <= max_leverage
+    if tier is None:
+        leverage_detail = "Notional falls outside every position tier"
+    elif lev > tier.max_leverage:
+        leverage_detail = f"Pair allows {tier.max_leverage}x; planned {lev}x"
+    else:
+        liq = (
+            liquidation
+            if liquidation is not None
+            else estimate_liquidation(entry, lev, cost_pct, tier.maintenance_rate, side)
+        )
+        if fits:
+            room = sign * (setup.stop - liq) / entry * 100
+            leverage_detail = (
+                f"{lev}x fits: stop {stop_pct:.2f}% sits {room:.2f}% inside the "
+                f"estimated liquidation {liq:.5g}; ceiling {max_leverage}x "
+                f"(pair cap {tier.max_leverage}x)"
+            )
+        else:
+            dist = sign * (entry - liq) / entry * 100
+            leverage_detail = (
+                f"{lev}x would liquidate {dist:.2f}% away with a {stop_pct:.2f}% stop; "
+                f"estimated ceiling {max_leverage}x"
+                if dist > 0
+                else f"{lev}x cannot open: maintenance margin exceeds the posted margin; "
+                f"estimated ceiling {max_leverage}x"
+            )
     checks = [
         make_check(
             "Entry zone", low <= entry <= high, "Wait for the entry zone; do not chase"
         ),
         make_check(
-            "Stop outside normal noise",
-            stop_distance >= 0.75 * atr_value,
-            "Structural stop must allow at least 0.75 ATR",
+            "Stop size",
+            floor <= stop_distance and stop_pct <= t.max_stop_pct,
+            f"Stop {stop_pct:.2f}% must sit between {floor / entry * 100:.2f}% (5m noise) "
+            f"and {t.max_stop_pct:g}% ({lev}x limit)",
         ),
-    ]
-    if stop_distance <= 0:
-        blocked = "Price has passed the setup's stop"
-        return None, [
-            checks[0],
-            make_check("Stop outside normal noise", False, blocked),
-            *[
-                make_check(label, False, blocked)
-                for label in PLAN_LABELS
-                if label not in ("Entry zone", "Stop outside normal noise")
-            ],
-        ]
-    levels: list[float] = []
-    for bars in (hourly[-96:], four_hour[-96:]):
-        highs, lows = swing_levels(bars)
-        levels.extend(highs if side == "long" else lows)
-    previous_day = [
-        c
-        for c in candles
-        if now // 86400 * 86400 - 86400 <= c.time < now // 86400 * 86400
-    ]
-    if len(previous_day) == 96:
-        levels.append(
-            max(c.high for c in previous_day)
-            if side == "long"
-            else min(c.low for c in previous_day)
-        )
-    funding_pct, payments = funding_cost(market, side, now, settings.hold_hours)
-    cost_pct = cfg.round_trip_fee_pct + cfg.slippage_pct + funding_pct
-    stop_pct = stop_distance / entry * 100
-    risk_fraction = (stop_pct + cost_pct) / 100
-    targets = select_targets(
-        levels,
-        entry,
-        side,
-        stop_distance,
-        cost_pct,
-        volatility(hourly),
-        volatility(four_hour),
-        cfg,
-    )
-    missing_target = "No confirmed target that clears 2R inside the ≤24h travel budget"
-    if not targets:
-        ratio = 0.0
-        target_ok = False
-        reward_detail = missing_target
-    else:
-        reward = sign * (targets[0] - entry) / entry - cost_pct / 100
-        ratio = reward / risk_fraction if risk_fraction > 0 else 0.0
-        target_ok = True
-        reward_detail = f"{ratio:.2f}R net; need {cfg.min_reward_risk:g}R"
-    notional = min(
-        settings.planning_equity * settings.risk_pct / 100 / risk_fraction,
-        settings.planning_equity * settings.leverage * 0.9,
-    )
-    qty = math.floor(notional / entry / market.quantity_step) * market.quantity_step
-    notional = qty * entry
-    tier = next(
-        (
-            t
-            for t in sorted(market.tiers, key=lambda t: t.minimum, reverse=True)
-            if t.minimum <= notional <= t.maximum
+        make_check(
+            "Target inside hold budget",
+            bool(targets),
+            (
+                f"Structural target inside the {hold_minutes}-minute travel budget "
+                f"({travel / entry * 100:.2f}%)"
+                if targets
+                else missing_target
+            ),
         ),
-        None,
-    )
-    max_leverage, liquidation = 0, None
-    if tier:
-        adverse_basis = min(0, sign * (market.mark - market.price))
-        buffer = max(entry * cfg.liquidation_buffer_pct / 100, atr_value * 0.5)
-        for leverage in range(1, min(40, tier.max_leverage) + 1):
-            estimated = (
-                entry
-                * (1 - sign / leverage + sign * cost_pct / 100)
-                / (1 - sign * tier.maintenance_rate)
-            )
-            if sign * (setup.stop - estimated) + adverse_basis >= buffer:
-                max_leverage = leverage
-            if leverage == settings.leverage:
-                liquidation = estimated
-    usable_band = min(max_leverage, 40) if max_leverage >= 25 else max_leverage
-    if tier is not None and settings.leverage <= max_leverage:
-        leverage_detail = (
-            f"{settings.leverage}x clears the isolated-margin buffer; "
-            f"{usable_band}x is the highest 25-40x leverage that still fits this stop"
-            if max_leverage >= 25
-            else "Estimated isolated-margin buffer passes; verify exchange liquidation price"
-        )
-    else:
-        leverage_detail = (
-            f"Reduce leverage or skip; estimated maximum {max_leverage}x"
-        )
-    checks.extend(
-        [
-            make_check(
-                "Structural target",
-                target_ok,
-                (
-                    "Confirmed target clears 2R inside the ≤24h travel budget"
-                    if target_ok
-                    else missing_target
-                ),
-            ),
-            make_check(
-                "Reward after costs",
-                target_ok and ratio >= cfg.min_reward_risk,
-                reward_detail,
-            ),
-            make_check(
-                "Funding drag",
-                funding_pct <= cfg.max_funding_cost_pct,
-                f"{funding_pct:.3f}% projected funding over the hold; max {cfg.max_funding_cost_pct:g}%",
-            ),
-            make_check(
-                "Order size",
-                qty >= market.min_quantity and qty > 0,
-                "Quantity must meet the exchange minimum",
-            ),
-            make_check(
-                "Execution depth",
-                min(market.bid_depth_usdt, market.ask_depth_usdt)
-                >= notional * cfg.min_depth_ratio,
-                f"Both sides need at least {cfg.min_depth_ratio:g} times the planned notional",
-            ),
-            make_check(
-                "Leverage buffer",
-                tier is not None and settings.leverage <= max_leverage,
-                leverage_detail,
-            ),
-        ]
-    )
+        make_check(
+            "Reward after costs",
+            bool(targets) and ratio >= t.min_reward_risk,
+            reward_detail,
+        ),
+        make_check(
+            "Funding drag",
+            funding_pct <= t.max_funding_cost_pct,
+            f"{funding_pct:.3f}% projected funding over {hold_minutes} min; max {t.max_funding_cost_pct:g}%",
+        ),
+        make_check(
+            "Order size",
+            qty >= market.min_quantity and qty > 0,
+            "Quantity must meet the exchange minimum",
+        ),
+        make_check(
+            "Execution depth",
+            min(market.bid_depth_usdt, market.ask_depth_usdt)
+            >= notional * t.min_depth_ratio,
+            f"Both sides need at least {t.min_depth_ratio:g} times the planned notional",
+        ),
+        make_check("Leverage ceiling", fits, leverage_detail),
+    ]
     if not targets:
         return None, checks
     return TradePlan(
@@ -691,7 +856,7 @@ def build_plan(
         targets[1] if len(targets) > 1 else None,
         qty,
         notional,
-        notional / settings.leverage,
+        notional / lev,
         notional * risk_fraction,
         notional * risk_fraction / settings.planning_equity * 100,
         ratio,
@@ -701,10 +866,12 @@ def build_plan(
         payments,
         liquidation,
         max_leverage,
-        settings.leverage,
+        lev,
         settings.hold_hours,
-        candles[-1].time + 1800,
-        min(0, sign * (market.mark - market.price)),
+        five[-1].time + INTERVALS[t.trigger_interval] + t.entry_expiry_seconds,
+        min(0.0, sign * (market.mark - market.price)),
+        PROFILE,
+        t.trigger_interval,
     ), checks
 
 
@@ -715,31 +882,56 @@ def evaluate_intraday(
     settings: SignalSettings,
     cfg: SignalsCfg,
     now: int,
+    oi_change_pct: float | None = None,
 ) -> Decision:
+    t = cfg.trend
     result = Decision(market.symbol, as_of=market.as_of, price=market.price)
-    bars, hourly, four_hour = frames["15m"], frames["1h"], frames["4h"]
-    one, four_bias, four_structure = (
-        trend(hourly),
-        ema_bias(four_hour),
-        trend(four_hour),
+    five, fifteen, hourly = (
+        frames[t.trigger_interval],
+        frames[STRUCTURE_INTERVAL],
+        frames[BIAS_INTERVAL],
     )
-    result.bar_time = bars[-1].time
-    atr_value, vwap = volatility(bars), session_vwap(bars, now)
-    hourly_atr_pct = volatility(hourly) / market.price * 100
+    bias, structure = ema_bias(hourly), trend(fifteen)
+    result.bar_time = five[-1].time
+    atr_value, atr_15m, hourly_atr = (
+        volatility(five),
+        volatility(fifteen),
+        volatility(hourly),
+    )
+    vwap = session_vwap(fifteen, now)
+    hold_minutes = settings.hold_hours * 60
+    hourly_atr_pct = hourly_atr / market.price * 100
+    h_ema20 = _ema20(hourly)
+    # Positive when price sits above the 1h EMA20; gates read it in the trade direction.
+    extension = (market.price - h_ema20) / hourly_atr if hourly_atr > 0 else 0.0
+    hourly_volume = market.quote_volume / 24
+    session_volume = sum(c.volume for c in fifteen[-4:])
+    session_ratio = session_volume / hourly_volume if hourly_volume > 0 else 0.0
+    spread_pct = (market.ask - market.bid) / market.price * 100
+    basis_pct = abs(market.mark - market.price) / market.price * 100
+    funding_eta = market.next_funding - now
+    atr_floor = min_hourly_atr_pct(t, hold_minutes)
     result.metrics = {
-        "trend_1h": one,
-        "trend_4h": four_bias,
-        "trend_4h_structure": four_structure,
+        "profile": PROFILE,
+        "trigger_interval": t.trigger_interval,
+        "hold_minutes": hold_minutes,
+        "trend_1h": bias,
+        "trend_15m": structure,
         "atr_pct": atr_value / market.price * 100,
+        "atr_15m_pct": atr_15m / market.price * 100,
         "hourly_atr_pct": hourly_atr_pct,
+        "extension_atr": extension,
+        "session_volume_ratio": session_ratio,
         "vwap": vwap,
         "funding_rate_pct": market.funding_rate * 100,
         "next_funding": market.next_funding,
         "open_interest": market.open_interest,
-        "spread_pct": (market.ask - market.bid) / market.price * 100,
+        "oi_change_pct": oi_change_pct,
+        "spread_pct": spread_pct,
+        "tier_max_leverage": max(x.max_leverage for x in market.tiers)
+        if market.tiers
+        else 0,
     }
-    basis_pct = abs(market.mark - market.price) / market.price * 100
-    funding_eta = market.next_funding - now
     result.checks = [
         make_check(
             "Fresh market data",
@@ -748,37 +940,41 @@ def evaluate_intraday(
         ),
         make_check(
             "Liquid market",
-            market.quote_volume >= cfg.min_quote_volume,
-            "24h quote volume must pass the liquidity floor",
+            market.quote_volume >= cfg.min_quote_volume
+            and session_volume >= t.session_volume_ratio * hourly_volume,
+            f"24h quote volume must pass the liquidity floor and the last hour's session "
+            f"volume must be at least {t.session_volume_ratio:g}x the 24h hourly average "
+            f"({session_ratio:.2f}x)",
         ),
         make_check(
             "Spread",
-            0 < market.bid <= market.ask
-            and (market.ask - market.bid) / market.price * 100 <= cfg.max_spread_pct,
-            "Spread must fit the execution limit",
+            0 < market.bid <= market.ask and spread_pct <= t.max_spread_pct,
+            f"Spread {spread_pct:.3f}%; max {t.max_spread_pct:g}% for the leverage",
         ),
         make_check(
             "Hold-window volatility",
-            cfg.min_hourly_atr_pct <= hourly_atr_pct <= cfg.max_hourly_atr_pct,
-            f"1h ATR {hourly_atr_pct:.2f}% must fit a 25-40x, ≤24h trade",
-        ),
-        make_check(
-            "4h bias / 1h structure",
-            one == four_bias and one != "mixed",
-            f"4h bias {four_bias}; 1h structure {one}",
+            atr_floor <= hourly_atr_pct <= t.max_hourly_atr_pct,
+            f"1h ATR {hourly_atr_pct:.2f}% must sit in {atr_floor:.2f}-{t.max_hourly_atr_pct:g}% "
+            f"to carry a {t.min_reward_risk:g}R target inside {hold_minutes} min "
+            f"at {settings.leverage}x",
         ),
         make_check(
             "Mark vs last",
-            basis_pct <= cfg.max_mark_basis_pct,
-            f"Mark is {basis_pct:.3f}% from last; max {cfg.max_mark_basis_pct:g}%",
+            basis_pct <= t.max_mark_basis_pct,
+            f"Mark is {basis_pct:.3f}% from last; max {t.max_mark_basis_pct:g}%",
         ),
         make_check(
             "Funding print window",
-            funding_eta > cfg.funding_blackout_seconds,
-            f"Next funding in {max(0, funding_eta)}s; wait if ≤{cfg.funding_blackout_seconds}s",
+            funding_eta > t.funding_blackout_seconds,
+            f"Next funding in {max(0, funding_eta)}s; wait if ≤{t.funding_blackout_seconds}s",
+        ),
+        make_check(
+            "1h bias / 15m structure",
+            bias == structure and bias in ("long", "short"),
+            f"1h bias {bias}; 15m structure {structure}",
         ),
     ]
-    if one != four_bias or one not in ("long", "short"):
+    if bias != structure or bias not in ("long", "short"):
         result.checks.extend(
             waiting_check(label, WAITING_ALIGNMENT)
             for label in CHECKLIST_LABELS
@@ -793,35 +989,15 @@ def evaluate_intraday(
         )
         result.checks = order_checks(result.checks)
         result.reasons = [
-            "Wait for 4h EMA bias and confirmed 1h structure in the same direction"
+            "Wait for 1h EMA bias and confirmed 15m structure in the same direction"
         ]
         return result
-    side: Side = "long" if one == "long" else "short"
+    side: Side = "long" if bias == "long" else "short"
+    opposite = "short" if side == "long" else "long"
     sign = 1 if side == "long" else -1
     result.side = side
     result.state = f"WATCH_{side.upper()}"
-    if market.symbol != "BTCUSDT":
-        btc_trend = trend(btc_hourly) if btc_hourly else "unavailable"
-        relative = (
-            (
-                (hourly[-1].close / hourly[-7].close - 1)
-                - (btc_hourly[-1].close / btc_hourly[-7].close - 1)
-            )
-            * 100
-            if btc_hourly
-            else None
-        )
-        result.metrics.update(
-            {"btc_trend": btc_trend, "relative_strength_pct": relative}
-        )
-        result.checks.append(
-            make_check(
-                "BTC context",
-                btc_trend == side and relative is not None and sign * relative >= 0,
-                "Require aligned BTC direction and matching 6h relative strength",
-            )
-        )
-    else:
+    if market.symbol == "BTCUSDT":
         result.checks.append(
             make_check(
                 "BTC context",
@@ -829,12 +1005,62 @@ def evaluate_intraday(
                 "BTC is the benchmark; no extra relative-strength gate",
             )
         )
-    setup = find_setup(bars, hourly, side, atr_value, vwap, cfg)
+    elif btc_hourly and len(btc_hourly) >= 50 and len(hourly) >= 3:
+        btc_bias = ema_bias(btc_hourly)
+        relative = (
+            (hourly[-1].close / hourly[-3].close - 1)
+            - (btc_hourly[-1].close / btc_hourly[-3].close - 1)
+        ) * 100
+        result.metrics.update(
+            {"btc_trend": btc_bias, "relative_strength_pct": relative}
+        )
+        result.checks.append(
+            make_check(
+                "BTC context",
+                btc_bias != opposite and sign * relative >= 0,
+                f"BTC 1h bias {btc_bias} must not oppose the trade and the 2h relative "
+                f"strength ({relative:+.2f}%) must favour it",
+            )
+        )
+    else:
+        result.metrics.update({"btc_trend": "unavailable", "relative_strength_pct": None})
+        result.checks.append(make_check("BTC context", False, "BTC candles unavailable"))
+    directional_extension = sign * extension
+    crowded = sign * market.funding_rate * 100 > t.max_funding_rate_pct or (
+        oi_change_pct is not None
+        and oi_change_pct >= t.max_oi_change_pct
+        and directional_extension >= t.crowd_extension_atr
+    )
+    oi_text = (
+        f"OI {oi_change_pct:+.2f}% over 1h" if oi_change_pct is not None else "OI history warming up"
+    )
+    result.checks.extend(
+        [
+            make_check(
+                "Not extended",
+                directional_extension <= t.max_extension_atr,
+                f"{directional_extension:+.1f} hourly ATR from the 1h EMA20 in the trade "
+                f"direction; max {t.max_extension_atr:g}",
+            ),
+            make_check(
+                "Crowding headwind",
+                not crowded,
+                f"Funding {market.funding_rate * 100:+.4f}% per print (max "
+                f"{t.max_funding_rate_pct:g}% against the trade); {oi_text} with "
+                f"{directional_extension:+.1f} ATR extension (crowded at ≥{t.max_oi_change_pct:g}% "
+                f"and ≥{t.crowd_extension_atr:g} ATR)",
+            ),
+        ]
+    )
+    setup = find_setup(
+        five, fifteen, side, atr_value, vwap, t, extra_levels=[h_ema20]
+    )
     result.checks.append(
         make_check(
-            "Completed 15m trigger",
+            "Completed trigger candle",
             setup is not None,
-            "Waiting for a pullback reclaim, impulse continuation, or breakout retest",
+            f"Waiting for a completed {t.trigger_interval} pullback reclaim, "
+            "impulse continuation, or breakout retest",
         )
     )
     if setup:
@@ -844,26 +1070,27 @@ def evaluate_intraday(
         result.checks.append(
             make_check(
                 "Volume confirmation",
-                setup.relative_volume >= cfg.relative_volume_min,
+                setup.relative_volume >= t.relative_volume_min,
                 f"{setup.relative_volume:.2f} times baseline volume",
             )
         )
         result.plan, checks = build_plan(
-            market, bars, hourly, four_hour, setup, side, now, settings, cfg
+            market, five, fifteen, hourly, setup, side, now, settings, cfg
         )
         result.checks.extend(checks)
-        if result.plan:
-            result.actions = [
-                action(f"Enter {side}", result.plan.entry_low, result.plan.entry_high)
-            ]
-        else:
-            result.actions = swing_actions(bars, hourly, side, vwap)
     else:
         result.checks.extend(
-            waiting_check(label, WAITING_SETUP)
+            waiting_check(label, waiting_setup(t.trigger_interval))
             for label in ("Volume confirmation",) + PLAN_LABELS
         )
-        result.actions = swing_actions(bars, hourly, side, vwap)
+    if result.plan:
+        result.actions = [
+            action(f"Enter {side}", result.plan.entry_low, result.plan.entry_high)
+        ]
+    else:
+        result.actions = watch_actions(
+            five, fifteen, side, vwap, t.trigger_interval, [h_ema20]
+        )
     result.checks.append(
         make_check("Tracked exposure", True, "No conflicting tracked exposure")
     )
@@ -875,6 +1102,6 @@ def evaluate_intraday(
     ):
         result.state = f"ENTER_{side.upper()}"
     result.reasons = [item.detail for item in result.checks if not item.passed] or [
-        f"{result.setup} confirmed on a completed 15m candle"
+        f"{result.setup} confirmed on a completed {t.trigger_interval} candle"
     ]
     return result

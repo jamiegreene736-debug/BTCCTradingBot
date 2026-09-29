@@ -1,12 +1,13 @@
 # Bitunix Intraday Signals
 
-An alerts-only scanner and Chrome overlay with two profiles. **Swing** finds
-long and short trades with a maximum holding period of 12 or 24 hours from
-completed 4h / 1h / 15m candles. **Scalp short** fades parabolic exhaustion
-on 1m bars for a 1h or 2h hold at up to the pair's leverage cap. Neither opens
-trades, changes leverage, or closes exchange positions. The one exception is
-the overlay **Set Bitunix stop** button, which places a position-level
-protective stop.
+An alerts-only scanner and Chrome overlay with two profiles. **Trend** (the
+default) finds long and short continuation trades from 1h EMA bias, 15m
+HH/HL structure and a completed 5m trigger, held 1 or 2 hours at 20-100x
+(50x default). **Scalp** fades parabolic exhaustion on 1m bars, long or
+short, for a 1h or 2h hold at 1-125x, up to the pair's leverage cap. Neither
+opens trades, changes leverage, or closes exchange positions. The one
+exception is the overlay **Set Bitunix stop** button, which places a
+position-level protective stop.
 
 ## Start the backend
 
@@ -36,28 +37,37 @@ stored in local Chrome storage.
 
 ## Signals
 
-1. 4h supplies directional bias only (20/50 EMA stack and slope). Confirmed 4h
-   swings take 16 hours to print and arrive too late for a 12/24h hold. 1h must
-   still show matching confirmed swing structure, EMA stack, and slope. Mixed
-   1h structure or an opposite 4h bias means WAIT.
-2. A 15m trend pullback must touch the hourly or 15m EMA, hourly support, or
-   UTC-session VWAP, then reclaim the prior close in the trend direction with
-   relative volume. Entries do not wait for a break of the prior high.
-3. Alternatively, a volume-backed breakout must precede a separate retest that
-   holds the old range boundary, or a 15m impulse of at least 1.1 ATR must
-   pull back without breaking its origin and then reclaim. Long and short
-   rules are symmetric.
-4. The stop sits beyond the setup's structural low/high plus an ATR allowance.
-   It must accommodate at least 0.75 ATR. The nearest confirmed structural
-   target that still provides 2R after estimated costs, and that sits inside a
-   ≤24h travel budget (8× 1h ATR or 3× 4h ATR), is used. Near swings that fail
-   2R are skipped instead of blocking the trade. A second target is contextual
-   only; the default exit is the first target.
-5. Altcoins additionally require aligned BTC direction and matching relative
-   strength over six hours. Spread, 24h USDT volume, 1h ATR (not dead, not
-   blow-off), planned order size, depth, projected funding drag, and an
-   estimated isolated-margin liquidation buffer must pass. The intended
-   isolated-margin band is 25-40x; leverage never narrows the stop.
+1. 1h supplies directional bias only (20/50 EMA stack and slope). 15m must
+   show matching confirmed HH/HL or LH/LL structure. Mixed 15m structure or
+   an opposite 1h bias means WAIT. The 4h frame is not fetched.
+2. A completed 5m pullback must touch the 15m or 5m EMA20, the 1h EMA20, a
+   recent 15m swing, or UTC-session VWAP, then reclaim the prior close in the
+   trend direction with at least 1.2× relative volume. Entries do not wait
+   for a break of the prior high.
+3. Alternatively, a volume-backed 5m breakout (1.5× volume) must precede a
+   separate retest that holds the old range boundary, or a 5m impulse of at
+   least 1.1 ATR must pull back without breaking its origin and then reclaim.
+   Long and short rules are symmetric.
+4. The stop sits beyond the setup's 5m structural low/high plus 0.2 ATR(5m).
+   It must be at least 1.0 ATR(5m), 0.35 ATR(15m) and 0.20% of entry, at most
+   0.60% of entry, and must sit at least 0.25% of entry (or half a 5m ATR)
+   inside the estimated isolated liquidation at the planned leverage. The
+   nearest structural target (15m and 1h swings, prior-day and session
+   high/low) that clears 1.5R after estimated costs inside a travel budget of
+   1.5 × ATR(1h) × sqrt(hold minutes / 60) is used. Near swings that fail
+   1.5R are skipped instead of blocking the trade. A second target is
+   contextual only; the default exit is the first target.
+5. The 1h ATR must sit between 0.60% (1h hold) or 0.35% (2h hold) and 1.2%,
+   so the travel budget can carry a 1.5R target; BTC usually fails this and
+   shows WAIT with that reason. Price may not be more than 2 ATR(1h) past the
+   1h EMA20, and funding in the trade direction may not exceed 0.05% per
+   print (or open interest up 3% in an hour while extended 1.5 ATR).
+   Altcoins additionally require BTC not opposed and non-negative relative
+   strength over two hours. Spread (0.04%), 24h USDT volume plus last-hour
+   session activity, mark/last basis (0.15%), a 5-minute funding-print
+   blackout, planned order size, depth (8× notional), projected funding drag
+   (0.10% of notional) and the liquidation buffer must pass. Leverage never
+   narrows the stop; it only changes margin and liquidation distance.
 
 The scanner keeps a wide liquid universe of about 80 USDT perpetuals and a hot
 set of about 12. Each 15-second refresh fully rescans the hot set — BTC, open or
@@ -65,23 +75,23 @@ tracked positions, current WATCH/ENTER names, the displayed top five, and the
 most liquid majors — then rotates through about 10 more universe names so the
 full list is covered every couple of minutes. Names that print a WATCH or ENTER
 are promoted onto the fast lane. The overlay still shows only the ranked top
-five. Every card uses the same 19-gate checklist
-(market, setup, plan, book). Later stages stay marked waiting until the prior
-stage prints, so a WATCH does not jump from 4/5 to 5/7. Once a 15m setup
-exists, all eight plan gates are scored even if the 2R target fails. Two extra market
-gates — mark vs last, and a 3-minute funding-print blackout — use data the
-scanner already has. RSI, MACD, news, and open-interest trend are not added:
-they are either redundant with the 4h/1h/15m stack or need history we do not
-store. Funding and open interest remain context, not standalone buy/sell
-triggers; missing open interest is labeled unavailable. Missing funding, depth,
+five. Every trend card uses the same 21-gate checklist
+(market, setup, plan, portfolio). Later stages stay marked waiting until the
+prior stage prints, so a WATCH does not jump from 4/5 to 5/7. Once a 5m setup
+exists, all eight plan gates are scored even if the 1.5R target fails. Market
+gates such as mark vs last, the funding-print blackout, extension and crowding
+use data the scanner already has. RSI, MACD and news are not added: they are
+either redundant with the 1h/15m/5m stack or need history we do not store.
+Funding and open interest remain context, not standalone buy/sell triggers;
+missing open interest is labeled warming up or unavailable. Missing funding, depth,
 or maintenance tiers blocks a new entry. This release does not include a
 news/event feed.
 
-## Scalp-short profile
+## Scalp profile
 
-Select **Scalp short** in the overlay's planning settings. It is a separate
+Select **Scalp** in the overlay's planning settings. It is a separate
 evaluator (`bitunix_bot/scalp_short.py`) with its own `signals.scalp` block in
-`config.yaml`; the swing profile is unchanged.
+`config.yaml`; the trend profile reads `signals.trend`.
 
 1. **Universe by tier.** Only liquid USDT perpetuals whose exchange leverage
    cap allows the planned leverage are scanned, and the card's "Leverage tier"
@@ -124,15 +134,18 @@ evaluator (`bitunix_bot/scalp_short.py`) with its own `signals.scalp` block in
 ## Planning and tracking
 
 The overlay's Edit button sets the profile, planning equity, risk per trade,
-leverage (1–40x swing, 1–125x scalp short), and maximum hold (12h/24h swing,
-1h/2h scalp short). Initial planning defaults are explicitly hypothetical:
-1,000 USDT equity, 0.5% risk, 25x, 24 hours, swing. These are not an exchange
-balance.
+leverage (20–100x trend, 1–125x scalp), and maximum hold (1 or 2 hours for
+both profiles). Initial planning defaults are explicitly hypothetical:
+1,000 USDT equity, 0.5% risk, 50x, 2 hours, trend. These are not an exchange
+balance. Settings saved under the old `swing` profile load as trend; a hold
+outside 1-2 hours becomes 2 hours and a leverage outside 20-100 becomes 50x.
 
 The overlay shows a ranked queue of the top five markets, each with the time
 the current state started. WATCH and ENTER alerts are stored with that
 timestamp so you can look back. When a setup flips to ENTER, the laptop
-speakers say “Trade entry waiting” plus the market and side. When a tracked
+speakers say “Trade entry waiting” plus the market and side, followed by the
+planned leverage and hold window when those settings are configured (for
+example “50 x, 120 minute hold”). When a tracked
 trade needs an exchange stop or a latched exit, they say “Set the Bitunix stop
 now” or “Close the trade now. Do not wait for a reversal.” Click the panel
 once if Chrome blocks speech until a gesture. When the featured setup is about
@@ -147,8 +160,10 @@ configurable estimates in `config.yaml`, and future funding rates can change.
 
 Leverage never narrows a stop. The scanner estimates a leverage ceiling using the
 position's maintenance tier, mark/last basis, costs, and a buffer of at least
-0.5% of entry or half an ATR. This is an estimate for isolated margin without
-extra collateral, not the exchange's exact liquidation price or a guarantee.
+0.25% of entry or half a 5m ATR (0.15% for scalp). This is an estimate for
+isolated margin without extra collateral, not the exchange's exact liquidation
+price or a guarantee. Risk-based sizing means 50x changes only the posted
+margin and the liquidation distance, never the position size.
 
 - **Track paper trade** records a simulated entry without placing an order.
 - **Record my fill** records a fill you already executed, within the confirmed
@@ -166,14 +181,17 @@ extra collateral, not the exchange's exact liquidation price or a guarantee.
 - Tracked cards show a live hold/close suggestion, a hold-confidence checklist
   score (not a measured win rate), and a fixed 13-gate close-out list: fresh
   data, stop, target, hold time, drawdown, room to the working stop, liquidation
-  buffer, confirmed exchange stop, 1h structure, 4h bias, stale progress,
-  session VWAP, and funding carry. Hard EXIT alerts latch on stop/target
-  touches, opposite completed 1h structure, failure to make 0.25R progress
-  within four hours, maximum age, a missing liquidation buffer, −0.75R (do not
-  wait for a reversal), and an unprotected position that is already −0.5R.
+  buffer, confirmed exchange stop, structure intact (15m), bias intact (1h),
+  progress vs review window, session VWAP, and funding carry. Hard EXIT alerts
+  latch on stop/target touches, opposite completed 15m structure, failure to
+  make 0.3R within 35% of the hold (21 min at 1h, 42 min at 2h), being under
+  0.5R at 75% of the hold (45 / 90 min), maximum age (60 / 120 min), a
+  missing liquidation buffer (0.25% of entry for trend), −0.75R (do not wait
+  for a reversal), and an unprotected position that is already −0.5R.
   Soft failures drop hold confidence and can switch the live suggestion to
   CONSIDER CLOSE without latching an exit. After 1R the stop can advance to
-  cover estimated costs; a trailing stop can advance after 1.5R and never widen.
+  cover estimated costs; a trailing stop can advance after 1.25R and never
+  widen.
   Stop changes are suggestions to apply manually. SET STOP and CLOSE hide the
   confidence bar so a checklist percentage cannot talk you into holding.
 - Exit alerts remain latched until you record closure. They do not reverse into
@@ -213,8 +231,9 @@ python3 -m pytest tests/test_e2e.py tests/test_intraday.py tests/test_scalp_shor
 node --test tests/extension_worker.test.cjs
 # Requires Playwright; CHROME_PATH can override the local Chrome executable.
 node tests/extension_ui.cjs
-python3 scripts/backtest_intraday.py --days 7 --symbols BTCUSDT,ETHUSDT \
-  --leverage 25 --output /tmp/intraday-replay.json
+python3 scripts/backtest_intraday.py --days 14 \
+  --symbols ETHUSDT,SOLUSDT,DOGEUSDT,XRPUSDT,SUIUSDT \
+  --leverage 50 --hold-hours 2 --output /tmp/trend-replay-2h.json
 python3 scripts/backtest_scalp_short.py --hours 48 --leverage 100 \
   --symbols auto --top 15 --output /tmp/scalp-short-replay.json
 ```

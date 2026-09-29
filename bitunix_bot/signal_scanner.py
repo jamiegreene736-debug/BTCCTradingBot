@@ -32,13 +32,21 @@ from .intraday import (
     TradePlan,
     blank_checklist,
     closed_candles,
+    estimate_liquidation,
     evaluate_intraday,
+    fit_leverage,
     number,
     upsert_check,
     volatility,
 )
 from .scalp_short import SCALP_PROFILES, blank_scalp_checklist, evaluate_scalp
-from .signal_config import SignalsCfg, SignalSettings
+from .signal_config import (
+    PROFILES,
+    SignalsCfg,
+    SignalSettings,
+    TrendCfg,
+    profile_cfg,
+)
 from .signal_store import SignalStore, TrackedTrade, evaluate_exit
 from .symbol_meta import (
     parse_symbol_meta,
@@ -150,6 +158,30 @@ def parse_open_position(row: object) -> OpenPosition | None:
     )
 
 
+def parse_tiers(rows: object) -> list[Tier]:
+    """Position tiers from the exchange payload; ValueError when unusable."""
+    if not isinstance(rows, list):
+        raise ValueError("Invalid position tiers")
+    tiers = [
+        Tier(
+            number(t["startValue"]),
+            number(t["endValue"]),
+            number(t["maintenanceMarginRate"]),
+            int(number(t["leverage"])),
+        )
+        for t in rows
+    ]
+    if not tiers or any(
+        t.minimum < 0
+        or t.maximum <= t.minimum
+        or not 0 < t.maintenance_rate < 1
+        or t.max_leverage < 1
+        for t in tiers
+    ):
+        raise ValueError("Invalid position tiers")
+    return tiers
+
+
 READ_ERRORS = (
     BitunixError,
     requests.RequestException,
@@ -168,6 +200,7 @@ class SignalScanner:
         self.decisions: dict[str, Decision] = {}
         self.frames: dict[str, dict[str, list[Candle]]] = {}
         self._cache: dict[str, tuple[float, object]] = {}
+        self._tiers_warned: set[str] = set()
         self._failures: dict[str, tuple[int, float]] = {}
         self._consecutive_failures = 0
         self._circuit_until = 0.0
@@ -188,7 +221,7 @@ class SignalScanner:
     def _intervals(self, settings: SignalSettings) -> tuple[str, ...]:
         if settings.profile in SCALP_PROFILES:
             return (self.cfg.scalp.trigger_interval, "15m", "1h", "4h")
-        return ("15m", "1h", "4h")
+        return (self.cfg.trend.trigger_interval, "15m", "1h")
 
     def _record_open_interest(self, by_ticker: dict[str, dict[str, object]], now: int) -> None:
         window = self.cfg.scalp.oi_window_seconds * 3
@@ -249,7 +282,7 @@ class SignalScanner:
         return value
 
     def _frames(
-        self, symbol: str, now: int, intervals: tuple[str, ...] = ("15m", "1h", "4h")
+        self, symbol: str, now: int, intervals: tuple[str, ...] = ("5m", "15m", "1h")
     ) -> dict[str, list[Candle]]:
         frames = {}
         for interval in intervals:
@@ -309,29 +342,9 @@ class SignalScanner:
         if number(pair["minTradeVolume"]) < 0:
             raise ValueError("Invalid minimum quantity")
         meta = parse_symbol_meta(pair)
-        parsed_tiers = [
-            Tier(
-                number(t["startValue"]),
-                number(t["endValue"]),
-                number(t["maintenanceMarginRate"]),
-                int(number(t["leverage"])),
-            )
-            for t in tiers
-        ]
-        if (
-            price <= 0
-            or mark <= 0
-            or bids[0][0] > asks[0][0]
-            or not parsed_tiers
-            or any(
-                t.minimum < 0
-                or t.maximum <= t.minimum
-                or not 0 < t.maintenance_rate < 1
-                or t.max_leverage < 1
-                for t in parsed_tiers
-            )
-        ):
+        if price <= 0 or mark <= 0 or bids[0][0] > asks[0][0]:
             raise ValueError("Invalid prices or position tiers")
+        parsed_tiers = parse_tiers(tiers)
         next_funding = number(funding["nextFundingTime"])
         if next_funding > 10_000_000_000:
             next_funding /= 1000
@@ -421,6 +434,81 @@ class SignalScanner:
                 )
             return [], False
 
+    def _position_tiers(self, symbol: str) -> list[Tier]:
+        """Position tiers for an imported symbol; [] when the exchange cannot say.
+
+        Shares the hourly ``tiers:`` cache with ``_market`` so a scanned pair
+        costs nothing and a pair outside the universe costs one request.
+        """
+        try:
+            return parse_tiers(
+                self._read(
+                    f"tiers:{symbol}", 3600, lambda: self.client.position_tiers(symbol)
+                )
+            )
+        except READ_ERRORS as exc:
+            if symbol not in self._tiers_warned:
+                self._tiers_warned.add(symbol)
+                log.warning(
+                    "Position tiers unavailable for %s (%s); the liquidation "
+                    "estimate assumes the maintenance rate",
+                    symbol,
+                    exc,
+                )
+            return []
+
+    def _fallback_liquidation(
+        self,
+        symbol: str,
+        side: Side,
+        entry: float,
+        stop: float,
+        notional: float,
+        cost_pct: float,
+        atr_value: float,
+        leverage: int,
+        buffer_pct: float,
+        cap: int,
+    ) -> tuple[float, int]:
+        """Liquidation estimate and leverage ceiling for a position without a card.
+
+        The pair's real maintenance tier is used whenever the exchange reports
+        one. Without a tier the maintenance rate is assumed at up to 1%, but
+        never more than keeps the estimate one buffer beyond the fallback stop
+        at the position's leverage: a guessed tier must not raise a liquidation
+        alarm on its own. If even a 0% rate leaves the stop inside the buffer,
+        the alarm is real for every tier and the estimate says so.
+        """
+        sign = 1 if side == "long" else -1
+        tiers = self._position_tiers(symbol)
+        if tiers:
+            ceiling, liquidation, tier = fit_leverage(
+                tiers, entry, stop, notional, cost_pct, atr_value, leverage,
+                buffer_pct, side, cap=max(cap, leverage),
+            )
+            if tier is not None:
+                if liquidation is None:  # position leverage above the pair cap
+                    liquidation = estimate_liquidation(
+                        entry, leverage, cost_pct, tier.maintenance_rate, side
+                    )
+                return liquidation, ceiling
+        # 1e-9 keeps the fit's ">= buffer" test clear of float rounding.
+        need = (
+            sign * (entry - stop) / entry
+            + max(buffer_pct / 100, atr_value * 0.5 / entry)
+            + 1e-9
+        )
+        room = 1 / leverage - cost_pct / 100 - need
+        rate = min(0.01, max(0.0, room / (1 - sign * need)))
+        assumed = [Tier(0.0, float("inf"), rate, max(cap, leverage))]
+        ceiling, liquidation, _ = fit_leverage(
+            assumed, entry, stop, notional, cost_pct, atr_value, leverage,
+            buffer_pct, side, cap=max(cap, leverage),
+        )
+        if liquidation is None:
+            liquidation = estimate_liquidation(entry, leverage, cost_pct, rate, side)
+        return liquidation, ceiling
+
     def _plan_for_position(
         self,
         position: OpenPosition,
@@ -442,6 +530,7 @@ class SignalScanner:
         funding_payments = 0
         liquidation: float | None = None
         max_leverage = leverage
+        fallback: tuple[float, float] | None = None
         if decision and decision.plan and decision.side == side:
             plan = decision.plan
             stop = plan.stop
@@ -458,23 +547,41 @@ class SignalScanner:
             max_leverage = plan.max_leverage
             profile, trigger_interval = plan.profile, plan.trigger_interval
         else:
+            # No matching card: a structural stop is unknown, so plan the
+            # tightest stop the profile allows; the liquidation estimate comes
+            # from the pair's real tier, or a bounded assumed rate without one.
             profile = settings.profile
-            trigger_interval = (
-                self.cfg.scalp.trigger_interval
-                if settings.profile in SCALP_PROFILES
-                else "15m"
-            )
-            bars = self.frames.get(position.symbol, {}).get("15m", [])
+            pc = profile_cfg(self.cfg, profile)
+            trigger_interval = pc.trigger_interval
+            bars = self.frames.get(position.symbol, {}).get(trigger_interval, [])
             atr_value = volatility(bars) if len(bars) >= 15 else 0.0
-            stop_distance = max(
-                entry * 0.015, atr_value * 1.5 if atr_value > 0 else entry * 0.015
+            min_stop_pct = pc.min_stop_pct if isinstance(pc, TrendCfg) else 0.10
+            stop_distance = min(
+                max(pc.min_stop_atr * atr_value, entry * min_stop_pct / 100),
+                entry * pc.max_stop_pct / 100,
             )
             stop = entry - sign * stop_distance
-            target = entry + sign * 2 * stop_distance
-            liquidation = entry * (1 - sign / leverage)
+            target = entry + sign * (
+                pc.min_reward_risk * stop_distance
+                + entry * cost_pct / 100 * (1 + pc.min_reward_risk)
+            )
+            fallback = (atr_value, pc.liquidation_buffer_pct)
         if sign * (mark - stop) <= 0:
             stop = mark - sign * max(entry * 0.005, abs(entry - stop) * 0.15)
         notional = entry * quantity
+        if fallback is not None:
+            liquidation, max_leverage = self._fallback_liquidation(
+                position.symbol,
+                side,
+                entry,
+                stop,
+                notional,
+                cost_pct,
+                fallback[0],
+                leverage,
+                fallback[1],
+                PROFILES[profile][2],
+            )
         risk = quantity * (abs(entry - stop) + entry * cost_pct / 100)
         reward = quantity * (abs(target - entry) - entry * cost_pct / 100)
         return TradePlan(
@@ -671,13 +778,9 @@ class SignalScanner:
         by_pair: dict[str, dict[str, object]] | None = None,
         settings: SignalSettings | None = None,
     ) -> list[str]:
-        # The scalp profile only scans pairs whose exchange cap allows the
-        # planned leverage; a 50x pair can never fit a 100x plan.
-        min_leverage = (
-            settings.leverage
-            if settings is not None and settings.profile in SCALP_PROFILES
-            else 0
-        )
+        # Only scan pairs whose exchange cap allows the planned leverage; a
+        # pair capped below the plan can never fit it.
+        min_leverage = settings.leverage if settings is not None else 0
         return sorted(
             (
                 symbol
@@ -758,6 +861,7 @@ class SignalScanner:
             settings,
             self.cfg,
             int(time.time()),
+            self._oi_change_pct(symbol, now),
         )
 
     def _blank_checklist(self, settings: SignalSettings, detail: str) -> list[Check]:
@@ -1237,11 +1341,13 @@ class SignalScanner:
                 if plan.liquidation_estimate is not None
                 else None
             )
+            # atr_pct is the trigger-frame ATR for both profiles.
+            pc = profile_cfg(self.cfg, plan.profile)
             atr_distance = (
                 number(decision.metrics.get("atr_pct")) * number(decision.price) / 100
             )
             required_buffer = max(
-                entry * self.cfg.liquidation_buffer_pct / 100, atr_distance * 0.5
+                entry * pc.liquidation_buffer_pct / 100, atr_distance * 0.5
             )
             if (
                 liquidation is None
@@ -1257,7 +1363,7 @@ class SignalScanner:
             )
             if (
                 risk > settings.planning_equity * settings.risk_pct / 100 + 1e-8
-                or reward / risk < self.cfg.min_reward_risk
+                or reward / risk < pc.min_reward_risk
                 or portfolio_risk
                 > settings.planning_equity * self.cfg.max_total_risk_pct / 100
                 or entry * quantity > plan.notional + 1e-8
@@ -1308,7 +1414,7 @@ class SignalScanner:
             evaluate_exit(
                 trade,
                 self.decisions.get(trade.symbol),
-                self.frames.get(trade.symbol, {}).get("15m", []),
+                self.frames.get(trade.symbol, {}).get(trade.plan.trigger_interval, []),
                 int(time.time()),
                 self.cfg,
             )
@@ -1534,7 +1640,7 @@ class SignalScanner:
             evaluate_exit(
                 trade,
                 decision,
-                self.frames.get(trade.symbol, {}).get("15m", []),
+                self.frames.get(trade.symbol, {}).get(trade.plan.trigger_interval, []),
                 int(time.time()),
                 self.cfg,
             )

@@ -53,6 +53,25 @@ test('connection failures are actionable, including non-JSON error pages', async
     assert.equal(payload.symbols, undefined);
   }
 });
+test('trend and legacy swing profiles validate; unknown profiles do not', async () => {
+  assert.equal(fixture.settings.profile, 'trend');
+  const { context } = worker();
+  const { payload } = await vm.runInContext('refresh()', context);
+  assert.equal(payload.error, undefined);
+  assert.equal(payload.settings.leverage, 50);
+  assert.equal(payload.settings.hold_hours, 2);
+  assert.equal(payload.symbols.BTCUSDT.checks.length, 21);
+  const legacy = structuredClone(fixture);
+  legacy.settings.profile = 'swing';
+  const swing = worker({ response: { ok: true, json: async () => legacy } });
+  const result = await vm.runInContext('refresh()', swing.context);
+  assert.equal(result.payload.error, undefined);
+  assert.equal(result.payload.settings.profile, 'swing');
+  const bogus = structuredClone(fixture);
+  bogus.settings.profile = 'momentum';
+  const rejected = worker({ response: { ok: true, json: async () => bogus } });
+  assert.match((await vm.runInContext('refresh()', rejected.context)).payload.error, /incomplete/i);
+});
 test('an outage retains the last validated plan with an error that disables entry', async () => {
   let failed = false;
   const { context } = worker({ response: () => {

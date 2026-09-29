@@ -226,7 +226,8 @@ def test_target_must_fit_the_travel_budget():
 @pytest.mark.parametrize(
     "values",
     [
-        {"planning_equity": 1000, "risk_pct": 0.5, "leverage": 100, "hold_hours": 2},
+        {"planning_equity": 1000, "risk_pct": 0.5, "leverage": 101, "hold_hours": 2, "profile": "trend"},
+        {"planning_equity": 1000, "risk_pct": 0.5, "leverage": 19, "hold_hours": 2, "profile": "trend"},
         {"planning_equity": 1000, "risk_pct": 0.5, "leverage": 100, "hold_hours": 24, "profile": "scalp"},
         {"planning_equity": 1000, "risk_pct": 0.5, "leverage": 126, "hold_hours": 2, "profile": "scalp"},
         {"planning_equity": 1000, "risk_pct": 0.5, "leverage": 50, "hold_hours": 2, "profile": "nope"},
@@ -237,15 +238,19 @@ def test_profile_settings_validation(values):
         SignalSettings.from_dict(values)
 
 
-def test_legacy_settings_default_to_swing_and_scalp_allows_100x():
+def test_legacy_settings_rebase_to_trend_and_scalp_allows_100x():
     legacy = SignalSettings.from_dict(
-        {"planning_equity": 1000, "risk_pct": 0.5, "leverage": 25, "hold_hours": 24}
+        {"planning_equity": 1000, "risk_pct": 0.5, "leverage": 10, "hold_hours": 24}
     )
-    assert legacy.profile == "swing"
+    assert legacy == SignalSettings(1000, 0.5, 50, 2, "trend")
+    swing = SignalSettings.from_dict(
+        {"planning_equity": 1000, "risk_pct": 0.5, "leverage": 25, "hold_hours": 24, "profile": "swing"}
+    )
+    assert swing == SignalSettings(1000, 0.5, 25, 2, "trend")
     scalp = SignalSettings.from_dict(
         {"planning_equity": 1000, "risk_pct": 0.5, "leverage": 100, "hold_hours": 1, "profile": "scalp"}
     )
-    assert scalp.leverage == 100 and scalp.hold_hours == 1
+    assert scalp.leverage == 100 and scalp.hold_hours == 1 and scalp.profile == "scalp"
 
 
 def test_scalp_config_validation_and_shipped_yaml():
@@ -257,6 +262,20 @@ def test_scalp_config_validation_and_shipped_yaml():
     assert loaded.signals.scalp.trigger_interval == "1m"
     assert loaded.signals.scalp.max_spread_pct <= 0.05
     assert loaded.signals.scalp.stale_minutes <= 20
+    assert loaded.signals.scalp == ScalpCfg()
+
+
+def test_liquidation_fit_is_shared():
+    from bitunix_bot import intraday, scalp_short
+
+    assert scalp_short.liquidation_fit is intraday.liquidation_fit
+    assert scalp_short.size_notional is intraday.size_notional
+    market, frames, btc = pump_frames()
+    plan = evaluate(market, frames, btc).plan
+    assert plan is not None and 50 <= plan.max_leverage < 100
+    assert plan.liquidation_estimate == pytest.approx(
+        intraday.estimate_liquidation(plan.entry, 50, plan.cost_pct, 0.004, "short")
+    )
 
 
 def scalp_trade():
@@ -278,15 +297,17 @@ def scalp_trade():
 def test_scalp_exit_ignores_1h_trend_and_uses_minute_stale_window():
     decision, trade = scalp_trade()
     decision.metrics["trend_1h"] = "long"
-    decision.metrics["trend_4h"] = "long"
+    decision.metrics["trend_15m"] = "long"
     bars = decision_frames_after(decision, trade, drift=0.0, minutes=5)
     later = NOW + 5 * 60
     decision.as_of = later
     evaluate_exit(trade, decision, bars, later, cfg())
     assert trade.state == "HOLD_SHORT"
     labels = {c.label: c for c in trade.checks}
-    assert labels["1h structure"].passed and labels["4h bias"].passed
+    assert labels["Structure intact"].passed and labels["Bias intact"].passed
     assert "20m" in labels["Progress vs review window"].detail
+    assert "1h long" in trade.reason and trade.reason.endswith("min left")
+    assert labels["Hold time remaining"].detail == "115 of 120 min hold left"
     stale_at = NOW + cfg().scalp.stale_minutes * 60 + 60
     decision.as_of = stale_at
     bars = decision_frames_after(decision, trade, drift=0.0, minutes=cfg().scalp.stale_minutes + 1)
@@ -438,10 +459,10 @@ def test_switching_profile_clears_frames_and_uses_swing_checklist(tmp_path):
         scanner.refresh(force=True)
     assert scanner.frames
     scanner.update_settings(
-        {"planning_equity": 1000, "risk_pct": 0.5, "leverage": 25, "hold_hours": 24, "profile": "swing"}
+        {"planning_equity": 1000, "risk_pct": 0.5, "leverage": 50, "hold_hours": 2, "profile": "trend"}
     )
     assert scanner.frames == {} and scanner.decisions == {}
-    assert scanner.store.settings().profile == "swing"
+    assert scanner.store.settings().profile == "trend"
 
 
 def test_short_gaps_in_minute_feed_are_filled_flat_but_long_gaps_still_fail():

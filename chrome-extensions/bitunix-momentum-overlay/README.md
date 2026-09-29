@@ -1,7 +1,7 @@
-# Bitunix Intraday Signals — Chrome extension v1.7.3
+# Bitunix Intraday Signals — Chrome extension v1.8.0
 
-Long and short entry, hold, review and exit alerts for trades lasting up to
-12–24 hours. The backend computes the strategy; this extension displays it.
+Long and short entry, hold, review and exit alerts for trades held 1-2 hours
+at 50x-class leverage. The backend computes the strategy; this extension displays it.
 No extension action sends an exchange order or modifies a position.
 
 1. Deploy/start the matching backend with `signals.enabled: true`.
@@ -14,21 +14,24 @@ No extension action sends an exchange order or modifies a position.
    its own. The file is git-ignored; saved Settings still take precedence.
 4. Reload the Bitunix tab. For an existing installation, reload the extension first.
 5. Edit the displayed profile, planning equity, risk, leverage and maximum
-   holding time. **Swing** is built for isolated 25-40x and a 12h or 24h hold.
-   **Scalp** fades parabolic exhaustion on 1m bars, long or short, for a 1h
-   or 2h hold at 25x up to the pair's leverage cap (125x maximum). Leverage
-   never tightens the stop; the scalp card reports the highest leverage whose
-   estimated liquidation still sits beyond the stop.
+   holding time. **Trend** runs on 1h EMA bias, 15m structure and a completed
+   5m continuation trigger for a 1 or 2 hour hold at 20-100x (50x default).
+   The stop is the 5m structural level, capped at 0.60%, and must sit at least
+   0.25% inside the estimated isolated liquidation; the card reports the
+   highest leverage that still fits. **Scalp** fades parabolic exhaustion on
+   1m bars, long or short, for a 1h or 2h hold up to the pair's leverage cap
+   (125x maximum); its stop sits just past the failed high or low and must fit
+   inside the estimated liquidation distance. Leverage never tightens the stop.
 
 ## If the panel is empty
 
 - **Pump Fade Radar** or version **0.3.16** means old files or an old tab are
   still loaded. Reload the extension from this folder in `chrome://extensions`,
   then reload the Bitunix tab. The popup must say **Bitunix Intraday Signals**,
-  version **1.7.3**. Unpacked extensions do not refresh themselves after a git pull.
+  version **1.8.0**. Unpacked extensions do not refresh themselves after a git pull.
   Click **Reload** on this extension in `chrome://extensions`, then reload the
   Bitunix tab. A Bitunix in-page refresh is not enough. The panel header must
-  show **v1.7.3**, a drag grip, and ⤢. Drag the title or grip to move; drag the
+  show **v1.8.0**, a drag grip, and ⤢. Drag the title or grip to move; drag the
   bottom-right corner to resize. Empty header chrome lets Bitunix menus
   (timeframes, short/long tickets) receive clicks through the overlay.
 - Use the complete extension folder from one release. Mixing the old manifest
@@ -51,9 +54,35 @@ started. A countdown warning appears before the featured card switches to the
 next setup. Recent alerts keep WATCH and ENTER rows with full timestamps.
 
 The card shows WAIT, WATCH LONG/SHORT or ENTER LONG/SHORT, an entry zone,
-structural stop, profit target, estimated net reward/risk, planning size and
-estimated leverage ceiling. Open the checklist for the underlying evidence. Every card lists the same
-gates for its profile (19 swing, 20 scalp), grouped as market / setup / plan / book.
+structural stop, profit target, estimated net reward/risk, planning size,
+planned leverage, hold window, time-stop and leverage ceiling, plus the stop's
+distance inside the estimated liquidation and the share of posted margin one
+stop-out costs. Open the checklist for the underlying evidence. Every card
+lists the same gates for its profile (21 trend, 20 scalp), grouped as
+market / setup / plan / book.
+
+Trend rules (all in minutes of the chosen hold, 60 or 120):
+
+- Market: fresh data, 10M USDT/24h liquidity plus last-hour session activity,
+  spread ≤ 0.04%, 1h ATR inside 0.60-1.2% (1h hold) or 0.35-1.2% (2h hold),
+  mark within 0.15% of last, no funding print inside 5 minutes, 1h EMA bias
+  equal to the completed 15m HH/HL structure, BTC not opposed with non-negative
+  2h relative strength, price no more than 2 hourly ATR past the 1h EMA20, and
+  no crowding (funding ≤ 0.05% per print against the trade; OI not up 3% with
+  the price 1.5 ATR extended).
+- Setup: a completed 5m pullback reclaim, impulse continuation or breakout
+  retest with 1.2x baseline volume.
+- Plan: entry inside a zone that adds at most 25% to planned risk; stop at the
+  5m structural level minus 0.2 ATR5m, at least 1 ATR5m / 0.35 ATR15m / 0.20%
+  and at most 0.60%; a structural target that clears 1.5R net of 0.18% costs
+  inside 1.5 × ATR1h × sqrt(hold / 60); funding drag ≤ 0.10%; eight times depth;
+  and the stop at least 0.25% (or half a 5m ATR) inside the estimated isolated
+  liquidation at the planned leverage, which sets the reported ceiling.
+- Exits: stale review at 35% of the hold (21 / 42 min) below 0.3R, late-hold
+  exit at 75% (45 / 90 min) below 0.5R, hard time-stop at 100%, breakeven at
+  1R, trailing stop from 1.25R on completed 5m closes, hope exit at -0.75R,
+  liquidation-buffer exit under 0.25% of room, and a completed 15m structure
+  reversal against the trade.
 
 In the scalp profile a short needs an extended coin (1h and 4h gain, distance
 above the 1h EMA20 in hourly ATRs), a climactic volume bar, crowded longs
@@ -72,7 +101,9 @@ does not trigger an exit. The status line shows the running forward test of
 every ENTER alert (resolved/count, hit rate, average R, liquidation touches).
 Stale data disables entry tracking. The Best setup selector ranks eligible markets.
 The laptop speakers say “Trade entry waiting” plus the market and side when a
-setup flips to ENTER, “Set the Bitunix stop now” when a live or recorded fill
+setup flips to ENTER, followed by the planned leverage and hold window when
+those settings are configured (for example “50 x, 120 minute hold”), “Set the
+Bitunix stop now” when a live or recorded fill
 has no confirmed exchange stop, and “Close the trade now. Do not wait for a
 reversal.” when an exit latches. Click the overlay once if Chrome blocks speech
 until a gesture.
