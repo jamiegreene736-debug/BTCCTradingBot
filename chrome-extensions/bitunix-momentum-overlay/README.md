@@ -8,6 +8,10 @@ No extension action sends an exchange order or modifies a position.
 2. Open `chrome://extensions`, enable Developer mode, and Load unpacked this folder.
 3. Open Settings, enter the HTTPS Railway dashboard URL and dashboard password,
    and click **Save and test connection**. Wait for **Connected**.
+   To skip this step, copy `config.local.example.json` to `config.local.json`
+   in this folder and fill in the URL and password. The extension reads it on
+   startup whenever nothing is saved yet, so a fresh Load unpacked connects on
+   its own. The file is git-ignored; saved Settings still take precedence.
 4. Reload the Bitunix tab. For an existing installation, reload the extension first.
 5. Edit the displayed profile, planning equity, risk, leverage and maximum
    holding time. **Swing** is built for isolated 25-40x and a 12h or 24h hold.
