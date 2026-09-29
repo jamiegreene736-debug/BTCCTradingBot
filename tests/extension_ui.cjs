@@ -93,7 +93,7 @@ async function main() {
       window.listeners[0]({ type: 'signals-update', payload: window.testPayload });
     });
     assert.match(await page.locator('#bis-handoff').textContent(), /Switching to ETHUSDT/);
-    assert.match(await page.locator('#bis-card').textContent(), /Shown /);
+    assert.match(await page.locator('#bis-card').textContent(), /In this state since /);
     assert.equal(await page.locator('#bis-panel').evaluate(el => getComputedStyle(el).pointerEvents), 'none');
     assert.equal(await page.locator('#bis-panel header').evaluate(el => getComputedStyle(el).pointerEvents), 'none');
     const headerBox = await page.locator('#bis-panel header').boundingBox();
