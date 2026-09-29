@@ -830,6 +830,7 @@ class SignalScanner:
                 return
             self.error = None
             self._stamp_states(decisions, now)
+            self._log_state_changes(decisions)
             merged_frames = {
                 symbol: bars
                 for symbol, bars in self.frames.items()
@@ -856,6 +857,25 @@ class SignalScanner:
                 self._record_signal_alert(decision, now)
                 self._record_forward_test(decision, now)
             self._update_forward_tests(int(time.time()))
+
+    def _log_state_changes(self, decisions: dict[str, Decision]) -> None:
+        """Log WATCH/ENTER transitions so deploy logs show what the scanner decided."""
+        for symbol, decision in decisions.items():
+            previous = self.decisions.get(symbol)
+            before = previous.state if previous else ""
+            if decision.state == before:
+                continue
+            if decision.state.startswith(("WATCH_", "ENTER_")) or before.startswith(
+                ("WATCH_", "ENTER_")
+            ):
+                log.info(
+                    "signal %s %s -> %s%s: %s",
+                    symbol,
+                    before or "NEW",
+                    decision.state,
+                    f" ({decision.setup})" if decision.setup else "",
+                    decision.reasons[0] if decision.reasons else "",
+                )
 
     def _record_forward_test(self, decision: Decision, now: int) -> None:
         test = forward_test_from_decision(decision, now)

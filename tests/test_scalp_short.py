@@ -149,7 +149,7 @@ def test_candidate_gates_wait_until_extended_climactic_and_crowded():
     calm = dict(frames)
     calm["1m"] = [replace(c, volume=100) for c in frames["1m"]]
     decision = evaluate(market, calm, btc)
-    assert decision.state == "WAIT" and decision.side == ""
+    assert decision.state == "WAIT" and decision.side == "short"
     labels = {c.label: c for c in decision.checks}
     assert not labels["Climax volume"].passed
     assert labels["Failed high trigger"].waiting

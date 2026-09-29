@@ -456,7 +456,7 @@ def evaluate_scalp_short(
             gain_1h >= scalp.min_gain_1h_pct
             and gain_4h >= scalp.min_gain_4h_pct
             and extension >= scalp.min_extension_atr,
-            f"+{gain_1h:.2f}% 1h, +{gain_4h:.2f}% 4h, {extension:.1f} hourly ATR above the 1h EMA20; "
+            f"{gain_1h:+.2f}% 1h, {gain_4h:+.2f}% 4h, {extension:.1f} hourly ATR above the 1h EMA20; "
             f"need {scalp.min_gain_1h_pct:g}% / {scalp.min_gain_4h_pct:g}% / {scalp.min_extension_atr:g}",
         ),
         scalp_check(
@@ -500,6 +500,7 @@ def evaluate_scalp_short(
         )
         checks.append(scalp_check("Tracked exposure", True, "No conflicting tracked exposure"))
         result.checks = order_scalp_checks(checks)
+        result.side = "short"
         result.reasons = [item.detail for item in result.checks if not item.passed and not item.waiting] or [
             WAITING_CANDIDATE
         ]

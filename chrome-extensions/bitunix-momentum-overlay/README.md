@@ -1,4 +1,4 @@
-# Bitunix Intraday Signals — Chrome extension v1.6.0
+# Bitunix Intraday Signals — Chrome extension v1.6.1
 
 Long and short entry, hold, review and exit alerts for trades lasting up to
 12–24 hours. The backend computes the strategy; this extension displays it.
@@ -21,10 +21,10 @@ No extension action sends an exchange order or modifies a position.
 - **Pump Fade Radar** or version **0.3.16** means old files or an old tab are
   still loaded. Reload the extension from this folder in `chrome://extensions`,
   then reload the Bitunix tab. The popup must say **Bitunix Intraday Signals**,
-  version **1.6.0**. Unpacked extensions do not refresh themselves after a git pull.
+  version **1.6.1**. Unpacked extensions do not refresh themselves after a git pull.
   Click **Reload** on this extension in `chrome://extensions`, then reload the
   Bitunix tab. A Bitunix in-page refresh is not enough. The panel header must
-  show **v1.6.0**, a drag grip, and ⤢. Drag the title or grip to move; drag the
+  show **v1.6.1**, a drag grip, and ⤢. Drag the title or grip to move; drag the
   bottom-right corner to resize. Empty header chrome lets Bitunix menus
   (timeframes, short/long tickets) receive clicks through the overlay.
 - Use the complete extension folder from one release. Mixing the old manifest
