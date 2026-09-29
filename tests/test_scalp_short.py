@@ -1,4 +1,4 @@
-"""Scalp-short profile: candidate gates, failed-high trigger, liquidation fit, exits, forward test."""
+"""Scalp profile: candidate gates, failed-high/low triggers, liquidation fit, exits, forward test."""
 
 from __future__ import annotations
 
@@ -17,8 +17,11 @@ from bitunix_bot.forward_test import (
 from bitunix_bot.intraday import Candle, Market, Tier, closed_candles
 from bitunix_bot.scalp_short import (
     SCALP_CHECK_LABELS,
+    evaluate_scalp,
     evaluate_scalp_short,
     find_failed_high,
+    find_failed_low,
+    scalp_labels,
     volume_delta,
 )
 from bitunix_bot.signal_config import ScalpCfg, SignalsCfg, SignalSettings
@@ -26,7 +29,7 @@ from bitunix_bot.signal_scanner import SignalScanner
 from bitunix_bot.signal_store import SignalStore, TrackedTrade, evaluate_exit
 
 NOW = 1_800_000_060
-SETTINGS = SignalSettings(1000.0, 0.5, 50, 2, "scalp_short")
+SETTINGS = SignalSettings(1000.0, 0.5, 50, 2, "scalp")
 
 
 def bar(time, open_, high, low, close, volume=100.0):
@@ -103,7 +106,7 @@ def cfg():
 
 
 def evaluate(market, frames, btc, settings=SETTINGS, oi=None, now=NOW):
-    return evaluate_scalp_short(market, frames, btc, settings, cfg(), now, oi)
+    return evaluate_scalp(market, frames, btc, settings, cfg(), now, oi)
 
 
 def test_failed_high_after_climax_enters_short_with_stop_above_spike():
@@ -112,7 +115,7 @@ def test_failed_high_after_climax_enters_short_with_stop_above_spike():
     failed = [c for c in decision.checks if not c.passed]
     assert decision.state == "ENTER_SHORT", [f"{c.label}: {c.detail}" for c in failed]
     plan = decision.plan
-    assert plan.side == "short" and plan.profile == "scalp_short"
+    assert plan.side == "short" and plan.profile == "scalp"
     assert plan.trigger_interval == "1m" and plan.hold_hours == 2
     assert plan.stop > 100.3 > plan.entry > plan.target
     assert plan.stop_pct <= cfg().scalp.max_stop_pct
@@ -224,8 +227,8 @@ def test_target_must_fit_the_travel_budget():
     "values",
     [
         {"planning_equity": 1000, "risk_pct": 0.5, "leverage": 100, "hold_hours": 2},
-        {"planning_equity": 1000, "risk_pct": 0.5, "leverage": 100, "hold_hours": 24, "profile": "scalp_short"},
-        {"planning_equity": 1000, "risk_pct": 0.5, "leverage": 126, "hold_hours": 2, "profile": "scalp_short"},
+        {"planning_equity": 1000, "risk_pct": 0.5, "leverage": 100, "hold_hours": 24, "profile": "scalp"},
+        {"planning_equity": 1000, "risk_pct": 0.5, "leverage": 126, "hold_hours": 2, "profile": "scalp"},
         {"planning_equity": 1000, "risk_pct": 0.5, "leverage": 50, "hold_hours": 2, "profile": "nope"},
     ],
 )
@@ -240,7 +243,7 @@ def test_legacy_settings_default_to_swing_and_scalp_allows_100x():
     )
     assert legacy.profile == "swing"
     scalp = SignalSettings.from_dict(
-        {"planning_equity": 1000, "risk_pct": 0.5, "leverage": 100, "hold_hours": 1, "profile": "scalp_short"}
+        {"planning_equity": 1000, "risk_pct": 0.5, "leverage": 100, "hold_hours": 1, "profile": "scalp"}
     )
     assert scalp.leverage == 100 and scalp.hold_hours == 1
 
@@ -311,7 +314,7 @@ def decision_frames_after(decision, trade, drift, minutes):
 def test_forward_test_records_excursion_and_first_touch():
     decision, trade = scalp_trade()
     test = forward_test_from_decision(decision, NOW)
-    assert test is not None and test.profile == "scalp_short" and test.interval == "1m"
+    assert test is not None and test.profile == "scalp" and test.interval == "1m"
     entry, stop, target = test.entry, test.stop, test.target
     risk = stop - entry
     bars = [
@@ -404,8 +407,8 @@ def test_scanner_filters_universe_by_tier_and_records_forward_tests(tmp_path):
         scanner.refresh(force=True)
         snapshot = scanner.snapshot()
     assert "LOWUSDT" not in scanner._universe
-    assert snapshot["profile"] == "scalp_short"
-    assert snapshot["settings"]["profile"] == "scalp_short"
+    assert snapshot["profile"] == "scalp"
+    assert snapshot["settings"]["profile"] == "scalp"
     row = snapshot["symbols"]["PUMPUSDT"]
     assert row["state"] == "ENTER_SHORT", row["reasons"]
     assert row["metrics"]["trigger_interval"] == "1m"
@@ -413,7 +416,7 @@ def test_scanner_filters_universe_by_tier_and_records_forward_tests(tmp_path):
     assert "1m" in scanner.frames["PUMPUSDT"]
     tests = scanner.store.forward_tests()
     assert "PUMPUSDT" in {t.symbol for t in tests}
-    assert all(t.outcome == "open" and t.profile == "scalp_short" for t in tests)
+    assert all(t.outcome == "open" and t.profile == "scalp" for t in tests)
     assert snapshot["forward_test"]["count"] >= 1
     assert snapshot["forward_test"]["outcomes"]["open"] >= 1
     # OI history: a second sample an hour later yields a delta.
@@ -456,3 +459,85 @@ def test_short_gaps_in_minute_feed_are_filled_flat_but_long_gaps_still_fail():
     wide = [r for r in rows if not 50 <= (r["time"] // 1000 - bars[0].time) // 60 <= 62]
     with pytest.raises(ValueError, match="Gap"):
         closed_candles(wide, "1m", NOW, fill_gaps=True)
+
+
+def dump_frames():
+    """The pump fixture reflected about 190: a -4% capitulation and a failed low."""
+    market, frames, btc = pump_frames()
+
+    def flip(c):
+        return bar(c.time, 190 - c.open, 190 - c.low, 190 - c.high, 190 - c.close, c.volume)
+
+    frames = {key: [flip(c) for c in bars] for key, bars in frames.items()}
+    price = frames["1m"][-1].close
+    market = replace(
+        market,
+        price=price,
+        mark=price,
+        bid=price - 0.01,
+        ask=price + 0.01,
+        funding_rate=-market.funding_rate,
+    )
+    return market, frames, btc
+
+
+def test_failed_low_after_capitulation_enters_long_with_stop_below_spike():
+    market, frames, btc = dump_frames()
+    decision = evaluate(market, frames, btc)
+    failed = [c for c in decision.checks if not c.passed]
+    assert decision.state == "ENTER_LONG", [f"{c.label}: {c.detail}" for c in failed]
+    assert decision.side == "long" and decision.setup == "Failed low"
+    plan = decision.plan
+    assert plan is not None and plan.side == "long" and plan.profile == "scalp"
+    spike_low = min(c.low for c in frames["1m"][-30:])
+    assert plan.stop < spike_low < plan.entry < plan.target
+    assert plan.liquidation_estimate is not None and plan.liquidation_estimate < plan.stop
+    assert [c.label for c in decision.checks] == list(scalp_labels("long"))
+    assert "Failed low trigger" in [c.label for c in decision.checks]
+
+
+def test_two_sided_wait_names_both_thresholds():
+    market, frames, btc = pump_frames()
+    calm = dict(frames)
+    calm["1m"] = [replace(c, volume=100) for c in frames["1m"]]
+    decision = evaluate(market, calm, btc)
+    assert decision.state == "WAIT" and decision.side == ""
+    assert decision.reasons[0].startswith("No exhaustion move to fade")
+    assert "long needs the mirror" in decision.reasons[0]
+
+
+def test_long_side_needs_crowded_shorts():
+    market, frames, btc = dump_frames()
+    positive_funding = replace(market, funding_rate=0.0003)
+    blocked = evaluate(positive_funding, frames, btc)
+    assert blocked.state != "ENTER_LONG"
+    assert not next(c for c in blocked.checks if c.label == "Crowded shorts").passed
+    allowed = evaluate(positive_funding, frames, btc, oi=2.0)
+    assert next(c for c in allowed.checks if c.label == "Crowded shorts").passed
+
+
+def test_new_low_or_close_inside_spike_body_is_not_a_failed_low():
+    _, frames, _ = dump_frames()
+    bars = frames["1m"]
+    atr_value = 0.05
+    assert find_failed_low(bars, atr_value, cfg().scalp) is not None
+    new_low = bars[:-1] + [replace(bars[-1], low=bars[-11].low - 1)]
+    assert find_failed_low(new_low, atr_value, cfg().scalp) is None
+    spike = min(bars[-30:], key=lambda c: c.low)
+    inside = bars[:-1] + [replace(bars[-1], close=max(spike.open, spike.close) - 0.01)]
+    assert find_failed_low(inside, atr_value, cfg().scalp) is None
+
+
+def test_short_only_wrapper_keeps_side_on_wait():
+    market, frames, btc = pump_frames()
+    calm = dict(frames)
+    calm["1m"] = [replace(c, volume=100) for c in frames["1m"]]
+    decision = evaluate_scalp_short(market, calm, btc, SETTINGS, cfg(), NOW)
+    assert decision.state == "WAIT" and decision.side == "short"
+
+
+def test_legacy_scalp_short_profile_name_is_read_as_scalp():
+    settings = SignalSettings.from_dict(
+        {"planning_equity": 1000, "risk_pct": 0.5, "leverage": 100, "hold_hours": 2, "profile": "scalp_short"}
+    )
+    assert settings.profile == "scalp"

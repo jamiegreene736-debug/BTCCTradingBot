@@ -116,7 +116,7 @@ def evaluate_exit(
         return trade
     side = trade.plan.side
     sign = 1 if side == "long" else -1
-    scalp = trade.plan.profile == "scalp_short"
+    scalp = trade.plan.profile in ("scalp", "scalp_short")
     interval_seconds = INTERVALS.get(trade.plan.trigger_interval, 900)
     if scalp:
         stale_after = cfg.scalp.stale_minutes * 60

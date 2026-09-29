@@ -1,15 +1,18 @@
-"""Parabolic-exhaustion short scalps: 1-2h holds at up to the tier's leverage.
+"""Parabolic-exhaustion scalps: 1-2h holds at up to the tier's leverage.
 
-Deterministic and network-free, like ``intraday``. Shorts only. The candidate
-must be extended, climactic and crowded; the trigger is a failed high on the
-1m/3m bars; the stop sits just above that high and must fit inside the
-estimated isolated-margin liquidation distance at the planned leverage.
+Deterministic and network-free, like ``intraday``. Long and short. A short
+fades a climactic pump: extended above value, climax volume, crowded longs,
+then a failed high on the 1m/3m bars with the stop just above it. A long
+mirrors that on a climactic dump: extended below value, climax volume, crowded
+shorts, then a failed low with the stop just below it. Either way the stop
+must fit inside the estimated isolated-margin liquidation distance at the
+planned leverage.
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 import numpy as np
 
@@ -20,6 +23,7 @@ from .intraday import (
     Check,
     Decision,
     Market,
+    Side,
     TradePlan,
     ema_bias,
     session_vwap,
@@ -28,9 +32,26 @@ from .intraday import (
 )
 from .signal_config import ScalpCfg, SignalsCfg, SignalSettings
 
-PROFILE = "scalp_short"
-SETUP_NAME = "Failed high"
+PROFILE = "scalp"
+LEGACY_PROFILES: tuple[str, ...] = ("scalp_short",)
+SCALP_PROFILES: tuple[str, ...] = (PROFILE, *LEGACY_PROFILES)
+SIDES: tuple[Side, ...] = ("short", "long")
+SETUP_NAMES: dict[str, str] = {"short": "Failed high", "long": "Failed low"}
+SETUP_NAME = SETUP_NAMES["short"]
 
+# Labels that differ by side; every other gate reads the same for both.
+SIDE_LABELS: dict[str, dict[str, str]] = {
+    "short": {
+        "extended": "Extended above value",
+        "crowded": "Crowded longs",
+        "trigger": "Failed high trigger",
+    },
+    "long": {
+        "extended": "Extended below value",
+        "crowded": "Crowded shorts",
+        "trigger": "Failed low trigger",
+    },
+}
 SCALP_CHECK_GROUPS: dict[str, str] = {
     "Fresh market data": "market",
     "Liquid market": "market",
@@ -39,10 +60,13 @@ SCALP_CHECK_GROUPS: dict[str, str] = {
     "Mark vs last": "market",
     "Funding print window": "market",
     "Extended above value": "market",
+    "Extended below value": "market",
     "Climax volume": "market",
     "Crowded longs": "market",
+    "Crowded shorts": "market",
     "BTC context": "market",
     "Failed high trigger": "setup",
+    "Failed low trigger": "setup",
     "Flow divergence": "setup",
     "Entry zone": "plan",
     "Stop inside liquidation": "plan",
@@ -53,14 +77,50 @@ SCALP_CHECK_GROUPS: dict[str, str] = {
     "Execution depth": "plan",
     "Tracked exposure": "portfolio",
 }
-SCALP_CHECK_LABELS: tuple[str, ...] = tuple(SCALP_CHECK_GROUPS)
-CANDIDATE_LABELS = ("Extended above value", "Climax volume", "Crowded longs")
-SETUP_LABELS = ("Failed high trigger", "Flow divergence")
 SCALP_PLAN_LABELS: tuple[str, ...] = tuple(
     label for label, group in SCALP_CHECK_GROUPS.items() if group == "plan"
 )
+
+
+def scalp_labels(side: str = "short") -> tuple[str, ...]:
+    """Ordered checklist for one side; the card shows the same gates every time."""
+    names = SIDE_LABELS[side]
+    return (
+        "Fresh market data",
+        "Liquid market",
+        "Spread",
+        "Leverage tier",
+        "Mark vs last",
+        "Funding print window",
+        names["extended"],
+        "Climax volume",
+        names["crowded"],
+        "BTC context",
+        names["trigger"],
+        "Flow divergence",
+        *SCALP_PLAN_LABELS,
+        "Tracked exposure",
+    )
+
+
+def candidate_labels(side: str) -> tuple[str, ...]:
+    names = SIDE_LABELS[side]
+    return (names["extended"], "Climax volume", names["crowded"])
+
+
+def setup_labels(side: str) -> tuple[str, ...]:
+    return (SIDE_LABELS[side]["trigger"], "Flow divergence")
+
+
+SCALP_CHECK_LABELS: tuple[str, ...] = scalp_labels("short")
+CANDIDATE_LABELS = candidate_labels("short")
+SETUP_LABELS = setup_labels("short")
 WAITING_CANDIDATE = "Waiting for an extended, climactic, crowded market"
-WAITING_TRIGGER = "Waiting for a completed failed-high bar"
+WAITING_TRIGGERS: dict[str, str] = {
+    "short": "Waiting for a completed failed-high bar",
+    "long": "Waiting for a completed failed-low bar",
+}
+WAITING_TRIGGER = WAITING_TRIGGERS["short"]
 
 
 def scalp_check(label: str, passed: bool, detail: str, *, waiting: bool = False) -> Check:
@@ -71,19 +131,19 @@ def scalp_waiting(label: str, detail: str) -> Check:
     return scalp_check(label, False, detail, waiting=True)
 
 
-def order_scalp_checks(checks: list[Check]) -> list[Check]:
+def order_scalp_checks(checks: list[Check], side: str = "short") -> list[Check]:
     by_label = {item.label: item for item in checks}
     return [
         by_label[label]
         if label in by_label
         else scalp_waiting(label, "Waiting for evaluation")
-        for label in SCALP_CHECK_LABELS
+        for label in scalp_labels(side)
     ]
 
 
-def blank_scalp_checklist(detail: str) -> list[Check]:
+def blank_scalp_checklist(detail: str, side: str = "short") -> list[Check]:
     return order_scalp_checks(
-        [scalp_waiting(label, detail) for label in SCALP_CHECK_LABELS]
+        [scalp_waiting(label, detail) for label in scalp_labels(side)], side
     )
 
 
@@ -101,15 +161,25 @@ def volume_delta(candle: Candle) -> float:
 
 
 @dataclass(frozen=True)
-class FailedHigh:
+class Spike:
+    """A climactic extreme that price retested and rejected on a completed bar."""
+
     spike_index: int
-    spike_high: float
+    extreme: float
     stop: float
     base: float
     flow_delta: float
+    side: Side = "short"
+
+    @property
+    def spike_high(self) -> float:
+        return self.extreme
 
 
-def find_failed_high(bars: list[Candle], atr_value: float, cfg: ScalpCfg) -> FailedHigh | None:
+FailedHigh = Spike
+
+
+def find_failed_high(bars: list[Candle], atr_value: float, cfg: ScalpCfg) -> Spike | None:
     """A spike high that price retested and rejected on a completed bar.
 
     The spike is the highest high of the lookback window. It must be old enough
@@ -136,13 +206,58 @@ def find_failed_high(bars: list[Candle], atr_value: float, cfg: ScalpCfg) -> Fai
         return None
     base = min(c.low for c in bars[max(0, spike_index - 20) : spike_index])
     flow = sum(volume_delta(c) for c in bars[spike_index:])
-    return FailedHigh(
+    return Spike(
         spike_index,
         spike.high,
         spike.high + cfg.stop_atr_buffer * atr_value,
         base,
         flow,
+        "short",
     )
+
+
+def find_failed_low(bars: list[Candle], atr_value: float, cfg: ScalpCfg) -> Spike | None:
+    """Mirror of ``find_failed_high``: a capitulation low that price rejected.
+
+    The last completed bar must close back above the spike bar's body without
+    any bar having printed a lower low. Stop: the spike low minus a small ATR
+    buffer. The base is the highest high of the 20 bars before the spike.
+    """
+    if len(bars) < cfg.spike_lookback + 25:
+        return None
+    window = bars[-cfg.spike_lookback :]
+    offset = len(bars) - len(window)
+    spike_local = min(range(len(window)), key=lambda i: window[i].low)
+    spike_index = offset + spike_local
+    age = len(bars) - 1 - spike_index
+    if not cfg.spike_min_age_bars <= age <= cfg.spike_max_age_bars:
+        return None
+    spike = bars[spike_index]
+    after = bars[spike_index + 1 :]
+    last = bars[-1]
+    if any(c.low <= spike.low for c in after):
+        return None
+    body_high = max(spike.open, spike.close)
+    if not (last.close > body_high and last.close > last.open):
+        return None
+    base = max(c.high for c in bars[max(0, spike_index - 20) : spike_index])
+    flow = sum(volume_delta(c) for c in bars[spike_index:])
+    return Spike(
+        spike_index,
+        spike.low,
+        spike.low - cfg.stop_atr_buffer * atr_value,
+        base,
+        flow,
+        "long",
+    )
+
+
+def find_spike(
+    bars: list[Candle], side: str, atr_value: float, cfg: ScalpCfg
+) -> Spike | None:
+    if side == "long":
+        return find_failed_low(bars, atr_value, cfg)
+    return find_failed_high(bars, atr_value, cfg)
 
 
 def climax_volume(bars: list[Candle], cfg: ScalpCfg) -> float:
@@ -161,14 +276,18 @@ def scalp_targets(
     cost_pct: float,
     travel: float,
     cfg: ScalpCfg,
+    side: str = "short",
 ) -> list[float]:
-    """Nearest mean-reversion levels below entry that clear R inside the travel budget."""
+    """Nearest mean-reversion levels past entry that clear R inside the travel budget."""
+    sign = 1 if side == "long" else -1
     risk_fraction = (stop_distance / entry * 100 + cost_pct) / 100
     if risk_fraction <= 0 or travel <= 0:
         return []
     chosen: list[float] = []
-    for price in sorted({p for p in levels if 0 < entry - p <= travel}, reverse=True):
-        reward = (entry - price) / entry - cost_pct / 100
+    for price in sorted(
+        {p for p in levels if 0 < sign * (p - entry) <= travel}, reverse=side == "short"
+    ):
+        reward = sign * (price - entry) / entry - cost_pct / 100
         if reward / risk_fraction >= cfg.min_reward_risk:
             chosen.append(price)
     return chosen
@@ -183,8 +302,10 @@ def liquidation_fit(
     atr_value: float,
     leverage: int,
     buffer_pct: float,
+    side: str = "short",
 ) -> tuple[int, float | None, object]:
-    """Highest leverage whose estimated short liquidation stays above the stop."""
+    """Highest leverage whose estimated liquidation stays beyond the stop."""
+    sign = 1 if side == "long" else -1
     tier = next(
         (
             t
@@ -195,12 +316,16 @@ def liquidation_fit(
     )
     if tier is None:
         return 0, None, None
-    adverse_basis = min(0.0, -(market.mark - market.price))
+    adverse_basis = min(0.0, sign * (market.mark - market.price))
     buffer = max(entry * buffer_pct / 100, atr_value * 0.5)
     max_leverage, liquidation = 0, None
     for level in range(1, tier.max_leverage + 1):
-        estimated = entry * (1 + 1 / level - cost_pct / 100) / (1 + tier.maintenance_rate)
-        if (estimated - stop) + adverse_basis >= buffer:
+        estimated = (
+            entry
+            * (1 - sign / level + sign * cost_pct / 100)
+            / (1 - sign * tier.maintenance_rate)
+        )
+        if sign * (stop - estimated) + adverse_basis >= buffer:
             max_leverage = level
         if level == leverage:
             liquidation = estimated
@@ -212,32 +337,47 @@ def build_scalp_plan(
     bars: list[Candle],
     quarter: list[Candle],
     hourly: list[Candle],
-    setup: FailedHigh,
+    setup: Spike,
     now: int,
     settings: SignalSettings,
     cfg: SignalsCfg,
 ) -> tuple[TradePlan | None, list[Check]]:
     scalp = cfg.scalp
-    entry = market.bid
+    side = setup.side
+    sign = 1 if side == "long" else -1
+    entry = market.ask if side == "long" else market.bid
     atr_value = volatility(bars)
     anchor = bars[-1].close
-    # Do not chase lower than 0.15 ATR below the trigger close; a bounce of up
-    # to 0.25 ATR is still the rejection zone.
-    low, high = anchor - 0.15 * atr_value, anchor + 0.25 * atr_value
-    stop_distance = setup.stop - entry
+    # Do not chase more than 0.15 ATR past the trigger close; a pullback of up
+    # to 0.25 ATR toward the spike is still the rejection zone.
+    low, high = sorted(
+        (anchor - sign * 0.15 * atr_value, anchor + sign * 0.25 * atr_value)
+    )
+    stop_distance = sign * (entry - setup.stop)
     checks = [
-        scalp_check("Entry zone", low <= entry <= high, "Sell the rejection; do not chase lower"),
+        scalp_check(
+            "Entry zone",
+            low <= entry <= high,
+            "Buy the rejection; do not chase higher"
+            if side == "long"
+            else "Sell the rejection; do not chase lower",
+        ),
     ]
     if stop_distance <= 0:
-        blocked = "Price is back above the spike high; the failed high is invalid"
+        blocked = (
+            "Price is back below the spike low; the failed low is invalid"
+            if side == "long"
+            else "Price is back above the spike high; the failed high is invalid"
+        )
         return None, checks + [
             scalp_check(label, False, blocked)
             for label in SCALP_PLAN_LABELS
             if label != "Entry zone"
         ]
     stop_pct = stop_distance / entry * 100
-    # Shorts receive positive funding; only a negative print is a cost.
-    funding_pct = max(0.0, -market.funding_rate) * 100
+    # Longs pay positive funding, shorts pay negative; only a print against
+    # the position is a cost.
+    funding_pct = max(0.0, sign * market.funding_rate) * 100
     funding_payments = 0
     end = now + settings.hold_hours * 3600
     if market.next_funding <= end and market.funding_interval_hours > 0:
@@ -262,6 +402,7 @@ def build_scalp_plan(
         atr_value,
         settings.leverage,
         scalp.liquidation_buffer_pct,
+        side,
     )
     hourly_atr = volatility(hourly)
     travel = scalp.travel_atr_multiple * hourly_atr
@@ -271,9 +412,9 @@ def build_scalp_plan(
     levels = [float(ema(q_closes, 20)[-1]), float(ema(h_closes, 20)[-1]), setup.base]
     if vwap is not None:
         levels.append(vwap)
-    targets = scalp_targets(levels, entry, stop_distance, cost_pct, travel, scalp)
+    targets = scalp_targets(levels, entry, stop_distance, cost_pct, travel, scalp, side)
     if targets:
-        reward = (entry - targets[0]) / entry - cost_pct / 100
+        reward = sign * (targets[0] - entry) / entry - cost_pct / 100
         ratio = reward / risk_fraction
     else:
         reward, ratio = 0.0, 0.0
@@ -337,7 +478,7 @@ def build_scalp_plan(
         return None, checks
     interval = INTERVALS[scalp.trigger_interval]
     return TradePlan(
-        "short",
+        side,
         entry,
         low,
         high,
@@ -359,23 +500,37 @@ def build_scalp_plan(
         settings.leverage,
         settings.hold_hours,
         bars[-1].time + interval + scalp.entry_expiry_seconds,
-        min(0.0, -(market.mark - market.price)),
+        min(0.0, sign * (market.mark - market.price)),
         PROFILE,
         scalp.trigger_interval,
     ), checks
 
 
-def evaluate_scalp_short(
+@dataclass(frozen=True)
+class _Context:
+    """Market readings shared by both sides of one evaluation."""
+
+    gain_1h: float
+    gain_4h: float
+    extension: float
+    climax: float
+    funding_pct: float
+    relative: float | None
+    atr_value: float
+    common: list[Check]
+
+
+def _context(
     market: Market,
     frames: dict[str, list[Candle]],
     btc_hourly: list[Candle] | None,
     settings: SignalSettings,
     cfg: SignalsCfg,
     now: int,
-    oi_change_pct: float | None = None,
-) -> Decision:
+    result: Decision,
+    oi_change_pct: float | None,
+) -> _Context:
     scalp = cfg.scalp
-    result = Decision(market.symbol, as_of=market.as_of, price=market.price)
     bars = frames[scalp.trigger_interval]
     quarter, hourly, four_hour = frames["15m"], frames["1h"], frames["4h"]
     interval = INTERVALS[scalp.trigger_interval]
@@ -394,6 +549,12 @@ def evaluate_scalp_short(
     basis_pct = abs(market.mark - market.price) / market.price * 100
     funding_eta = market.next_funding - now
     tier_max = max(t.max_leverage for t in market.tiers) if market.tiers else 0
+    relative: float | None = None
+    if market.symbol != "BTCUSDT" and btc_hourly and len(btc_hourly) >= 3 and len(hourly) >= 3:
+        relative = (
+            (hourly[-1].close / hourly[-3].close - 1)
+            - (btc_hourly[-1].close / btc_hourly[-3].close - 1)
+        ) * 100
     result.metrics = {
         "profile": PROFILE,
         "trigger_interval": scalp.trigger_interval,
@@ -412,15 +573,9 @@ def evaluate_scalp_short(
         "oi_change_pct": oi_change_pct,
         "spread_pct": spread_pct,
         "tier_max_leverage": tier_max,
+        "relative_strength_pct": relative,
     }
-    crowded_by_funding = funding_pct >= scalp.min_funding_rate_pct
-    crowded_by_oi = oi_change_pct is not None and oi_change_pct >= scalp.min_oi_change_pct
-    oi_text = (
-        f"OI {oi_change_pct:+.2f}% over {scalp.oi_window_seconds // 60}m"
-        if oi_change_pct is not None
-        else "OI history warming up"
-    )
-    checks = [
+    common = [
         scalp_check(
             "Fresh market data",
             0 <= now - market.as_of <= cfg.max_data_age_seconds,
@@ -451,23 +606,70 @@ def evaluate_scalp_short(
             funding_eta > cfg.funding_blackout_seconds,
             f"Next funding in {max(0, funding_eta)}s; wait if ≤{cfg.funding_blackout_seconds}s",
         ),
+    ]
+    return _Context(
+        gain_1h, gain_4h, extension, climax, funding_pct, relative, atr_value, common
+    )
+
+
+def _evaluate_side(
+    side: Side,
+    ctx: _Context,
+    market: Market,
+    frames: dict[str, list[Candle]],
+    btc_hourly: list[Candle] | None,
+    settings: SignalSettings,
+    cfg: SignalsCfg,
+    now: int,
+    base: Decision,
+    oi_change_pct: float | None,
+) -> Decision:
+    scalp = cfg.scalp
+    names = SIDE_LABELS[side]
+    sign = 1 if side == "long" else -1
+    result = replace(base, metrics=dict(base.metrics), checks=[], reasons=[])
+    bars = frames[scalp.trigger_interval]
+    quarter, hourly = frames["15m"], frames["1h"]
+    # Every gate reads in the direction of the move being faded: a short needs
+    # the pump, a long needs the dump.
+    extended = (
+        -sign * ctx.gain_1h >= scalp.min_gain_1h_pct
+        and -sign * ctx.gain_4h >= scalp.min_gain_4h_pct
+        and -sign * ctx.extension >= scalp.min_extension_atr
+    )
+    need = (
+        f"need ≥+{scalp.min_gain_1h_pct:g}% / ≥+{scalp.min_gain_4h_pct:g}% / ≥+{scalp.min_extension_atr:g}"
+        if side == "short"
+        else f"need ≤-{scalp.min_gain_1h_pct:g}% / ≤-{scalp.min_gain_4h_pct:g}% / ≤-{scalp.min_extension_atr:g}"
+    )
+    crowded_by_funding = -sign * ctx.funding_pct >= scalp.min_funding_rate_pct
+    crowded_by_oi = oi_change_pct is not None and oi_change_pct >= scalp.min_oi_change_pct
+    oi_text = (
+        f"OI {oi_change_pct:+.2f}% over {scalp.oi_window_seconds // 60}m"
+        if oi_change_pct is not None
+        else "OI history warming up"
+    )
+    funding_need = (
+        f"need ≥{scalp.min_funding_rate_pct:g}%"
+        if side == "short"
+        else f"need ≤-{scalp.min_funding_rate_pct:g}%"
+    )
+    checks = list(ctx.common) + [
         scalp_check(
-            "Extended above value",
-            gain_1h >= scalp.min_gain_1h_pct
-            and gain_4h >= scalp.min_gain_4h_pct
-            and extension >= scalp.min_extension_atr,
-            f"+{gain_1h:.2f}% 1h, +{gain_4h:.2f}% 4h, {extension:.1f} hourly ATR above the 1h EMA20; "
-            f"need {scalp.min_gain_1h_pct:g}% / {scalp.min_gain_4h_pct:g}% / {scalp.min_extension_atr:g}",
+            names["extended"],
+            extended,
+            f"{ctx.gain_1h:+.2f}% 1h, {ctx.gain_4h:+.2f}% 4h, {ctx.extension:+.1f} hourly ATR "
+            f"from the 1h EMA20; {need}",
         ),
         scalp_check(
             "Climax volume",
-            climax >= scalp.min_climax_volume,
-            f"Peak bar {climax:.1f}× the prior baseline; need {scalp.min_climax_volume:g}×",
+            ctx.climax >= scalp.min_climax_volume,
+            f"Peak bar {ctx.climax:.1f}× the prior baseline; need {scalp.min_climax_volume:g}×",
         ),
         scalp_check(
-            "Crowded longs",
+            names["crowded"],
             crowded_by_funding or crowded_by_oi,
-            f"Funding {funding_pct:+.4f}% (need ≥{scalp.min_funding_rate_pct:g}%) or {oi_text} "
+            f"Funding {ctx.funding_pct:+.4f}% ({funding_need}) or {oi_text} "
             f"(need ≥{scalp.min_oi_change_pct:g}%)",
         ),
     ]
@@ -475,61 +677,63 @@ def evaluate_scalp_short(
         checks.append(
             scalp_check("BTC context", True, "BTC is the benchmark; no relative gate")
         )
-    elif btc_hourly and len(btc_hourly) >= 3 and len(hourly) >= 3:
-        relative = (
-            (hourly[-1].close / hourly[-3].close - 1)
-            - (btc_hourly[-1].close / btc_hourly[-3].close - 1)
-        ) * 100
-        result.metrics["relative_strength_pct"] = relative
+    elif ctx.relative is not None:
+        aligned = -sign * ctx.relative >= 0
         checks.append(
             scalp_check(
                 "BTC context",
-                relative >= 0,
-                f"Alt outran BTC by {relative:+.2f}% over 2h; fade the idiosyncratic pump, not a BTC move",
+                aligned,
+                (
+                    f"Alt outran BTC by {ctx.relative:+.2f}% over 2h; fade the idiosyncratic pump, not a BTC move"
+                    if side == "short"
+                    else f"Alt fell {ctx.relative:+.2f}% versus BTC over 2h; fade the idiosyncratic dump, not a BTC move"
+                ),
             )
         )
     else:
         checks.append(scalp_check("BTC context", False, "BTC candles unavailable"))
     candidate = all(
-        item.passed for item in checks if item.label in CANDIDATE_LABELS
+        item.passed for item in checks if item.label in candidate_labels(side)
     )
     if not candidate:
         checks.extend(
             scalp_waiting(label, WAITING_CANDIDATE)
-            for label in SETUP_LABELS + SCALP_PLAN_LABELS
+            for label in setup_labels(side) + SCALP_PLAN_LABELS
         )
         checks.append(scalp_check("Tracked exposure", True, "No conflicting tracked exposure"))
-        result.checks = order_scalp_checks(checks)
-        result.reasons = [item.detail for item in result.checks if not item.passed and not item.waiting] or [
-            WAITING_CANDIDATE
-        ]
+        result.side = side
+        result.checks = order_scalp_checks(checks, side)
+        result.reasons = [
+            item.detail for item in result.checks if not item.passed and not item.waiting
+        ] or [WAITING_CANDIDATE]
         return result
-    result.side = "short"
-    result.state = "WATCH_SHORT"
-    setup = find_failed_high(bars, atr_value, scalp)
+    result.side = side
+    result.state = f"WATCH_{side.upper()}"
+    setup = find_spike(bars, side, ctx.atr_value, scalp)
     checks.append(
         scalp_check(
-            "Failed high trigger",
+            names["trigger"],
             setup is not None,
             f"Waiting for a completed {scalp.trigger_interval} close back through the spike body",
         )
     )
     if setup:
-        result.setup = SETUP_NAME
-        result.signal_id = f"{market.symbol}:short:{SETUP_NAME}:{result.bar_time}"
+        result.setup = SETUP_NAMES[side]
+        result.signal_id = f"{market.symbol}:{side}:{SETUP_NAMES[side]}:{result.bar_time}"
         result.metrics.update(
             {
-                "spike_high": setup.spike_high,
+                "spike_high" if side == "short" else "spike_low": setup.extreme,
                 "spike_base": setup.base,
                 "flow_delta": setup.flow_delta,
-                "relative_volume": climax,
+                "relative_volume": ctx.climax,
             }
         )
         checks.append(
             scalp_check(
                 "Flow divergence",
-                setup.flow_delta < 0,
-                f"Close-weighted volume delta since the spike {setup.flow_delta:+.0f}; sellers must dominate",
+                sign * setup.flow_delta > 0,
+                f"Close-weighted volume delta since the spike {setup.flow_delta:+.0f}; "
+                + ("buyers must dominate" if side == "long" else "sellers must dominate"),
             )
         )
         result.plan, plan_checks = build_scalp_plan(
@@ -538,18 +742,100 @@ def evaluate_scalp_short(
         checks.extend(plan_checks)
     else:
         checks.extend(
-            scalp_waiting(label, WAITING_TRIGGER)
+            scalp_waiting(label, WAITING_TRIGGERS[side])
             for label in ("Flow divergence",) + SCALP_PLAN_LABELS
         )
     checks.append(scalp_check("Tracked exposure", True, "No conflicting tracked exposure"))
-    result.checks = order_scalp_checks(checks)
+    result.checks = order_scalp_checks(checks, side)
     if (
         result.plan
         and now < result.plan.expires_at
         and all(item.passed for item in result.checks)
     ):
-        result.state = "ENTER_SHORT"
+        result.state = f"ENTER_{side.upper()}"
     result.reasons = [item.detail for item in result.checks if not item.passed] or [
-        f"{SETUP_NAME} confirmed on a completed {scalp.trigger_interval} candle"
+        f"{SETUP_NAMES[side]} confirmed on a completed {scalp.trigger_interval} candle"
     ]
     return result
+
+
+def _rank(decision: Decision) -> tuple[int, int]:
+    stage = 2 if decision.state.startswith("ENTER_") else 1 if decision.state.startswith("WATCH_") else 0
+    return stage, sum(item.passed for item in decision.checks)
+
+
+def evaluate_scalp(
+    market: Market,
+    frames: dict[str, list[Candle]],
+    btc_hourly: list[Candle] | None,
+    settings: SignalSettings,
+    cfg: SignalsCfg,
+    now: int,
+    oi_change_pct: float | None = None,
+    sides: tuple[Side, ...] = SIDES,
+) -> Decision:
+    """Evaluate every requested side and publish the most advanced one.
+
+    With both sides idle the card shows the side the recent move leans toward
+    and a reason that spells out both thresholds, so a WAIT is never a mystery.
+    """
+    scalp = cfg.scalp
+    base = Decision(market.symbol, as_of=market.as_of, price=market.price)
+    ctx = _context(market, frames, btc_hourly, settings, cfg, now, base, oi_change_pct)
+    decisions = [
+        _evaluate_side(
+            side, ctx, market, frames, btc_hourly, settings, cfg, now, base, oi_change_pct
+        )
+        for side in sides
+    ]
+    leaning: Side = "long" if ctx.gain_1h < 0 else "short"
+    best = max(
+        decisions,
+        key=lambda d: (*_rank(d), d.side == leaning),
+    )
+    if len(decisions) > 1 and best.state == "WAIT":
+        best.side = ""
+        best.reasons = [
+            f"No exhaustion move to fade: {ctx.gain_1h:+.2f}% 1h, {ctx.gain_4h:+.2f}% 4h, "
+            f"{ctx.extension:+.1f} ATR from the 1h EMA20. Short needs "
+            f"≥+{scalp.min_gain_1h_pct:g}% / ≥+{scalp.min_gain_4h_pct:g}% / ≥+{scalp.min_extension_atr:g} ATR; "
+            f"long needs the mirror",
+            *[
+                item.detail
+                for item in best.checks
+                if not item.passed
+                and not item.waiting
+                and item.label not in ("Extended above value", "Extended below value")
+            ],
+        ]
+    return best
+
+
+def evaluate_scalp_short(
+    market: Market,
+    frames: dict[str, list[Candle]],
+    btc_hourly: list[Candle] | None,
+    settings: SignalSettings,
+    cfg: SignalsCfg,
+    now: int,
+    oi_change_pct: float | None = None,
+) -> Decision:
+    """Short-only evaluation, kept for the scalp backtest and older callers."""
+    return evaluate_scalp(
+        market, frames, btc_hourly, settings, cfg, now, oi_change_pct, sides=("short",)
+    )
+
+
+def evaluate_scalp_long(
+    market: Market,
+    frames: dict[str, list[Candle]],
+    btc_hourly: list[Candle] | None,
+    settings: SignalSettings,
+    cfg: SignalsCfg,
+    now: int,
+    oi_change_pct: float | None = None,
+) -> Decision:
+    """Long-only evaluation: fade a climactic dump after a failed low."""
+    return evaluate_scalp(
+        market, frames, btc_hourly, settings, cfg, now, oi_change_pct, sides=("long",)
+    )

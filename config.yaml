@@ -36,12 +36,14 @@ signals:
   queue_size: 5
   handoff_seconds: 20
   expiry_warn_seconds: 45
-  # Scalp-short profile (choose it in the overlay's planning settings):
-  # parabolic-exhaustion fades held 1-2h at up to the pair's leverage cap.
-  # The stop sits just above the failed high and must fit inside the
-  # estimated isolated liquidation distance, so most 100x plans report a
-  # lower ceiling. Universe is restricted to pairs whose cap allows the
-  # planned leverage.
+  # Scalp profile (choose it in the overlay's planning settings): long and
+  # short parabolic-exhaustion fades held 1-2h at up to the pair's leverage
+  # cap. A short needs a pump, climax volume, crowded longs and a failed
+  # high; a long needs the mirror (dump, climax, crowded shorts, failed
+  # low). The stop sits just past the failed extreme and must fit inside
+  # the estimated isolated liquidation distance, so most 100x plans report
+  # a lower ceiling. Universe is restricted to pairs whose cap allows the
+  # planned leverage. The same thresholds apply in both directions.
   scalp:
     trigger_interval: 1m
     min_gain_1h_pct: 1.5
