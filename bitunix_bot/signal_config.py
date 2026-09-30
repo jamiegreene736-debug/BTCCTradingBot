@@ -22,6 +22,11 @@ LEGACY_PROFILE_NAMES: dict[str, str] = {"scalp_short": "scalp", "swing": "trend"
 DEFAULT_PROFILE = "trend"
 SCALP_PROFILES: tuple[str, ...] = ("scalp", "scalp_short")
 NUMERIC_SETTINGS = ("planning_equity", "risk_pct", "leverage", "hold_hours")
+# Largest share of the isolated margin a stop-out may cost, costs included.
+# 100 means "anything inside the liquidation buffer"; lower values pull the
+# stop in as leverage rises. Every stop is also kept inside the estimated
+# liquidation distance, whatever this is set to.
+DEFAULT_MAX_MARGIN_LOSS_PCT = 50.0
 
 
 @dataclass(frozen=True)
@@ -31,6 +36,7 @@ class SignalSettings:
     leverage: int = 50
     hold_hours: int = 2
     profile: str = DEFAULT_PROFILE
+    max_margin_loss_pct: float = DEFAULT_MAX_MARGIN_LOSS_PCT
 
     def validate(self) -> None:
         if self.profile not in PROFILES:
@@ -51,12 +57,19 @@ class SignalSettings:
                 + " or ".join(str(h) for h in holds)
                 + " hours"
             )
+        if (
+            type(self.max_margin_loss_pct) not in (int, float)
+            or not math.isfinite(self.max_margin_loss_pct)
+            or not 10 <= self.max_margin_loss_pct <= 100
+        ):
+            raise ValueError("Maximum loss of margin at the stop must be 10% to 100%")
 
     @classmethod
     def from_dict(cls, values: dict[str, object]) -> SignalSettings:
         payload = dict(values)
         # Settings saved before profiles existed carry only the numeric fields.
         raw = payload.pop("profile", None)
+        max_margin_loss = payload.pop("max_margin_loss_pct", DEFAULT_MAX_MARGIN_LOSS_PCT)
         if set(payload) != set(NUMERIC_SETTINGS):
             raise ValueError(
                 "Provide planning_equity, risk_pct, leverage and hold_hours"
@@ -76,7 +89,15 @@ class SignalSettings:
                 payload["hold_hours"] = 2
             if isinstance(leverage, (int, float)) and not lo <= leverage <= hi:
                 payload["leverage"] = 50
-        settings = cls(profile=profile, **payload)  # type: ignore[arg-type]
+        if not isinstance(max_margin_loss, (int, float)) or isinstance(
+            max_margin_loss, bool
+        ):
+            raise ValueError("Maximum loss of margin at the stop must be a number")
+        settings = cls(
+            profile=profile,
+            max_margin_loss_pct=float(max_margin_loss),
+            **payload,  # type: ignore[arg-type]
+        )
         settings.validate()
         return settings
 

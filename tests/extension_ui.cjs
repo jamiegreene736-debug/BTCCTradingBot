@@ -23,7 +23,7 @@ async function main() {
       window.listeners = [];
       window.savedLayout = {};
       window.chrome = { runtime: {
-        getManifest: () => ({ version: '1.7.1' }),
+        getManifest: () => ({ version: '1.8.0' }),
         sendMessage: async message => {
           window.messages.push(message);
           if (['save-planning', 'track-entry', 'close-track', 'confirm-stop', 'place-stop'].includes(message.type)) return { ok: true };
@@ -55,7 +55,7 @@ async function main() {
     });
     await page.addStyleTag({ path: path.join(root, 'content.css') });
     await page.addScriptTag({ path: path.join(root, 'content.js') });
-    assert.equal(await page.locator('#bis-panel').getAttribute('data-bis-version'), '1.7.1');
+    assert.equal(await page.locator('#bis-panel').getAttribute('data-bis-version'), '1.8.0');
     assert.equal(await page.locator('#bis-panel').evaluate(el => el.textContent.includes('OLD IMMOVABLE PANEL')), false);
     assert.match(await page.locator('#bis-status').textContent(), /Connecting/);
     await page.evaluate(() => {
@@ -72,15 +72,16 @@ async function main() {
     assert.match(card, /Planned 50x/);
     assert.match(card, /hold ≤ 120 min/);
     assert.match(card, /time-stop 120 min after fill/);
-    assert.match(card, /Estimated leverage ceiling 78x/);
-    assert.match(card, /stop 0\.35% inside est\. liquidation 97\.39555/);
+    assert.match(card, /Stop 0\.35% fits 50x · structure fits up to 78x untightened/);
+    assert.match(card, /Loss at stop26% of margin/);
+    assert.match(card, /est\. liquidation 97\.39555/);
     assert.match(card, /50x · ≤120 min/);
     assert.match(card, /21\/21 checks/);
     assert.match(card, /Stop loss = 26% of posted margin at 50x/);
     assert.match(card, /1h bias: long · 15m structure: long/);
     assert.match(card, /ATR 5m: 0\.18% · 15m: 0\.30% · 1h: 0\.65%/);
     assert.match(card, /BTC relative strength \(2h\)/);
-    assert.equal(await page.locator('#bis-card .bis-levels > div').count(), 7);
+    assert.equal(await page.locator('#bis-card .bis-levels > div').count(), 8);
     // A saved legacy "swing" profile renders as Trend without a new backend round trip.
     await page.evaluate(() => {
       const legacy = structuredClone(window.testPayload);
@@ -255,7 +256,7 @@ async function main() {
     assert.equal(saved.leverage, 60); assert.equal(saved.hold_hours, 1); assert.equal(saved.profile, 'trend');
     await page.locator('#bis-symbol').selectOption('ETHUSDT');
     assert.equal(await page.locator('.bis-state').textContent(), 'ENTER SHORT');
-    assert.match(await page.locator('#bis-card').textContent(), /stop 0\.34% inside est\. liquidation 102\.63/);
+    assert.match(await page.locator('#bis-card').textContent(), /Stop 0\.34% fits .*est\. liquidation 102\.63/);
     await page.locator('#bis-card summary').click();
     await page.locator('[data-action="refresh"]').click();
     assert.equal(await page.locator('#bis-card details').getAttribute('open'), '');
@@ -329,13 +330,13 @@ async function main() {
     await popup.setContent(fs.readFileSync(path.join(root, 'popup.html'), 'utf8').replace(/<script[^>]*><\/script>/g, ''));
     await popup.evaluate(() => {
       window.chrome = { runtime: {
-        getManifest: () => ({ version: '1.7.1' }),
+        getManifest: () => ({ version: '1.8.0' }),
         sendMessage: async () => ({ payload: { error: 'Cannot reach the dashboard.' } }),
       } };
     });
     await popup.addScriptTag({ path: path.join(root, 'popup.js') });
     assert.match(await popup.locator('#status').textContent(), /Cannot reach/);
-    assert.equal(await popup.locator('#version').textContent(), 'Version 1.7.1');
+    assert.equal(await popup.locator('#version').textContent(), 'Version 1.8.0');
     const stalled = await browser.newPage();
     stalled.on('pageerror', error => errors.push(error.message));
     await stalled.clock.install();

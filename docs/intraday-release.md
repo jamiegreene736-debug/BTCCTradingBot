@@ -347,6 +347,25 @@ separate state in the overlay. After a completed 15m setup, funding, size,
 depth and leverage are scored even when the 2R target is missing. ENTER still
 requires every gate, including the 15m trigger.
 
+## Leverage-aware stops — 1.8.0
+
+A structural stop that ignores leverage can sit beyond the liquidation price,
+or cost most of the margin, at 75-125x. Every plan now fits its stop to the
+leverage in use before anything else is scored:
+
+- The stop stays inside the estimated isolated-margin liquidation distance
+  (maintenance tier, fees and slippage included, less the safety buffer).
+- The stop also stays inside a new planning setting, **maximum loss of
+  margin at the stop** (10-100%, default 50%): `(stop % + costs %) × leverage`.
+- When the setup's structural stop is wider than that budget it is tightened
+  toward entry and the plan is sized to the tighter stop. When the budget
+  would leave the stop inside market noise (0.75 ATR swing, 0.5 ATR scalp)
+  the entry is blocked with a "reduce leverage" reason.
+- Imported live Bitunix positions get the same fit at the leverage they were
+  actually opened with, not the planning leverage.
+- Cards show the loss of margin at the stop, whether the stop was tightened
+  and from where, and the highest leverage the untightened structure fits.
+
 ## One-click protective stop — 1.5.1
 
 Waiting for a bounce without an exchange stop was still one extra step too
