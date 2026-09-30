@@ -280,6 +280,7 @@ CHECK_GROUPS: dict[str, str] = {
     "1h bias / 15m structure": "market",
     "BTC context": "market",
     "Not extended": "market",
+    "Blow-off guard": "market",
     "Crowding headwind": "market",
     "Completed trigger candle": "setup",
     "Volume confirmation": "setup",
@@ -390,6 +391,10 @@ class Decision:
     # Price levels that would move this card to the next state, for the
     # overlay's "what does it need" line: {label, price, price2?}.
     actions: list[dict[str, object]] = field(default_factory=list)
+    # Set when a safety gate failed: the market is dangerous at the planned
+    # leverage (too volatile, extended, crowded or blown off). The state is
+    # AVOID, the row ranks last and no entry levels are shown.
+    avoid: str = ""
     # Where price is projected to sit over the next few minutes; see
     # next_price_projection. None until enough trigger candles exist.
     projection: dict[str, float | int | str] | None = None
@@ -435,14 +440,14 @@ def watch_actions(
         boundary = max(c.high for c in bars[-26:-6])
         pullback = [level for level in levels if level < price]
         nearest = max(pullback) if pullback else None
-        items = [action(f"Long on {interval} close above", max(boundary, price))]
+        items = [action(f"Needs a {interval} close above", max(boundary, price))]
     else:
         boundary = min(c.low for c in bars[-26:-6])
         pullback = [level for level in levels if level > price]
         nearest = min(pullback) if pullback else None
-        items = [action(f"Short on {interval} close below", min(boundary, price))]
+        items = [action(f"Needs a {interval} close below", min(boundary, price))]
     if nearest is not None:
-        items.append(action("or pullback to", nearest))
+        items.append(action("or a pullback to", nearest))
     return items
 
 
@@ -1243,6 +1248,9 @@ def evaluate_intraday(
         result.metrics.update({"btc_trend": "unavailable", "relative_strength_pct": None})
         result.checks.append(make_check("BTC context", False, "BTC candles unavailable"))
     directional_extension = sign * extension
+    gain_1h = sign * (market.price / hourly[-2].close - 1) * 100 if len(hourly) >= 2 else 0.0
+    gain_4h = sign * (market.price / hourly[-5].close - 1) * 100 if len(hourly) >= 5 else 0.0
+    result.metrics.update({"gain_1h_pct": gain_1h, "gain_4h_pct": gain_4h})
     crowded = sign * market.funding_rate * 100 > t.max_funding_rate_pct or (
         oi_change_pct is not None
         and oi_change_pct >= t.max_oi_change_pct
@@ -1258,6 +1266,13 @@ def evaluate_intraday(
                 directional_extension <= t.max_extension_atr,
                 f"{directional_extension:+.1f} hourly ATR from the 1h EMA20 in the trade "
                 f"direction; max {t.max_extension_atr:g}",
+            ),
+            make_check(
+                "Blow-off guard",
+                gain_1h <= t.max_gain_1h_pct and gain_4h <= t.max_gain_4h_pct,
+                f"Already {gain_1h:+.1f}% over 1h and {gain_4h:+.1f}% over 4h in the trade "
+                f"direction; max {t.max_gain_1h_pct:g}% / {t.max_gain_4h_pct:g}% at "
+                f"{settings.leverage}x",
             ),
             make_check(
                 "Crowding headwind",
@@ -1321,4 +1336,22 @@ def evaluate_intraday(
     result.reasons = [item.detail for item in result.checks if not item.passed] or [
         f"{result.setup} confirmed on a completed {t.trigger_interval} candle"
     ]
+    # Safety gates: a failure here means the market can move through the
+    # whole margin inside the hold, so the card must not read as a setup.
+    danger = {item.label: item for item in result.checks if not item.passed}
+    if hourly_atr_pct > t.max_hourly_atr_pct:
+        result.avoid = (
+            f"1h ATR {hourly_atr_pct:.2f}% is above the {t.max_hourly_atr_pct:g}% ceiling: "
+            f"one average hour moves {hourly_atr_pct * settings.leverage:.0f}% of margin at "
+            f"{settings.leverage}x"
+        )
+    else:
+        for label in ("Blow-off guard", "Not extended", "Crowding headwind"):
+            if label in danger:
+                result.avoid = danger[label].detail
+                break
+    if result.avoid:
+        result.state = "AVOID"
+        result.actions = []
+        result.reasons = [f"Do not {side} at {settings.leverage}x: {result.avoid}"]
     return result

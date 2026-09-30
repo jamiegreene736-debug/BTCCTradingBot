@@ -110,6 +110,28 @@ async function main() {
     assert.match(await page.locator('#bis-queue').textContent(), /Top setups/);
     assert.match(await page.locator('#bis-queue').textContent(), /BTCUSDT/);
     assert.match(await page.locator('#bis-queue').textContent(), /Next 5 min ≈ 98\.76 · 98\.58 – 98\.94 · \+0\.06%/);
+    assert.match(await page.locator('#bis-queue .bis-queue-row[data-symbol="BTCUSDT"]').textContent(), /Stop 98\.35985 · loses \d+% of margin at 50x · est\. liquidation 97\.39555/);
+    await page.evaluate(() => {
+      const now = Math.floor(Date.now() / 1000);
+      const risky = structuredClone(window.testPayload.symbols.BTCUSDT);
+      risky.symbol = 'SOONUSDT'; risky.state = 'AVOID'; risky.side = 'long'; risky.plan = null; risky.actions = [];
+      risky.avoid = '1h ATR 5.91% is above the 1.2% ceiling: one average hour moves 296% of margin at 50x';
+      risky.reasons = ['Do not long at 50x: ' + risky.avoid];
+      risky.as_of = now;
+      window.testPayload.symbols.SOONUSDT = risky;
+      window.testPayload.queue.push({ symbol: 'SOONUSDT', state: 'AVOID', side: 'long', as_of: now, state_since: now, price: 0.5211, actions: [], avoid: risky.avoid, leverage: 50, checks_passed: 10, checks_total: 22 });
+      window.listeners[0]({ type: 'signals-update', payload: window.testPayload });
+    });
+    const riskyRow = page.locator('#bis-queue .bis-queue-row[data-symbol="SOONUSDT"]');
+    assert.match(await riskyRow.textContent(), /AVOID/);
+    assert.match(await riskyRow.locator('.bis-avoid').textContent(), /Do not long at 50x: 1h ATR 5\.91%/);
+    assert.equal(await riskyRow.locator('.bis-need').count(), 0);
+    await page.locator('#bis-symbol').selectOption('SOONUSDT');
+    assert.equal(await page.locator('.bis-state').textContent(), 'AVOID');
+    assert.match(await page.locator('#bis-card .bis-avoid').textContent(), /Do not long at 50x/);
+    assert.equal(await page.locator('#bis-card [data-action="paper"]').count(), 0);
+    await page.evaluate(() => { delete window.testPayload.symbols.SOONUSDT; window.testPayload.queue.pop(); window.listeners[0]({ type: 'signals-update', payload: window.testPayload }); });
+    await page.locator('#bis-symbol').selectOption('');
     assert.match(await page.locator('#bis-card').textContent(), /Next 5 min ≈ 98\.76/);
     assert.match(await page.locator('#bis-card .bis-next').getAttribute('title'), /not a forecast/);
     await page.locator('#bis-history-wrap summary').click();

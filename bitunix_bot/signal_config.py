@@ -189,6 +189,10 @@ class TrendCfg:
     session_volume_ratio: float = 0.5
     # Do not buy the squeeze the scalp profile fades.
     max_extension_atr: float = 2.0
+    # Blow-off guard: a pair that has already run this far in the trade
+    # direction is a liquidation risk at 20-100x, whatever the structure says.
+    max_gain_1h_pct: float = 3.0
+    max_gain_4h_pct: float = 6.0
     max_funding_rate_pct: float = 0.05
     max_oi_change_pct: float = 3.0
     crowd_extension_atr: float = 1.5
