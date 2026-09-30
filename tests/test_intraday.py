@@ -1318,6 +1318,10 @@ def test_scanner_reads_current_public_schema_and_deduplicates_alerts(tmp_path):
     assert snapshot["history"][0]["time"] == NOW
     assert snapshot["queue"][0]["symbol"] == "BTCUSDT"
     assert snapshot["queue"][0]["state_since"] == NOW
+    projection = snapshot["queue"][0]["projection"]
+    assert projection["horizon_minutes"] == 5
+    assert projection["low"] < projection["price"] < projection["high"]
+    assert snapshot["symbols"]["BTCUSDT"]["projection"] == projection
     scanner.client.place_order.assert_not_called()
     scanner.client.pending_positions.assert_not_called()
 
@@ -2261,3 +2265,48 @@ def test_watch_actions_name_trigger_interval_and_pullback_level():
         for c in decision.checks
         if c.group == "plan"
     )
+
+
+def projection_bars(step: float, count: int = 40, interval: int = 300) -> list[Candle]:
+    start = NOW // interval * interval - count * interval
+    return [
+        Candle(start + k * interval, 100 + step * k, 100 + step * k + 0.3,
+               100 + step * k - 0.3, 100 + step * k, 100)
+        for k in range(count)
+    ]
+
+
+def test_next_price_projection_extrapolates_drift_inside_an_atr_band():
+    from bitunix_bot.intraday import next_price_projection
+
+    rising = next_price_projection(projection_bars(0.1), "5m", 104.0)
+    assert rising["horizon_minutes"] == 5
+    assert rising["price"] == pytest.approx(104.1, abs=0.02)
+    assert rising["low"] < 104.0 < rising["price"] < rising["high"]
+    assert rising["drift_pct"] == pytest.approx(0.1 / 104 * 100, abs=0.02)
+    assert rising["high"] - rising["price"] == pytest.approx(rising["price"] - rising["low"])
+
+    flat = next_price_projection(projection_bars(0.0), "5m", 100.0)
+    assert flat["price"] == pytest.approx(100.0)
+    assert flat["drift_pct"] == pytest.approx(0, abs=1e-9)
+    assert flat["high"] - flat["low"] == pytest.approx(2 * 0.6)
+
+    # A burst that outruns the smoothed ATR is clamped to the envelope; a 1m
+    # trigger looks 5 bars ahead.
+    start = NOW // 300 * 300 - 40 * 300
+    burst = [Candle(start + k * 300, 100, 100.3, 99.7, 100, 100) for k in range(28)] + [
+        Candle(start + (28 + k) * 300, 100 + 5 * k, 100.3 + 5 * k, 99.7 + 5 * k, 100 + 5 * k, 100)
+        for k in range(12)
+    ]
+    runaway = next_price_projection(burst, "5m", 155.0)
+    assert 0 < runaway["price"] - 155.0 < 5.0
+    assert runaway["price"] - 155.0 == pytest.approx(runaway["high"] - runaway["price"])
+    scalp = next_price_projection(projection_bars(0.02, count=90, interval=60), "1m", 101.8)
+    assert scalp["horizon_minutes"] == 5
+    assert scalp["price"] == pytest.approx(101.9, abs=0.02)
+    assert scalp["high"] - scalp["price"] == pytest.approx(0.6 * 5 ** 0.5, abs=0.05)
+
+    # Anchored to the live price, falling back to the last close.
+    assert next_price_projection(projection_bars(0.0), "5m", None)["price"] == pytest.approx(100.0)
+    assert next_price_projection(projection_bars(0.1)[:10], "5m", 100.0) is None
+    assert next_price_projection(projection_bars(0.1), "2h", 100.0) is None

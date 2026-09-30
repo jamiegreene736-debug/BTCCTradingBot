@@ -1,4 +1,4 @@
-# Bitunix Intraday Signals — Chrome extension v1.8.1
+# Bitunix Intraday Signals — Chrome extension v1.8.2
 
 Long and short entry, hold, review and exit alerts for trades held 1-2 hours
 at 50x-class leverage. The backend computes the strategy; this extension displays it.
@@ -28,10 +28,10 @@ No extension action sends an exchange order or modifies a position.
 - **Pump Fade Radar** or version **0.3.16** means old files or an old tab are
   still loaded. Reload the extension from this folder in `chrome://extensions`,
   then reload the Bitunix tab. The popup must say **Bitunix Intraday Signals**,
-  version **1.8.1**. Unpacked extensions do not refresh themselves after a git pull.
+  version **1.8.2**. Unpacked extensions do not refresh themselves after a git pull.
   Click **Reload** on this extension in `chrome://extensions`, then reload the
   Bitunix tab. A Bitunix in-page refresh is not enough. The panel header must
-  show **v1.8.1**, a drag grip, and ⤢. Drag the title or grip to move; drag the
+  show **v1.8.2**, a drag grip, and ⤢. Drag the title or grip to move; drag the
   bottom-right corner to resize. Empty header chrome lets Bitunix menus
   (timeframes, short/long tickets) receive clicks through the overlay.
 - Use the complete extension folder from one release. Mixing the old manifest
@@ -52,6 +52,11 @@ panel from an older script. Size and position persist in local Chrome storage.
 The top-five queue lists the current ranked markets with the time each state
 started. A countdown warning appears before the featured card switches to the
 next setup. Recent alerts keep WATCH and ENTER rows with full timestamps.
+Under the "what it needs" price line, each fresh row and the card show
+**Next 5 min ≈**: the last hour's drift on trigger-candle closes extrapolated
+five minutes, with a band of one trigger ATR either side and the drift as a
+percentage. It is anchored to the live price and recomputed every scan. Treat
+it as a volatility envelope around recent momentum, not a forecast of direction.
 
 The card shows WAIT, WATCH LONG/SHORT or ENTER LONG/SHORT, an entry zone,
 structural stop, profit target, estimated net reward/risk, planning size,

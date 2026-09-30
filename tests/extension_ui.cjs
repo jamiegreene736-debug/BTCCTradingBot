@@ -108,6 +108,9 @@ async function main() {
     assert.match(await page.locator('#bis-panel footer').textContent(), /Trade entry waiting/);
     assert.match(await page.locator('#bis-queue').textContent(), /Top setups/);
     assert.match(await page.locator('#bis-queue').textContent(), /BTCUSDT/);
+    assert.match(await page.locator('#bis-queue').textContent(), /Next 5 min ≈ 98\.76 · 98\.58 – 98\.94 · \+0\.06%/);
+    assert.match(await page.locator('#bis-card').textContent(), /Next 5 min ≈ 98\.76/);
+    assert.match(await page.locator('#bis-card .bis-next').getAttribute('title'), /not a forecast/);
     await page.locator('#bis-history-wrap summary').click();
     assert.match(await page.locator('#bis-history').textContent(), /ENTER LONG/);
     await page.evaluate(() => {

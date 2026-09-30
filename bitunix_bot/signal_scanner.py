@@ -35,6 +35,7 @@ from .intraday import (
     estimate_liquidation,
     evaluate_intraday,
     fit_leverage,
+    next_price_projection,
     number,
     upsert_check,
     volatility,
@@ -845,17 +846,9 @@ class SignalScanner:
     ) -> Decision:
         frames[symbol] = self._frames(symbol, now, self._intervals(settings))
         market = self._market(symbol, by_ticker[symbol], by_pair[symbol])
-        if settings.profile in SCALP_PROFILES:
-            return evaluate_scalp(
-                market,
-                frames[symbol],
-                frames.get("BTCUSDT", {}).get("1h"),
-                settings,
-                self.cfg,
-                int(time.time()),
-                self._oi_change_pct(symbol, now),
-            )
-        return evaluate_intraday(
+        scalp = settings.profile in SCALP_PROFILES
+        evaluate = evaluate_scalp if scalp else evaluate_intraday
+        decision = evaluate(
             market,
             frames[symbol],
             frames.get("BTCUSDT", {}).get("1h"),
@@ -864,6 +857,13 @@ class SignalScanner:
             int(time.time()),
             self._oi_change_pct(symbol, now),
         )
+        trigger = (
+            self.cfg.scalp.trigger_interval if scalp else self.cfg.trend.trigger_interval
+        )
+        decision.projection = next_price_projection(
+            frames[symbol].get(trigger, []), trigger, market.price
+        )
+        return decision
 
     def _blank_checklist(self, settings: SignalSettings, detail: str) -> list[Check]:
         if settings.profile in SCALP_PROFILES:
@@ -1110,6 +1110,7 @@ class SignalScanner:
             "reason": decision.reasons[0] if decision.reasons else "",
             "price": decision.price,
             "actions": list(decision.actions),
+            "projection": decision.projection,
         }
 
     def _featured_and_handoff(
