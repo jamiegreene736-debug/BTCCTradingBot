@@ -347,6 +347,25 @@ separate state in the overlay. After a completed 15m setup, funding, size,
 depth and leverage are scored even when the 2R target is missing. ENTER still
 requires every gate, including the 15m trigger.
 
+## AVOID verdict and stops on every row — 1.8.5
+
+A WATCH row read "Long on 5m close above …" while the same coin's checklist
+said its 1h ATR was 5.9% against a 1.2% ceiling at 50x. A trader took the
+long, one candle liquidated the position, and the stop was only on the card
+further down. Three changes:
+
+- **AVOID state.** When a safety gate fails (1h ATR above the ceiling, the new
+  blow-off guard, Not extended, Crowding headwind) the decision becomes AVOID:
+  it ranks below WAIT, shows no trigger levels, and the row and card carry a
+  red "Do not long/short at Nx: reason" line instead.
+- **Blow-off guard.** A new market gate rejects a pair that has already moved
+  more than `max_gain_1h_pct` (3%) over 1h or `max_gain_4h_pct` (6%) over 4h
+  in the trade direction. The checklist is 22 gates.
+- **Stops travel with the level.** Queue rows carry the plan's stop, margin
+  loss at the planned leverage and estimated liquidation; WATCH rows without a
+  plan say "No stop yet: the plan is incomplete, do not enter". Trigger lines
+  now read "Needs a 5m close above … / or a pullback to …".
+
 ## Leverage-aware stops — 1.8.0
 
 A structural stop that ignores leverage can sit beyond the liquidation price,

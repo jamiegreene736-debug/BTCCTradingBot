@@ -814,6 +814,7 @@ class SignalScanner:
         return sorted(
             (rows if rows is not None else self.decisions).values(),
             key=lambda d: (
+                d.state != "AVOID",
                 d.state.startswith("ENTER_"),
                 d.state.startswith("WATCH_"),
                 sum(c.passed for c in d.checks),
@@ -1017,9 +1018,9 @@ class SignalScanner:
             before = previous.state if previous else ""
             if decision.state == before:
                 continue
-            if decision.state.startswith(("WATCH_", "ENTER_")) or before.startswith(
+            if decision.state in ("AVOID",) or decision.state.startswith(
                 ("WATCH_", "ENTER_")
-            ):
+            ) or before.startswith(("WATCH_", "ENTER_")):
                 log.info(
                     "signal %s %s -> %s%s: %s",
                     symbol,
@@ -1159,6 +1160,15 @@ class SignalScanner:
             "price": decision.price,
             "actions": list(decision.actions),
             "projection": decision.projection,
+            "avoid": decision.avoid,
+            # The stop travels with every row that has a plan, so a level is
+            # never shown without the stop and the margin it risks.
+            "stop": decision.plan.stop if decision.plan else None,
+            "liquidation_estimate": (
+                decision.plan.liquidation_estimate if decision.plan else None
+            ),
+            "margin_loss_pct": decision.plan.margin_loss_pct if decision.plan else None,
+            "leverage": decision.plan.leverage if decision.plan else None,
         }
 
     def _featured_and_handoff(

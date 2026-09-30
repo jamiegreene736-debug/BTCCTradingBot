@@ -1777,7 +1777,7 @@ def test_checklist_length_is_stable_from_wait_to_entry():
     )
     assert [c.label for c in mixed.checks] == list(CHECKLIST_LABELS)
     assert mixed.state == "WATCH_LONG"
-    assert len(waiting.checks) == len(mixed.checks) == 21
+    assert len(waiting.checks) == len(mixed.checks) == 22
     assert [c.label for c in waiting.checks if c.group == "plan"] == [
         "Entry zone",
         "Stop size",
@@ -1798,6 +1798,7 @@ def test_checklist_length_is_stable_from_wait_to_entry():
         "1h bias / 15m structure",
         "BTC context",
         "Not extended",
+        "Blow-off guard",
         "Crowding headwind",
     ]
 
@@ -2242,7 +2243,7 @@ def test_travel_budget_scales_with_hold():
 def test_low_volatility_is_blocked_by_hold_window_gate():
     quiet = hourly_bars(drift=0.05, amp=0.1, span=0.12)
     two, _, _ = ready_decision(hourly=quiet)
-    assert two.state == "WATCH_LONG"
+    assert two.state != "ENTER_LONG"
     assert two.metrics["hourly_atr_pct"] < 0.35
     gate = next(c for c in two.checks if c.label == "Hold-window volatility")
     assert not gate.passed and "0.35-1.2%" in gate.detail and "120 min at 50x" in gate.detail
@@ -2268,13 +2269,14 @@ def test_not_extended_and_crowding_gates():
         return next(c for c in decision.checks if c.label == label)
 
     stretched = evaluate_intraday(at(2.5), frames, None, SignalSettings(), SignalsCfg(), NOW)
-    assert not check(stretched, "Not extended").passed
+    assert not check(stretched, "Not extended").passed and stretched.state == "AVOID"
     assert stretched.metrics["extension_atr"] == pytest.approx(2.5)
     assert check(decision, "Not extended").passed
     crowded = evaluate_intraday(
         replace(market, funding_rate=0.0006), frames, None, SignalSettings(), SignalsCfg(), NOW
     )
-    assert not check(crowded, "Crowding headwind").passed and crowded.state == "WATCH_LONG"
+    assert not check(crowded, "Crowding headwind").passed and crowded.state == "AVOID"
+    assert crowded.avoid == check(crowded, "Crowding headwind").detail
     # Negative funding pays the long; it is never a headwind.
     paid = evaluate_intraday(
         replace(market, funding_rate=-0.0006), frames, None, SignalSettings(), SignalsCfg(), NOW
@@ -2327,6 +2329,59 @@ def test_btc_context_not_opposed():
     assert missing.state == "WATCH_LONG"
 
 
+def test_too_volatile_market_is_avoided_not_watched():
+    decision, market, frames = ready_decision()
+    assert decision.state == "ENTER_LONG"
+    cfg = SignalsCfg()
+    cfg.trend.max_hourly_atr_pct = 0.1
+    avoided = evaluate_intraday(market, frames, None, SignalSettings(), cfg, NOW)
+    assert avoided.state == "AVOID" and avoided.side == "long"
+    assert avoided.actions == []
+    assert "above the 0.1% ceiling" in avoided.avoid
+    assert "of margin at 50x" in avoided.avoid
+    assert avoided.reasons[0].startswith("Do not long at 50x:")
+    # The plan (and its stop) is still computed for the card; the verdict wins.
+    assert avoided.plan is not None
+
+
+def test_blow_off_guard_avoids_a_pair_that_already_ran():
+    _, market, frames = ready_decision()
+    cfg = SignalsCfg()
+    cfg.trend.max_gain_4h_pct = 0.01
+    avoided = evaluate_intraday(market, frames, None, SignalSettings(), cfg, NOW)
+    assert avoided.state == "AVOID"
+    guard = next(c for c in avoided.checks if c.label == "Blow-off guard")
+    assert not guard.passed and "over 4h in the trade direction" in guard.detail
+    assert avoided.avoid == guard.detail
+    assert avoided.metrics["gain_4h_pct"] > 0.01
+
+
+def test_avoided_rows_rank_last_and_queue_rows_carry_the_stop(tmp_path):
+    scanner, first = scanner_with_entry(tmp_path)
+    second, _, _ = ready_decision("short")
+    second.symbol = "ETHUSDT"
+    second.state = "AVOID"
+    second.avoid = "1h ATR 5.91% is above the 1.2% ceiling"
+    second.actions = []
+    third, _, _ = ready_decision()
+    third.symbol = "SOLUSDT"
+    third.state = "WAIT"
+    third.plan = None
+    for d in (first, second, third):
+        d.as_of = NOW
+    scanner.decisions = {d.symbol: d for d in (first, second, third)}
+    with patch("time.time", return_value=NOW):
+        snap = scanner.snapshot()
+    assert [row["symbol"] for row in snap["queue"]] == ["BTCUSDT", "SOLUSDT", "ETHUSDT"]
+    btc, sol, eth = snap["queue"]
+    assert btc["stop"] == first.plan.stop
+    assert btc["margin_loss_pct"] == first.plan.margin_loss_pct
+    assert btc["liquidation_estimate"] == first.plan.liquidation_estimate
+    assert btc["leverage"] == first.plan.leverage and btc["avoid"] == ""
+    assert sol["stop"] is None
+    assert eth["avoid"].startswith("1h ATR") and eth["state"] == "AVOID"
+
+
 def test_watch_actions_name_trigger_interval_and_pullback_level():
     market, frames = market_frames()
     frames["5m"] = frames["5m"][:-1] + [
@@ -2334,9 +2389,9 @@ def test_watch_actions_name_trigger_interval_and_pullback_level():
     ]
     decision = evaluate_intraday(market, frames, None, SignalSettings(), SignalsCfg(), NOW)
     assert decision.state == "WATCH_LONG" and decision.plan is None
-    assert decision.actions[0]["label"] == "Long on 5m close above"
+    assert decision.actions[0]["label"] == "Needs a 5m close above"
     assert decision.actions[0]["price"] >= frames["5m"][-1].close
-    assert decision.actions[1]["label"] == "or pullback to"
+    assert decision.actions[1]["label"] == "or a pullback to"
     assert decision.actions[1]["price"] < frames["5m"][-1].close
     trigger = next(c for c in decision.checks if c.label == "Completed trigger candle")
     assert not trigger.passed and "completed 5m pullback reclaim" in trigger.detail
