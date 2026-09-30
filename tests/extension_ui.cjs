@@ -163,7 +163,7 @@ async function main() {
         plan: { side: 'short', entry: 80.37, stop: 81.6, target: 78, hold_hours: 2, quantity: 36.59, leverage: 50, profile: 'trend', trigger_interval: '5m' },
         current_stop: 81.6, state: 'HOLD_SHORT', suggestion: 'HOLD_SHORT',
         reason: 'Live: 80.21 · +0.12R · 15m short · 118 min left',
-        hold_confidence: 83, checked_at: now - 5,
+        hold_confidence: 83, checked_at: now - 200, evaluated_at: now - 5,
         mark_price: 80.574, unrealized_pnl: -7.318, exchange_position_id: 'HYPE1',
         checks: [
           { label: 'Fresh market data', passed: true, detail: 'Live suggestion needs a fresh market snapshot', group: 'risk' },
@@ -184,6 +184,8 @@ async function main() {
     assert.match(await page.locator('#bis-trades').textContent(), /HYPEUSDT/);
     assert.match(await page.locator('#bis-trades').textContent(), /Unrealized/);
     assert.match(await page.locator('#bis-trades').textContent(), /Held 2 min \/ 120 min max/);
+    assert.match(await page.locator('#bis-trades').textContent(), /Checked [5-9]s ago/);
+    assert.doesNotMatch(await page.locator('#bis-trades').textContent(), /not re-checked/);
     await page.locator('#bis-trades summary').click();
     assert.match(await page.locator('#bis-trades').textContent(), /Hold \/ close checks/);
     assert.match(await page.locator('#bis-trades').textContent(), /1h bias mixed/);

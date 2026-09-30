@@ -26,7 +26,10 @@ class TrackedTrade:
     best_price: float
     state: str = "HOLD"
     reason: str = "Monitoring the original trade plan"
+    # Bar cursor: start of the trigger candle the next evaluation resumes from.
     checked_at: int = 0
+    # Wall-clock time of the last hold/close evaluation; the overlay's "Checked".
+    evaluated_at: int = 0
     closed_at: int | None = None
     exit_price: float | None = None
     estimated_net_pnl: float | None = None
@@ -534,8 +537,11 @@ def evaluate_exit(
         failed = next((item for item in trade.checks if not item.passed), None)
         if failed:
             trade.reason = failed.detail
-    # Retain the start of the current trigger candle so its full range is examined once closed.
+    # checked_at keeps the start of the current trigger candle so its full range
+    # is examined once it closes. It is a bar cursor, not the check time: the
+    # overlay reads evaluated_at, which advances on every evaluation.
     trade.checked_at = max(trade.opened_at, now // interval_seconds * interval_seconds)
+    trade.evaluated_at = now
     return trade
 
 

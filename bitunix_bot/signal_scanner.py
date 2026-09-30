@@ -684,6 +684,7 @@ class SignalScanner:
                         "Imported live Bitunix position; alerts only, no exchange order"
                     ),
                     checked_at=opened,
+                    evaluated_at=now,
                     mark_price=position.mark,
                     unrealized_pnl=position.unrealized_pnl,
                     exchange_position_id=position.position_id,
@@ -1393,6 +1394,7 @@ class SignalScanner:
                 entry,
                 state=f"HOLD_{decision.side.upper()}",
                 checked_at=now,
+                evaluated_at=now,
                 exchange_stop_confirmed=(
                     str(values["kind"]) == "paper"
                     or values.get("exchange_stop_confirmed") is True
