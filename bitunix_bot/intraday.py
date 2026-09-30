@@ -170,6 +170,55 @@ def volatility(candles: list[Candle]) -> float:
     return float(atr(highs, lows, closes, period=14)[-1])
 
 
+PROJECTION_HORIZON_SECONDS = 300
+PROJECTION_LOOKBACK_SECONDS = 3600
+
+
+def next_price_projection(
+    candles: list[Candle],
+    interval: str,
+    price: float | None,
+    horizon_seconds: int = PROJECTION_HORIZON_SECONDS,
+) -> dict[str, float | int | str] | None:
+    """Projected price over the next few minutes, refreshed every scan.
+
+    The last hour's drift (least-squares slope of the trigger-interval closes)
+    is extrapolated over the horizon and clamped to one trigger ATR scaled by
+    the square root of the bars ahead; the same ATR band sits either side of
+    the result. It is a volatility envelope around recent momentum anchored to
+    the live price, not a forecast of direction.
+    """
+    seconds = INTERVALS.get(interval)
+    if not seconds or len(candles) < 15:
+        return None
+    anchor = (
+        float(price)
+        if isinstance(price, (int, float))
+        and not isinstance(price, bool)
+        and math.isfinite(price)
+        and price > 0
+        else candles[-1].close
+    )
+    atr_value = volatility(candles)
+    if not (anchor > 0 and math.isfinite(atr_value) and atr_value > 0):
+        return None
+    bars_ahead = horizon_seconds / seconds
+    lookback = max(6, min(len(candles), round(PROJECTION_LOOKBACK_SECONDS / seconds)))
+    closes = np.array([c.close for c in candles[-lookback:]])
+    slope = float(np.polyfit(np.arange(len(closes)), closes, 1)[0])
+    envelope = atr_value * math.sqrt(bars_ahead)
+    drift = max(-envelope, min(envelope, slope * bars_ahead))
+    expected = anchor + drift
+    return {
+        "horizon_minutes": round(horizon_seconds / 60),
+        "price": expected,
+        "low": expected - envelope,
+        "high": expected + envelope,
+        "drift_pct": drift / anchor * 100,
+        "basis": f"1h drift on {interval} closes, ±1 {interval} ATR",
+    }
+
+
 def session_vwap(candles: list[Candle], now: int) -> float | None:
     session = [c for c in candles if c.time >= now // 86400 * 86400]
     total = sum(c.volume for c in session)
@@ -336,6 +385,9 @@ class Decision:
     # Price levels that would move this card to the next state, for the
     # overlay's "what does it need" line: {label, price, price2?}.
     actions: list[dict[str, object]] = field(default_factory=list)
+    # Where price is projected to sit over the next few minutes; see
+    # next_price_projection. None until enough trigger candles exist.
+    projection: dict[str, float | int | str] | None = None
 
 
 def action(label: str, price: float, price2: float | None = None) -> dict[str, object]:

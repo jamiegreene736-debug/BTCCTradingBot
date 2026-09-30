@@ -26,6 +26,8 @@
 #bis-panel .bis-queue-row.active{border-color:#61d6be}
 #bis-panel .bis-need{display:block;color:#e6d38a;font-size:11px;font-weight:600;margin-top:2px}
 #bis-panel .bis-signal .bis-need{font-size:13px;margin:0 0 6px}
+#bis-panel .bis-next{display:block;color:#9fd0ff;font-size:11px;font-weight:600;margin-top:2px;cursor:help}
+#bis-panel .bis-signal .bis-next{font-size:12px;margin:0 0 6px}
 #bis-panel .bis-queue-row.long{border-left:3px solid #55d8af}#bis-panel .bis-queue-row.short{border-left:3px solid #fb929c}
 #bis-panel .bis-queue-row b{color:#93a8bf}#bis-panel .bis-queue-row strong{display:block;font-size:12px}
 #bis-panel #bis-selection{display:flex;gap:7px;align-items:center;margin:12px 0}

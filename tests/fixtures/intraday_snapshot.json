@@ -230,7 +230,15 @@
           "price": 98.64727009579343,
           "price2": 98.74394158683882
         }
-      ]
+      ],
+      "projection": {
+        "horizon_minutes": 5,
+        "price": 98.76,
+        "low": 98.58,
+        "high": 98.94,
+        "drift_pct": 0.06,
+        "basis": "1h drift on 5m closes, \u00b11 5m ATR"
+      }
     },
     "ETHUSDT": {
       "symbol": "ETHUSDT",
@@ -490,7 +498,15 @@
           "price": 98.64727009579343,
           "price2": 98.74394158683882
         }
-      ]
+      ],
+      "projection": {
+        "horizon_minutes": 5,
+        "price": 98.76,
+        "low": 98.58,
+        "high": 98.94,
+        "drift_pct": 0.06,
+        "basis": "1h drift on 5m closes, \u00b11 5m ATR"
+      }
     },
     {
       "symbol": "ETHUSDT",
