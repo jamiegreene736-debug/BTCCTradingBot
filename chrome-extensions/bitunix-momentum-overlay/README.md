@@ -1,4 +1,4 @@
-# Bitunix Intraday Signals — Chrome extension v1.8.3
+# Bitunix Intraday Signals — Chrome extension v1.8.4
 
 Long and short entry, hold, review and exit alerts for trades held 1-2 hours
 at 50x-class leverage. The backend computes the strategy; this extension displays it.
@@ -20,18 +20,24 @@ No extension action sends an exchange order or modifies a position.
    0.25% inside the estimated isolated liquidation; the card reports the
    highest leverage that still fits. **Scalp** fades parabolic exhaustion on
    1m bars, long or short, for a 1h or 2h hold up to the pair's leverage cap
-   (125x maximum); its stop sits just past the failed high or low and must fit
-   inside the estimated liquidation distance. Leverage never tightens the stop.
+   (125x maximum); its stop sits just past the failed high or low. Set the
+   **maximum loss of margin at the stop** (10-100%, default 50%). Every stop
+   is fitted to the leverage in use: it stays inside the estimated liquidation
+   distance and inside that margin budget, costs included. A structural stop
+   wider than the budget is pulled in toward entry; a budget that would put
+   the stop inside market noise blocks the entry and asks for lower leverage.
+   The card shows the loss of margin at the stop, whether the stop was
+   tightened, and the highest leverage the untightened structure fits.
 
 ## If the panel is empty
 
 - **Pump Fade Radar** or version **0.3.16** means old files or an old tab are
   still loaded. Reload the extension from this folder in `chrome://extensions`,
   then reload the Bitunix tab. The popup must say **Bitunix Intraday Signals**,
-  version **1.8.3**. Unpacked extensions do not refresh themselves after a git pull.
+  version **1.8.4**. Unpacked extensions do not refresh themselves after a git pull.
   Click **Reload** on this extension in `chrome://extensions`, then reload the
   Bitunix tab. A Bitunix in-page refresh is not enough. The panel header must
-  show **v1.8.3**, a drag grip, and ⤢. Drag the title or grip to move; drag the
+  show **v1.8.4**, a drag grip, and ⤢. Drag the title or grip to move; drag the
   bottom-right corner to resize. Empty header chrome lets Bitunix menus
   (timeframes, short/long tickets) receive clicks through the overlay.
 - Use the complete extension folder from one release. Mixing the old manifest

@@ -346,9 +346,46 @@ def test_execution_and_data_gates_block_entries(change):
     assert not decision.state.startswith("ENTER")
 
 
-def test_higher_leverage_does_not_tighten_stop():
+def test_higher_leverage_tightens_stop_to_the_margin_budget():
     _, market, frames = ready_decision()
-    # A 2.5% maintenance tier: the 0.35% stop fits 20x but not 50x.
+    market = replace(market, tiers=[Tier(0, 50_000, 0.004, 125)])
+
+    def plan_at(leverage, max_margin_loss_pct):
+        return evaluate_intraday(
+            market,
+            frames,
+            None,
+            SignalSettings(leverage=leverage, max_margin_loss_pct=max_margin_loss_pct),
+            SignalsCfg(),
+            NOW,
+        )
+
+    low, high = plan_at(20, 25), plan_at(50, 25)
+    assert low.state == "ENTER_LONG", low.reasons
+    assert high.state == "ENTER_LONG", high.reasons
+    assert low.plan.stop == low.plan.structural_stop
+    assert high.plan.structural_stop == low.plan.structural_stop
+    assert high.plan.stop > low.plan.stop
+    assert high.plan.margin_loss_pct == pytest.approx(25, abs=0.01)
+    assert low.plan.margin_loss_pct < 25
+    assert high.plan.liquidation_estimate < high.plan.stop
+    detail = next(c for c in high.checks if c.label == "Leverage ceiling").detail
+    assert "tightened" in detail and "planned margin loss" in detail
+    assert "tightened from" in next(c for c in high.checks if c.label == "Stop size").detail
+    # Sized to the tighter stop: same planned loss, larger notional.
+    assert high.plan.notional > low.plan.notional
+    assert high.plan.risk_usdt == pytest.approx(low.plan.risk_usdt, rel=0.05)
+    cramped = plan_at(50, 15)
+    assert cramped.state == "WATCH_LONG"
+    labels = {c.label: c for c in cramped.checks}
+    assert not labels["Stop size"].passed
+    assert not labels["Leverage ceiling"].passed
+    assert "reduce leverage" in labels["Leverage ceiling"].detail
+
+
+def test_leverage_that_cannot_open_is_blocked_not_widened():
+    _, market, frames = ready_decision()
+    # A 2.5% maintenance tier: 50x cannot post enough margin at all.
     market = replace(market, tiers=[Tier(0, 50_000, 0.025, 125)])
     low = evaluate_intraday(
         market, frames, None, SignalSettings(leverage=20), SignalsCfg(), NOW
@@ -356,15 +393,41 @@ def test_higher_leverage_does_not_tighten_stop():
     high = evaluate_intraday(
         market, frames, None, SignalSettings(leverage=50), SignalsCfg(), NOW
     )
-    assert low.plan.stop == high.plan.stop
-    assert low.plan.stop_pct == high.plan.stop_pct
-    assert low.plan.notional == pytest.approx(high.plan.notional)
     assert low.state == "ENTER_LONG", low.reasons
     assert high.state == "WATCH_LONG"
     ceiling = next(c for c in high.checks if c.label == "Leverage ceiling")
-    assert not ceiling.passed and "ceiling 30x" in ceiling.detail
+    assert not ceiling.passed and "reduce leverage" in ceiling.detail
     assert high.plan.max_leverage < 50
-    assert high.plan.max_leverage == 30
+    assert high.plan.structural_stop == low.plan.stop
+    assert high.plan.stop >= high.plan.structural_stop
+
+
+def test_stop_never_sits_beyond_the_liquidation_buffer():
+    _, market, frames = ready_decision()
+    market = replace(market, tiers=[Tier(0, 50_000, 0.004, 125)])
+    loose = evaluate_intraday(
+        market,
+        frames,
+        None,
+        SignalSettings(leverage=100, max_margin_loss_pct=100),
+        SignalsCfg(),
+        NOW,
+    )
+    plan = loose.plan
+    buffer = plan.entry * SignalsCfg().trend.liquidation_buffer_pct / 100
+    assert plan.stop - plan.liquidation_estimate >= buffer - 1e-9
+    assert plan.stop >= plan.structural_stop
+
+
+def test_planning_settings_accept_and_bound_the_margin_loss_budget():
+    base = {"planning_equity": 1000, "risk_pct": 0.5, "leverage": 75, "hold_hours": 2, "profile": "scalp"}
+    assert SignalSettings.from_dict(base).max_margin_loss_pct == 50
+    saved = SignalSettings.from_dict({**base, "max_margin_loss_pct": 35})
+    assert saved.max_margin_loss_pct == 35 and saved.leverage == 75
+    assert SignalSettings.from_dict(asdict(saved)) == saved
+    for bad in (5, 101, "50", True):
+        with pytest.raises(ValueError):
+            SignalSettings.from_dict({**base, "max_margin_loss_pct": bad})
 
 
 def test_select_targets_skips_too_close_and_beyond_hold_budget():
@@ -1036,6 +1099,23 @@ def test_imported_position_uses_the_pair_tier_when_available(tmp_path):
     )
     evaluate_exit(trade, decision, [], NOW, SignalsCfg())
     assert trade.state == "EXIT_LONG" and "liquidation buffer" in trade.reason
+
+
+def test_imported_position_stop_fits_its_real_leverage(tmp_path):
+    scanner, _ = _live_scanner(tmp_path, [])
+    scanner.client.position_tiers.return_value = [
+        {"startValue": 0, "endValue": 50000, "maintenanceMarginRate": 0.004, "leverage": 125}
+    ]
+    settings = SignalSettings(leverage=50, max_margin_loss_pct=40)
+    for side in ("long", "short"):
+        parsed = _hype_position(side, 75)
+        sign = 1 if side == "long" else -1
+        with patch("time.time", return_value=NOW):
+            plan = scanner._plan_for_position(parsed, None, settings, NOW)
+        assert plan.leverage == 75
+        assert sign * (plan.stop - plan.liquidation_estimate) > 0
+        assert plan.margin_loss_pct <= 40 + 1e-9
+        assert plan.stop_pct * 75 < 100
 
 
 def test_place_stop_refuses_paper_and_missing_keys(tmp_path):
@@ -2095,8 +2175,8 @@ def test_fifty_x_liquidation_arithmetic():
 
 
 def test_liquidation_fit_is_shared():
-    assert scalp_short.liquidation_fit is intraday.liquidation_fit
-    assert scalp_short.size_notional is intraday.size_notional
+    assert scalp_short.fit_plan_stop is intraday.fit_plan_stop
+    assert scalp_short.leverage_stop_detail is intraday.leverage_stop_detail
     assert travel_budget(0.64, 120, 1.5) == pytest.approx(1.5 * 0.64 * math.sqrt(2))
     assert travel_budget(0.64, 60, 1.5) == pytest.approx(0.96)
 

@@ -26,9 +26,10 @@ from .intraday import (
     TradePlan,
     action,
     ema_bias,
-    liquidation_fit,
+    fit_plan_stop,
+    leverage_stop_detail,
+    margin_loss_pct,
     session_vwap,
-    size_notional,
     trend,
     volatility,
 )
@@ -337,7 +338,7 @@ def build_scalp_plan(
             for label in SCALP_PLAN_LABELS
             if label != "Entry zone"
         ]
-    stop_pct = stop_distance / entry * 100
+    structural_pct = stop_distance / entry * 100
     # Longs pay positive funding, shorts pay negative; only a print against
     # the position is a cost.
     funding_pct = max(0.0, sign * market.funding_rate) * 100
@@ -349,28 +350,31 @@ def build_scalp_plan(
         )
     funding_cost_pct = funding_pct * funding_payments
     cost_pct = cfg.round_trip_fee_pct + cfg.slippage_pct + funding_cost_pct
-    risk_fraction = (stop_pct + cost_pct) / 100
-    qty, notional = size_notional(
-        settings.planning_equity,
-        settings.risk_pct,
-        settings.leverage,
-        risk_fraction,
-        entry,
-        market.quantity_step,
-    )
+    adverse_basis = min(0.0, sign * (market.mark - market.price))
     # Shared with the trend profile; the scalp searches up to the pair cap.
-    max_leverage, liquidation, tier = liquidation_fit(
-        market,
+    # The stop is fitted to the planned leverage: inside the estimated
+    # liquidation distance and inside the planned maximum margin loss.
+    fit = fit_plan_stop(
+        market.tiers,
         entry,
+        side,
         setup.stop,
-        notional,
         cost_pct,
         atr_value,
-        settings.leverage,
         scalp.liquidation_buffer_pct,
-        side,
+        adverse_basis,
+        settings,
+        market.quantity_step,
         cap=None,
     )
+    stop, qty, notional, tier, budget = fit.stop, fit.quantity, fit.notional, fit.tier, fit.budget
+    max_leverage = fit.ceiling
+    stop_distance = sign * (entry - stop)
+    stop_pct = stop_distance / entry * 100
+    risk_fraction = (stop_pct + cost_pct) / 100
+    loss_pct = margin_loss_pct(stop_pct, cost_pct, settings.leverage)
+    noise_floor = scalp.min_stop_atr * atr_value
+    outside_noise = stop_distance >= noise_floor
     hourly_atr = volatility(hourly)
     travel = scalp.travel_atr_multiple * hourly_atr
     q_closes = np.array([c.close for c in quarter])
@@ -387,32 +391,38 @@ def build_scalp_plan(
         reward, ratio = 0.0, 0.0
     stop_fits = (
         tier is not None
-        and settings.leverage <= max_leverage
+        and budget is not None
+        and settings.leverage <= tier.max_leverage
+        and outside_noise
         and stop_pct <= scalp.max_stop_pct
     )
-    if tier is None:
+    if tier is None or budget is None:
         liquidation_detail = "No position tier covers the planned notional"
-    elif settings.leverage > max_leverage:
-        liquidation_detail = (
-            f"{settings.leverage}x would liquidate before the stop; "
-            f"estimated maximum {max_leverage}x for a {stop_pct:.2f}% stop"
-        )
-    elif stop_pct > scalp.max_stop_pct:
+    elif settings.leverage > tier.max_leverage:
+        liquidation_detail = f"Pair allows {tier.max_leverage}x; planned {settings.leverage}x"
+    elif outside_noise and stop_pct > scalp.max_stop_pct:
         liquidation_detail = (
             f"Stop {stop_pct:.2f}% exceeds the {scalp.max_stop_pct:g}% scalp limit"
         )
     else:
-        liquidation_detail = (
-            f"Stop {stop_pct:.2f}% sits inside the {settings.leverage}x liquidation "
-            f"distance; ceiling {max_leverage}x"
+        liquidation_detail = leverage_stop_detail(
+            settings.leverage,
+            structural_pct,
+            stop_pct,
+            loss_pct,
+            budget,
+            max_leverage,
+            outside_noise,
         )
     checks.extend(
         [
             scalp_check("Stop inside liquidation", stop_fits, liquidation_detail),
             scalp_check(
                 "Stop outside noise",
-                stop_distance >= scalp.min_stop_atr * atr_value,
-                f"Stop must allow at least {scalp.min_stop_atr:g} ATR of the trigger bars",
+                outside_noise,
+                f"Stop must allow at least {scalp.min_stop_atr:g} ATR of the trigger bars"
+                if outside_noise
+                else f"Stop is {stop_pct:.2f}% away; at least {scalp.min_stop_atr:g} ATR of the trigger bars is needed",
             ),
             scalp_check(
                 "Mean-reversion target",
@@ -449,7 +459,7 @@ def build_scalp_plan(
         entry,
         low,
         high,
-        setup.stop,
+        stop,
         targets[0],
         targets[1] if len(targets) > 1 else None,
         qty,
@@ -462,14 +472,16 @@ def build_scalp_plan(
         cost_pct,
         funding_cost_pct,
         funding_payments,
-        liquidation,
+        budget.liquidation if budget is not None else None,
         max_leverage,
         settings.leverage,
         settings.hold_hours,
         bars[-1].time + interval + scalp.entry_expiry_seconds,
-        min(0.0, sign * (market.mark - market.price)),
+        adverse_basis,
         PROFILE,
         scalp.trigger_interval,
+        structural_stop=setup.stop,
+        margin_loss_pct=loss_pct,
     ), checks
 
 

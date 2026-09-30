@@ -128,14 +128,32 @@ def test_failed_high_after_climax_enters_short_with_stop_above_spike():
     assert decision.metrics["climax_volume"] >= 3
 
 
-def test_hundred_x_is_blocked_when_stop_sits_outside_liquidation():
+def test_hundred_x_tightens_the_stop_to_fit_the_leverage():
     market, frames, btc = pump_frames()
+    base = evaluate(market, frames, btc)
     decision = evaluate(market, frames, btc, replace(SETTINGS, leverage=100))
-    assert decision.state == "WATCH_SHORT"
+    assert decision.state == "ENTER_SHORT"
+    plan = decision.plan
+    assert plan.structural_stop == base.plan.structural_stop == base.plan.stop
+    assert plan.stop < plan.structural_stop
+    assert plan.liquidation_estimate > plan.stop
+    assert plan.margin_loss_pct <= SETTINGS.max_margin_loss_pct + 1e-9
+    assert plan.max_leverage < 100
     check = next(c for c in decision.checks if c.label == "Stop inside liquidation")
-    assert not check.passed
-    assert "would liquidate before the stop" in check.detail
-    assert decision.plan is not None and decision.plan.max_leverage < 100
+    assert check.passed and "tightened" in check.detail and "100x" in check.detail
+
+
+def test_leverage_that_leaves_no_stop_outside_noise_is_blocked():
+    market, frames, btc = pump_frames()
+    decision = evaluate(
+        market, frames, btc, replace(SETTINGS, leverage=125, max_margin_loss_pct=15)
+    )
+    assert decision.state == "WATCH_SHORT"
+    labels = {c.label: c for c in decision.checks}
+    assert not labels["Stop outside noise"].passed
+    assert not labels["Stop inside liquidation"].passed
+    assert "reduce leverage" in labels["Stop inside liquidation"].detail
+    assert decision.plan is not None and decision.plan.max_leverage < 125
 
 
 def test_leverage_tier_gate_blocks_pairs_below_the_planned_cap():
@@ -268,8 +286,7 @@ def test_scalp_config_validation_and_shipped_yaml():
 def test_liquidation_fit_is_shared():
     from bitunix_bot import intraday, scalp_short
 
-    assert scalp_short.liquidation_fit is intraday.liquidation_fit
-    assert scalp_short.size_notional is intraday.size_notional
+    assert scalp_short.fit_plan_stop is intraday.fit_plan_stop
     market, frames, btc = pump_frames()
     plan = evaluate(market, frames, btc).plan
     assert plan is not None and 50 <= plan.max_leverage < 100

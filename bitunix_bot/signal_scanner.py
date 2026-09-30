@@ -35,8 +35,12 @@ from .intraday import (
     estimate_liquidation,
     evaluate_intraday,
     fit_leverage,
+    fit_stop,
+    margin_loss_pct,
     next_price_projection,
     number,
+    select_tier,
+    stop_budget,
     upsert_check,
     volatility,
 )
@@ -532,9 +536,10 @@ class SignalScanner:
         liquidation: float | None = None
         max_leverage = leverage
         fallback: tuple[float, float] | None = None
+        planned_leverage = leverage
         if decision and decision.plan and decision.side == side:
             plan = decision.plan
-            stop = plan.stop
+            stop = plan.structural_stop if plan.structural_stop is not None else plan.stop
             target = plan.target
             target2 = plan.target2
             cost_pct = plan.cost_pct
@@ -546,6 +551,7 @@ class SignalScanner:
                 else None
             )
             max_leverage = plan.max_leverage
+            planned_leverage = plan.leverage
             profile, trigger_interval = plan.profile, plan.trigger_interval
         else:
             # No matching card: a structural stop is unknown, so plan the
@@ -567,10 +573,48 @@ class SignalScanner:
                 + entry * cost_pct / 100 * (1 + pc.min_reward_risk)
             )
             fallback = (atr_value, pc.liquidation_buffer_pct)
+        # Whatever the card planned, the working stop must fit the leverage
+        # the position was actually opened with: inside the estimated
+        # liquidation distance and inside the planned maximum margin loss.
+        structural = stop
+        notional = entry * quantity
+        pc = profile_cfg(self.cfg, profile)
+        bars = self.frames.get(position.symbol, {}).get(trigger_interval, [])
+        atr_value = volatility(bars) if len(bars) >= 15 else 0.0
+        tiers = self._position_tiers(position.symbol)
+        tier = select_tier(tiers, notional) if tiers else None
+        budget = stop_budget(
+            entry,
+            side,
+            leverage,
+            tier.maintenance_rate if tier is not None else 0.0,
+            cost_pct,
+            max(entry * pc.liquidation_buffer_pct / 100, atr_value * 0.5),
+            0.0,
+            settings.max_margin_loss_pct,
+        )
+        stop = fit_stop(entry, side, structural, budget)
+        if tier is not None:
+            liquidation = budget.liquidation
+            max_leverage = 0
+            for level in range(1, tier.max_leverage + 1):
+                candidate = stop_budget(
+                    entry,
+                    side,
+                    level,
+                    tier.maintenance_rate,
+                    cost_pct,
+                    max(entry * pc.liquidation_buffer_pct / 100, atr_value * 0.5),
+                    0.0,
+                    settings.max_margin_loss_pct,
+                )
+                if sign * (entry - structural) <= candidate.distance:
+                    max_leverage = level
+        elif fallback is None and (liquidation is None or leverage != planned_leverage):
+            liquidation = budget.liquidation
         if sign * (mark - stop) <= 0:
             stop = mark - sign * max(entry * 0.005, abs(entry - stop) * 0.15)
-        notional = entry * quantity
-        if fallback is not None:
+        if fallback is not None and tier is None:
             liquidation, max_leverage = self._fallback_liquidation(
                 position.symbol,
                 side,
@@ -611,6 +655,10 @@ class SignalScanner:
             0.0,
             profile,
             trigger_interval,
+            structural_stop=structural,
+            margin_loss_pct=margin_loss_pct(
+                abs(entry - stop) / entry * 100, cost_pct, leverage
+            ),
         )
 
     def _sync_exchange_positions(

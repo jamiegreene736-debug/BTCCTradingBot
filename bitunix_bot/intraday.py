@@ -362,6 +362,11 @@ class TradePlan:
     adverse_mark_basis: float = 0.0
     profile: str = PROFILE
     trigger_interval: str = "5m"
+    # Where the setup's structure put the stop before the leverage fit; equal
+    # to ``stop`` when no tightening was needed.
+    structural_stop: float | None = None
+    # Share of the isolated margin lost at the stop, costs included.
+    margin_loss_pct: float = 0.0
 
 
 @dataclass
@@ -721,6 +726,174 @@ def size_notional(
     return qty, qty * entry
 
 
+@dataclass(frozen=True)
+class StopBudget:
+    """How far from entry a stop may sit at the leverage in use.
+
+    ``distance`` is the widest allowed stop in price units: the smaller of the
+    room inside the estimated liquidation (less the safety buffer) and the
+    room the planned maximum margin loss leaves, costs included. ``binding``
+    names which of the two set it. ``liquidation`` is the estimate itself.
+    """
+
+    distance: float
+    liquidation: float
+    binding: str
+
+
+def stop_budget(
+    entry: float,
+    side: str,
+    leverage: int,
+    maintenance_rate: float,
+    cost_pct: float,
+    buffer: float,
+    adverse_basis: float,
+    max_margin_loss_pct: float,
+) -> StopBudget:
+    sign = 1 if side == "long" else -1
+    liquidation = estimate_liquidation(entry, leverage, cost_pct, maintenance_rate, side)
+    inside_liquidation = sign * (entry - liquidation) - buffer + adverse_basis
+    inside_margin = entry * (max_margin_loss_pct / leverage - cost_pct) / 100
+    if inside_margin < inside_liquidation:
+        return StopBudget(inside_margin, liquidation, "margin")
+    return StopBudget(inside_liquidation, liquidation, "liquidation")
+
+
+def margin_loss_pct(stop_pct: float, cost_pct: float, leverage: int) -> float:
+    """Share of the isolated margin lost when the stop fills, costs included."""
+    return (stop_pct + cost_pct) * leverage
+
+
+def fit_stop(entry: float, side: str, structural_stop: float, budget: StopBudget) -> float:
+    """Pull the structural stop toward entry until it fits the budget."""
+    sign = 1 if side == "long" else -1
+    if sign * (entry - structural_stop) <= budget.distance:
+        return structural_stop
+    return entry - sign * max(budget.distance, 0.0)
+
+
+@dataclass(frozen=True)
+class StopFit:
+    """A structural stop fitted to the planned leverage, with its sizing."""
+
+    stop: float
+    quantity: float
+    notional: float
+    tier: Tier | None
+    budget: StopBudget | None
+    # Highest leverage (up to the profile cap) whose budget still holds the
+    # untightened structural stop.
+    ceiling: int
+
+
+def fit_plan_stop(
+    tiers: Sequence[Tier],
+    entry: float,
+    side: str,
+    structural_stop: float,
+    cost_pct: float,
+    atr_value: float,
+    buffer_pct: float,
+    adverse_basis: float,
+    settings: SignalSettings,
+    quantity_step: float,
+    *,
+    cap: int | None = None,
+) -> StopFit:
+    """Fit the stop to the leverage in use and size the plan to it.
+
+    The stop must sit inside the estimated liquidation distance and inside the
+    planned maximum margin loss. A tighter stop raises the notional for the
+    same planned loss, which can move the maintenance tier, so the tier and
+    the stop are settled together.
+    """
+    sign = 1 if side == "long" else -1
+    buffer = max(entry * buffer_pct / 100, atr_value * 0.5)
+    stop = structural_stop
+    tier: Tier | None = None
+    budget: StopBudget | None = None
+    qty = notional = 0.0
+    for _ in range(3):
+        stop_pct = sign * (entry - stop) / entry * 100
+        qty, notional = size_notional(
+            settings.planning_equity,
+            settings.risk_pct,
+            settings.leverage,
+            max((stop_pct + cost_pct) / 100, 1e-9),
+            entry,
+            quantity_step,
+        )
+        next_tier = select_tier(tiers, notional)
+        if next_tier is None or next_tier == tier:
+            tier = next_tier
+            break
+        tier = next_tier
+        budget = stop_budget(
+            entry,
+            side,
+            settings.leverage,
+            tier.maintenance_rate,
+            cost_pct,
+            buffer,
+            adverse_basis,
+            settings.max_margin_loss_pct,
+        )
+        stop = fit_stop(entry, side, structural_stop, budget)
+    ceiling = 0
+    if tier is not None:
+        for level in range(1, min(cap or tier.max_leverage, tier.max_leverage) + 1):
+            candidate = stop_budget(
+                entry,
+                side,
+                level,
+                tier.maintenance_rate,
+                cost_pct,
+                buffer,
+                adverse_basis,
+                settings.max_margin_loss_pct,
+            )
+            if sign * (entry - structural_stop) <= candidate.distance:
+                ceiling = level
+    return StopFit(stop, qty, notional, tier, budget, ceiling)
+
+
+def leverage_stop_detail(
+    leverage: int,
+    structural_pct: float,
+    stop_pct: float,
+    loss_pct: float,
+    budget: StopBudget,
+    max_leverage: int,
+    fits: bool,
+) -> str:
+    """One line for the checklist on what the leverage did to the stop."""
+    ceiling = (
+        f"structure fits up to {max_leverage}x untightened"
+        if max_leverage
+        else "structure fits no leverage"
+    )
+    if not fits:
+        return (
+            f"{leverage}x leaves only a {max(0.0, stop_pct):.2f}% stop, inside market noise; "
+            f"reduce leverage ({ceiling})"
+        )
+    if stop_pct + 1e-9 < structural_pct:
+        cap = (
+            "planned margin loss"
+            if budget.binding == "margin"
+            else "estimated liquidation buffer"
+        )
+        return (
+            f"Stop tightened from {structural_pct:.2f}% to {stop_pct:.2f}% for {leverage}x by the {cap}; "
+            f"a stop-out loses {loss_pct:.0f}% of margin ({ceiling})"
+        )
+    return (
+        f"Structural stop fits {leverage}x; a stop-out loses {loss_pct:.0f}% of margin "
+        f"({ceiling})"
+    )
+
+
 def _target_levels(
     fifteen: list[Candle], hourly: list[Candle], side: Side, now: int
 ) -> list[float]:
@@ -764,6 +937,31 @@ def build_plan(
     hourly_atr = volatility(hourly)
     hold_minutes = settings.hold_hours * 60
     anchor = five[-1].close
+    funding_pct, payments = funding_cost(market, side, now, hold_minutes)
+    cost_pct = cfg.round_trip_fee_pct + cfg.slippage_pct + funding_pct
+    adverse_basis = min(0.0, sign * (market.mark - market.price))
+    structural_pct = stop_distance / entry * 100
+    fit = fit_plan_stop(
+        market.tiers,
+        entry,
+        side,
+        setup.stop,
+        cost_pct,
+        atr_value,
+        t.liquidation_buffer_pct,
+        adverse_basis,
+        settings,
+        market.quantity_step,
+        cap=PROFILES[PROFILE][2],
+    )
+    stop, qty, notional, tier, budget = fit.stop, fit.quantity, fit.notional, fit.tier, fit.budget
+    max_leverage = fit.ceiling
+    stop_distance = sign * (entry - stop)
+    stop_pct = stop_distance / entry * 100
+    risk_fraction = (stop_pct + cost_pct) / 100
+    lev = settings.leverage
+    loss_pct = margin_loss_pct(stop_pct, cost_pct, lev)
+    tightened = stop_pct + 1e-9 < structural_pct
     low, high = sorted(
         (
             anchor - sign * t.entry_pullback_atr * atr_value,
@@ -775,10 +973,6 @@ def build_plan(
             ),
         )
     )
-    funding_pct, payments = funding_cost(market, side, now, hold_minutes)
-    cost_pct = cfg.round_trip_fee_pct + cfg.slippage_pct + funding_pct
-    stop_pct = stop_distance / entry * 100
-    risk_fraction = (stop_pct + cost_pct) / 100
     floor = max(
         t.min_stop_atr * atr_value,
         t.min_stop_atr_15m * atr_15m,
@@ -805,63 +999,32 @@ def build_plan(
         reward = sign * (targets[0] - entry) / entry - cost_pct / 100
         ratio = reward / risk_fraction
         reward_detail = f"{ratio:.2f}R net; need {t.min_reward_risk:g}R"
-    qty, notional = size_notional(
-        settings.planning_equity,
-        settings.risk_pct,
-        settings.leverage,
-        risk_fraction,
-        entry,
-        market.quantity_step,
+    stop_ok = floor <= stop_distance and stop_pct <= t.max_stop_pct
+    fits = (
+        tier is not None
+        and budget is not None
+        and lev <= tier.max_leverage
+        and stop_distance >= floor
     )
-    max_leverage, liquidation, tier = liquidation_fit(
-        market,
-        entry,
-        setup.stop,
-        notional,
-        cost_pct,
-        atr_value,
-        settings.leverage,
-        t.liquidation_buffer_pct,
-        side,
-        cap=PROFILES[PROFILE][2],
-    )
-    lev = settings.leverage
-    fits = tier is not None and lev <= max_leverage
-    if tier is None:
+    if tier is None or budget is None:
         leverage_detail = "Notional falls outside every position tier"
     elif lev > tier.max_leverage:
         leverage_detail = f"Pair allows {tier.max_leverage}x; planned {lev}x"
     else:
-        liq = (
-            liquidation
-            if liquidation is not None
-            else estimate_liquidation(entry, lev, cost_pct, tier.maintenance_rate, side)
-        )
-        if fits:
-            room = sign * (setup.stop - liq) / entry * 100
-            leverage_detail = (
-                f"{lev}x fits: stop {stop_pct:.2f}% sits {room:.2f}% inside the "
-                f"estimated liquidation {liq:.5g}; ceiling {max_leverage}x "
-                f"(pair cap {tier.max_leverage}x)"
-            )
-        else:
-            dist = sign * (entry - liq) / entry * 100
-            leverage_detail = (
-                f"{lev}x would liquidate {dist:.2f}% away with a {stop_pct:.2f}% stop; "
-                f"estimated ceiling {max_leverage}x"
-                if dist > 0
-                else f"{lev}x cannot open: maintenance margin exceeds the posted margin; "
-                f"estimated ceiling {max_leverage}x"
-            )
+        leverage_detail = leverage_stop_detail(
+            lev, structural_pct, stop_pct, loss_pct, budget, max_leverage, fits
+        ) + f"; pair cap {tier.max_leverage}x"
+    liquidation = budget.liquidation if budget is not None else None
     checks = [
         make_check(
             "Entry zone", low <= entry <= high, "Wait for the entry zone; do not chase"
         ),
         make_check(
             "Stop size",
-            floor <= stop_distance and stop_pct <= t.max_stop_pct,
+            stop_ok,
             f"Stop {stop_pct:.2f}% must sit between {floor / entry * 100:.2f}% (5m noise) "
-            f"and {t.max_stop_pct:g}% ({lev}x limit)",
+            f"and {t.max_stop_pct:g}% ({lev}x limit)"
+            + (f"; tightened from {structural_pct:.2f}% for {lev}x" if tightened else ""),
         ),
         make_check(
             "Target inside hold budget",
@@ -903,7 +1066,7 @@ def build_plan(
         entry,
         low,
         high,
-        setup.stop,
+        stop,
         targets[0],
         targets[1] if len(targets) > 1 else None,
         qty,
@@ -921,9 +1084,11 @@ def build_plan(
         lev,
         settings.hold_hours,
         five[-1].time + INTERVALS[t.trigger_interval] + t.entry_expiry_seconds,
-        min(0.0, sign * (market.mark - market.price)),
+        adverse_basis,
         PROFILE,
         t.trigger_interval,
+        structural_stop=setup.stop,
+        margin_loss_pct=loss_pct,
     ), checks
 
 
