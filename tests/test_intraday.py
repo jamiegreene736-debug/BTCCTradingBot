@@ -1398,6 +1398,25 @@ def test_trailing_stop_is_not_applied_to_an_earlier_wick():
     assert trade.state == "HOLD_LONG"
 
 
+def test_evaluate_exit_stamps_the_check_time_separately_from_the_bar_cursor():
+    """The card's "Checked" reads evaluated_at; checked_at stays a candle cursor."""
+    from dataclasses import asdict
+
+    from bitunix_bot.intraday import INTERVALS
+
+    trade, decision, _ = new_trade()
+    interval = INTERVALS[trade.plan.trigger_interval]
+    at = NOW + 121
+    decision.as_of = at
+    evaluate_exit(trade, decision, [], at, SignalsCfg())
+    assert trade.evaluated_at == at
+    assert trade.checked_at == max(trade.opened_at, at // interval * interval)
+    assert trade.checked_at != trade.evaluated_at
+    assert asdict(trade)["evaluated_at"] == at
+    evaluate_exit(trade, decision, [], at + 15, SignalsCfg())
+    assert trade.evaluated_at == at + 15
+
+
 def test_parse_open_position_accepts_bitunix_short_fields():
     parsed = parse_open_position(
         {
