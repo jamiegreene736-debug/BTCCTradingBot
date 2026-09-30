@@ -349,8 +349,57 @@ async function main() {
     assert.match(await stalled.locator('#bis-status').textContent(), /Reload the extension/);
     assert.equal(await stalled.locator('[data-action="settings"]').last().isVisible(), true);
     await stalled.screenshot({ path: path.join(output, 'connection-error.png') });
+    // Picking a queue row on a Bitunix futures page opens that pair's chart
+    // and the reloaded panel comes back on the same card. Off Bitunix (the
+    // fixture pages above) a pick only selects the card.
+    assert.equal(page.url(), 'about:blank');
+    const chart = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+    await chart.route('https://www.bitunix.com/**', route => route.fulfill({ contentType: 'text/html', body: '<html><body><h1>Bitunix futures fixture</h1></body></html>' }));
+    await chart.addInitScript(data => {
+      // Storage is backed by localStorage so it survives the navigation, as chrome.storage.local does.
+      const read = () => JSON.parse(localStorage.getItem('mockStorage') || '{}');
+      const write = value => localStorage.setItem('mockStorage', JSON.stringify(value));
+      window.chrome = { runtime: {
+        getManifest: () => ({ version: '1.7.1' }),
+        sendMessage: async () => ({ payload: structuredClone(data) }),
+        onMessage: { addListener() {} },
+      }, storage: { local: {
+        get: async key => key ? { [key]: read()[key] } : read(),
+        set: async value => write({ ...read(), ...value }),
+        remove: async key => { const all = read(); delete all[key]; write(all); },
+      } } };
+    }, (() => { const copy = structuredClone(fixture); const now = Math.floor(Date.now() / 1000); for (const row of Object.values(copy.symbols)) { row.as_of = now; row.plan.expires_at = now + 900; } return copy; })());
+    const futures = await chart.newPage();
+    futures.on('pageerror', error => errors.push(error.message));
+    const inject = async () => {
+      await futures.addStyleTag({ path: path.join(root, 'content.css') });
+      await futures.addScriptTag({ path: path.join(root, 'content.js') });
+      await futures.locator('.bis-state').waitFor();
+    };
+    await futures.goto('https://www.bitunix.com/contract-trade/BTCUSDT');
+    await inject();
+    assert.match(await futures.locator('#bis-card').textContent(), /BTCUSDT/);
+    assert.equal(await futures.locator('#bis-card .bis-chart').count(), 0);
+    assert.match(await futures.locator('.bis-queue-row[data-symbol="ETHUSDT"]').getAttribute('title'), /open the ETHUSDT chart/);
+    await Promise.all([
+      futures.waitForURL('https://www.bitunix.com/contract-trade/ETHUSDT'),
+      futures.locator('.bis-queue-row[data-symbol="ETHUSDT"]').click(),
+    ]);
+    await inject();
+    assert.match(await futures.locator('#bis-card').textContent(), /ETHUSDT/);
+    assert.equal(await futures.locator('#bis-symbol').inputValue(), 'ETHUSDT');
+    assert.equal(await futures.evaluate(() => 'pendingSymbol' in JSON.parse(localStorage.getItem('mockStorage') || '{}')), false);
+    // Choosing another market from the dropdown offers an Open chart button.
+    await futures.locator('#bis-symbol').selectOption('BTCUSDT');
+    await Promise.all([
+      futures.waitForURL('https://www.bitunix.com/contract-trade/BTCUSDT'),
+      futures.locator('#bis-card .bis-chart').click(),
+    ]);
+    await inject();
+    assert.match(await futures.locator('#bis-card').textContent(), /BTCUSDT/);
+    await chart.close();
     assert.deepEqual(errors, []);
-    console.log('Browser checks passed: startup, malformed data, missing settings, disconnected worker, recovery, long/short cards, tracking, settings, mobile, stale data, escaping, collapse, move/resize, no exchange actions.');
+    console.log('Browser checks passed: startup, malformed data, missing settings, disconnected worker, recovery, long/short cards, tracking, settings, mobile, stale data, escaping, collapse, move/resize, no exchange actions, chart navigation.');
   } finally { await browser.close(); }
 }
 main().catch(error => { console.error(error); process.exitCode = 1; });

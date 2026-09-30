@@ -1,4 +1,4 @@
-# Bitunix Intraday Signals — Chrome extension v1.8.2
+# Bitunix Intraday Signals — Chrome extension v1.8.3
 
 Long and short entry, hold, review and exit alerts for trades held 1-2 hours
 at 50x-class leverage. The backend computes the strategy; this extension displays it.
@@ -28,10 +28,10 @@ No extension action sends an exchange order or modifies a position.
 - **Pump Fade Radar** or version **0.3.16** means old files or an old tab are
   still loaded. Reload the extension from this folder in `chrome://extensions`,
   then reload the Bitunix tab. The popup must say **Bitunix Intraday Signals**,
-  version **1.8.2**. Unpacked extensions do not refresh themselves after a git pull.
+  version **1.8.3**. Unpacked extensions do not refresh themselves after a git pull.
   Click **Reload** on this extension in `chrome://extensions`, then reload the
   Bitunix tab. A Bitunix in-page refresh is not enough. The panel header must
-  show **v1.8.2**, a drag grip, and ⤢. Drag the title or grip to move; drag the
+  show **v1.8.3**, a drag grip, and ⤢. Drag the title or grip to move; drag the
   bottom-right corner to resize. Empty header chrome lets Bitunix menus
   (timeframes, short/long tickets) receive clicks through the overlay.
 - Use the complete extension folder from one release. Mixing the old manifest
@@ -50,7 +50,10 @@ the default spot. Reloading the extension replaces any leftover immovable
 panel from an older script. Size and position persist in local Chrome storage.
 
 The top-five queue lists the current ranked markets with the time each state
-started. A countdown warning appears before the featured card switches to the
+started. Clicking a queue row shows that card and, when you are on a different
+pair, opens that pair's futures chart on Bitunix (the panel reloads with the
+same card selected). The card's **Open chart ↗** button does the same for the
+market chosen in the dropdown. Navigation only; no order ticket is touched. A countdown warning appears before the featured card switches to the
 next setup. Recent alerts keep WATCH and ENTER rows with full timestamps.
 Under the "what it needs" price line, each fresh row and the card show
 **Next 5 min ≈**: the last hour's drift on trigger-candle closes extrapolated
